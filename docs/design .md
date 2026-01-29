@@ -15,17 +15,24 @@
 Current Agentic coding systems (like Devin or standard RAG loops) typically rely on a single model checking itself ("Self-Reflection"). This is fragile; models often hallucinate that their own broken code works. Parallel sampling ("Best-of-N") generates many options but lacks a rigorous, automated way to select the winner without expensive human review.
 
 ### The Solution: A Market for Logical Claims
+<!-- WTF is a bounded trader - explain the lgoical induction paper & terminology and how it relates to this probelm -->
+
+
 This system is motivated by the _Logical Induction Criterion_, which states that a market of bounded traders will eventually assign probabilities to logical statements that respect the rules of deduction. In our context, "logical statements" are claims about the code's behavior (e.g., "This function crashes with null input").
 
-The core idea is that even if the market adjudicator isn't explicitly programmed with deductive rules (e.g., `(A -> B) AND A IMPLIES B`), the *financial incentive structure* pressures the market prices to behave *as if* they respect these rules. For example, the market will learn that "If Test A fails, the overall Goal is less likely to be met," because agents who bet that way will consistently win money. This emergent, incentive-driven reasoning is the key advantage we seek to harness.
-
 We replace the single "Judge" with a **Market**.
-*   **The Incentive:** Agents are not paid to "write code" directly. They are paid to make accurate **predictions about the outcomes of running code**. This is crucial. An agent's wealth increases if it correctly predicts that a piece of code will pass or fail a specific test.
+<!-- you need to make it more clear how sentence proposal generates wealth - why are agents incentivised to propose sentances? -->
+<!-- explain how sentences relate to actions like writing code or tests - remember that a sentence is not the same about an action - it is a belief instead -->
+<!-- this should be an iterative pro -->
+*   **The Incentive:** Agents are paid to make accurate predictions about the outcomes of running code
 *   **The Mechanism:** The system is built around two key actions:
     *   **Sentence Proposal:** Agents make formal claims about the code. A "sentence" can be a new code implementation, a new test case, or a static analysis claim. Each sentence is a tradeable asset in the market.
     *   **Verifier Proposal:** For a sentence to be resolvable, it needs a "verifier"—an executable script (like a unit test) that determines its truth value.
     If Agent A proposes new code, and Agent B proposes a verifier (a test) that breaks it, Agent B's bet against Agent A's code will pay off, transferring wealth from A to B.
-*   **The Result:** The system naturally filters out hallucinations and bugs because they are "expensive" to maintain against adversarial testing. Agents are incentivized to find flaws in each other's work, leading to a more robust final product.
+*   **The Result:** The system naturally filters out hallucinations because they are "expensive" to maintain against adversarial attacks.
+
+<!-- what ist he property of this system? hwo does this let us select good code and drive iteration on code? -->
+
 
 * * *
 
