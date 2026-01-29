@@ -3,8 +3,7 @@
 
 **Context:** A resource-competitive software engineering tournament implemented within the `OpenCode` terminal environment. 
 
-<!-- TODO: gemini - Provide a proper link to paper here -->
-**Theoretical Foundation:** Computable approximation of _Logical Induction_ (Garrabrant et al., 2016). 
+**Theoretical Foundation:** Computable approximation of _Logical Induction_ ([Garrabrant et al., 2016](https://arxiv.org/abs/1609.03543)). 
 
 * * *
 
@@ -15,171 +14,170 @@
 
 Current Agentic coding systems (like Devin or standard RAG loops) typically rely on a single model checking itself ("Self-Reflection"). This is fragile; models often hallucinate that their own broken code works. Parallel sampling ("Best-of-N") generates many options but lacks a rigorous, automated way to select the winner without expensive human review.
 
-### The Solution: A Logical Market
-<!-- TODO: gemini - This section needs a rewrite - explain how it relates to logical inductino and what advantages we may expect -->
+### The Solution: A Market for Logical Claims
+This system is motivated by the _Logical Induction Criterion_, which states that a market of bounded traders will eventually assign probabilities to logical statements that respect the rules of deduction. In our context, "logical statements" are claims about the code's behavior (e.g., "This function crashes with null input").
+
+The core idea is that even if the market adjudicator isn't explicitly programmed with deductive rules (e.g., `(A -> B) AND A IMPLIES B`), the *financial incentive structure* pressures the market prices to behave *as if* they respect these rules. For example, the market will learn that "If Test A fails, the overall Goal is less likely to be met," because agents who bet that way will consistently win money. This emergent, incentive-driven reasoning is the key advantage we seek to harness.
 
 We replace the single "Judge" with a **Market**.
-
-<!-- TODO: gemini - this "predict reality" statemetn is vacuous and not informative - give a better explanation - also you need to make it clear that sentance proposal and verifier proposal are key parts of this design - explain how this relates to LI -->
-*   **The Incentive:** Agents are not paid to "write code"; they are paid to **predict reality**. 
-*   **The Mechanism:** If Agent A writes code, and Agent B finds a test case that breaks it, Agent B captures Agent A's wealth.
-*   **The Result:** The system naturally filters out hallucinations because they are "expensive" to maintain against adversarial attacks.
+*   **The Incentive:** Agents are not paid to "write code" directly. They are paid to make accurate **predictions about the outcomes of running code**. This is crucial. An agent's wealth increases if it correctly predicts that a piece of code will pass or fail a specific test.
+*   **The Mechanism:** The system is built around two key actions:
+    *   **Sentence Proposal:** Agents make formal claims about the code. A "sentence" can be a new code implementation, a new test case, or a static analysis claim. Each sentence is a tradeable asset in the market.
+    *   **Verifier Proposal:** For a sentence to be resolvable, it needs a "verifier"—an executable script (like a unit test) that determines its truth value.
+    If Agent A proposes new code, and Agent B proposes a verifier (a test) that breaks it, Agent B's bet against Agent A's code will pay off, transferring wealth from A to B.
+*   **The Result:** The system naturally filters out hallucinations and bugs because they are "expensive" to maintain against adversarial testing. Agents are incentivized to find flaws in each other's work, leading to a more robust final product.
 
 * * *
 
-2\. Operational Workflow (Plain English)
-----------------------------------------
+## 2. Operational Workflow (Plain English)
 
 ### Phase A: Initialization (The Bootstrap)
 
-The system begins when the user provides a prompt  $P_{user}$  and a budget.
+The system begins when the user provides a prompt `$P_{user}$` and a budget.
 
-1.  **The Goal:** The system registers the Master Sentence  $\varphi _{goal}$ : _"The code satisfies the user's prompt."_
-<!-- Lets explain what the baseline agent might be  -->
-2.  **The Seed:** A baseline agent generates a "Strawman" code candidate ( $C_{0}$ ). It is likely buggy, but it provides the initial asset for trading.
-<!-- What are these M agents? - explain them briefly -->
-3.  **The Capital:**  $M$  agents are spawned and initialized with a bankroll of "Compute Credits" ( $W_{0}$ ).
+1.  **The Goal:** The system registers the Master Sentence $\varphi_{goal}$ : _"The code satisfies the user's prompt."_ This is the ultimate, (usually) unverifiable sentence that all other claims are proxies for.
+2.  **The Seed:** A **baseline agent** generates a "Strawman" code candidate ( $C_{0}$ ). This agent is typically a straightforward, non-adversarial LLM tasked with providing a plausible first attempt. It is likely buggy, but it provides the initial asset for trading.
+3.  **The Capital:** $M$ **competing agents** are spawned. These are distinct, stateful LLM sessions, each initialized with an equal bankroll of "Compute Credits" ( $W_{0}$ ). Their goal is to increase their wealth by making accurate predictions.
 
 ### Phase B: The Trading Round (The "Heartbeat")
 
-The orchestrator runs a discrete loop of **Inference and Trade**:
+The orchestrator (also called the **market arbitrator**) runs a discrete loop of **Inference and Trade**:
 
-<!-- Make it clear that agents might not need to recieve a snapshot of market prices or other agents beliefs - whether this is helpful or not would need to be deteriend via experimentation -->
-1.  **Observation:** Each agent receives a snapshot of the current market prices ( $P_{t}$ ) and the source code of active candidates.
-<!-- Oh - agents definitely need to have a view of sentences for them to communicate their beliefs about sentences -->
-<!-- Should agents also recieve the verifiers for sentences? -->
-2.  **Inference:** Agents "think" (using Chain-of-Thought) and use local tools (linters, debuggers) to analyze the assets.
-<!-- What if an agent failsto report a belief about a sentence? -->
-3.  **Belief Formulation:** Based on their analysis, agents form internal probability estimates (e.g., "I am 99% sure Candidate  $C_{0}$  fails on edge case  $X$ ").
-4.  **Action:**
-<!-- What is the incentive to register new sentences? is thsi something we can realisitcally expect agents to do organically or will they require prompting --> 
-<!-- all sentences need to have an associated verifier/oracle -->
-<!-- are agents allowed to produce code/ write tests w/o creating sentences? - should the market abitartor automatically create sentences for some actions - e.g. if a test is created it could create  -->
-    *   **Propose:** Agents pay a fee to register new sentences (Code or Tests).
-    *   **Bet:** Agents submit a **Belief Vector** to the market. Disagreements with the consensus price are treated as implicit bets.
-5.  **Market Update:** The Market Maker updates the consensus prices based on the new "Wealth-Weighted" beliefs.
-<!-- what about running verifiers? who does that - is it agents or arbitrator or both? -->
-<!-- doesn't arbitrator need to arbitarte wealth updates based on verifier results? -->
+1.  **Observation:** The arbitrator broadcasts the current market state to all active agents. This state includes:
+    *   The full set of active sentences $\Phi_t$ (code, tests, claims).
+    *   The source code and associated verifiers for these sentences.
+    *   The current consensus market prices $P_t$ for all sentences.
+    *   *(Design Choice): Whether to include other agents' belief vectors is an experimental parameter. Full transparency could lead to herd behavior, while opacity might reduce the market's efficiency.*
+2.  **Inference:** Agents use their internal "thought" processes (e.g., Chain-of-Thought) and local tools (linters, debuggers, static analyzers) to analyze the assets and form private beliefs about their validity.
+3.  **Belief Formulation:** Based on their analysis, agents form internal probability estimates for each sentence (e.g., "I am 99% sure Candidate $C_{0}$ fails on edge case $X$").
+4.  **Action:** Agents submit their desired actions to the arbitrator.
+    *   **Propose:** Agents can pay a fee $\gamma$ to register new sentences.
+        *   **Requirement:** Any new sentence $\varphi_{new}$ must be accompanied by a **verifier** $V_{\varphi_{new}}$ (e.g., a unit test). The arbitrator can and should reject sentences without a well-formed verifier. This prevents a glut of untestable claims. The primary incentive to register a sentence is to trade on it; if an agent discovers a flaw, it can propose a failing test case and bet heavily on its failure, expecting a large payout.
+        *   **Automation:** The arbitrator can be configured to automatically generate sentences for certain actions. For example, if an agent submits a piece of code that looks like a unit test, the arbitrator can wrap it in a formal sentence/verifier structure.
+    *   **Bet:** Agents submit a **Belief Vector** $b_i$ to the market, reporting their probability for each sentence. Disagreements with the consensus price $P_t$ are treated as implicit bets. If an agent fails to report a belief for a given sentence, it is assumed to be neutral (i.e., its belief matches the current market price, $b_{i,t}(\varphi) = P_t(\varphi)$), resulting in no bet.
+5.  **Market Update:** The arbitrator gathers all belief vectors and updates the consensus prices based on the new "Wealth-Weighted" beliefs of the agents.
 
 ### Phase C: Settlement (The Oracle)
 
-<!-- Make it clear where the verifiers come from -->
-Periodically, the system identifies sentences with **Executable Verifiers** (unit tests).
+Periodically, the arbitrator selects a batch of verifiable sentences for settlement.
 
-<!-- what to do for unexecutable verifiers/oracles? - we need to have at least one unverifiable sentence - - which is that the result satisfies user prompt-->
-<!-- also what to do w/ verifiers that do not run w/ in certain time/resource constraints -->
-1.  **Execution:** The system runs the verified code in a sandbox.
-2.  **Payout:** Wealth is redistributed. Agents who correctly predicted the outcome ("Surprised the market") gain wealth; those who were wrong lose it.
-3.  **Bankruptcy:** Agents who consistently lose bets or spend too much on inference without return are terminated.
+1.  **Execution:** The arbitrator, acting as the **Oracle**, executes the verifier script $V_\varphi$ for each selected sentence $\varphi$ in a sandboxed environment.
+    *   **Resource Constraints:** Verifiers are run with strict time and memory limits. If a verifier exceeds these limits, it is marked as `TIMEOUT`, and the sentence's truth value is considered unresolved for this round (effectively $\perp$). Agents can propose new sentences claiming a verifier will time out.
+    *   **Unexecutable Verifiers:** If a verifier fails to execute due to syntax errors or other issues, it is marked `ERROR` and the sentence is unresolved ($\perp$).
+2.  **Payout:** The arbitrator updates agent wealth based on the outcomes. For each sentence $\varphi$ that resolved to 0 or 1, the arbitrator calculates the payout $\Pi_i(\varphi)$ for each agent based on the scoring rule. Wealth is redistributed—agents who correctly predicted the outcome ("surprised the market") gain wealth from those who were wrong.
+3.  **Bankruptcy:** Agents whose wealth $W_i$ drops below a certain threshold are terminated and removed from the market. This ensures that consistently poor predictors are culled.
 
 * * *
 
 3\. The Agent as a Session Trace
 --------------------------------
 
-<!-- I think this lacks some specificity about how we might actually implement this in opencode -->
-In this implementation, an agent is not just a model API call; it is a **Stateful LLM Session**.
+In this implementation, an agent is not just a stateless model API call; it is a **Stateful LLM Session** managed by the tournament orchestrator.
 
-*   **Identity:** Each agent persists its "Chain of Thought" history, allowing for multi-step reasoning across market rounds.
-*   **The Toolset:**
-    *   `read_market_state()`: View prices and code.
-    <!-- i think this tool is already part of the opencode framework - we should not reimplemetn this -->
-    *   `run_local_tool(cmd)`: Execute private checks (e.g., `python -m py_compile candidate.py`).
-    *   `propose_sentence(desc, verifier)`: Register new claims.
-    *   `submit_belief(vector)`: Trade on existing claims.
+*   **Identity:** Each agent is a separate `opencode` session with its own persistent filesystem and history. This allows it to maintain a "Chain of Thought," build on previous analysis, and develop complex strategies across multiple market rounds.
+*   **The Toolset:** The tournament orchestrator provides a set of tools to each agent. These are wrappers around the core market mechanics.
+    *   `read_market_state()`: A custom tool that returns a structured representation (e.g., JSON) of the public market state (sentences, verifiers, prices).
+    *   `run_shell_command(command)`: The standard `opencode` tool for executing arbitrary shell commands in the agent's private workspace. This is used for all local analysis, such as running linters, compilers, or test suites on code candidates.
+    *   `propose_sentence(description, verifier_path)`: A custom tool that allows an agent to submit a new sentence to the market arbitrator. The `verifier_path` must point to an executable file in the agent's workspace.
+    *   `submit_belief(belief_vector)`: A custom tool for submitting the agent's belief vector to the arbitrator.
 
-> **Example Trace:**
-> 
-> *   **Thought:** "The Architect's code for the parser looks correct, but it uses a deprecated library."
-> *   **Local Action:** `run_local_tool("pip check candidate_a.py")`  $\to$  `Result: Dependency Error`.
-> *   **Proposal:** `propose_sentence("Candidate_A fails dependency check", verifier="assert check_deps()")`.
-> *   **Trade:** `submit_belief({"s_goal": 0.1, "s_dep_check": 0.99})` (Shorting the goal, Longing the failure).
->     
+> **Example Trace (within an `opencode` session):**
+>
+> *   **Thought:** "The market is pricing the current code candidate `candidate_a.py` suspiciously high. I'll check for common errors. I'll start by checking for dependency issues."
+> *   **Action:** `run_shell_command("pip check candidate_a.py")`
+> *   **Observation (from stdout):** `Result: aiohttp 3.8.1 has requirement multidict<7.0,>=4.5, but you have multidict 4.4.`
+> *   **Thought:** "Aha! A dependency conflict. This will cause a runtime error. I will create a verifier that demonstrates this, propose it as a new sentence, and bet heavily against the current candidate."
+> *   **Action:** `write_file('verify_dep.py', 'import pkg_resources; pkg_resources.require("aiohttp==3.8.1")')`
+> *   **Action:** `propose_sentence("Candidate_A fails dependency check", verifier_path="verify_dep.py")`
+> *   **Action:** `submit_belief({"candidate_a_valid": 0.01, "dep_check_fails": 0.99})` (Shorting the original code, Longing the new failure sentence).
 
 * * *
 
 4\. Formal System Specification
 -------------------------------
 
-The market is defined as a discrete-time dynamical system  $\Sigma =\left⟨A,\Phi ,W,O\right⟩$ .
+The market is defined as a discrete-time dynamical system $\Sigma = \langle A, \Phi, W, O \rangle$.
 
-*   ** $A$ **: The set of  $m$  Agents.
-<!-- Make it clear that each sentence requires a verifier -->
-*   ** $\Phi _{t}$ **: The set of active Logical Sentences at round  $t$ .
-*   ** $W_{t}\in R_{\ge 0m}$ **: The Wealth Vector (Compute Credits).
-<!-- define \perp -->
-*   ** $O:\Phi \to {0,1,\perp}$ **: The Oracle function.
+*   **$A$**: The set of $m$ Agents, $A = \{a_1, ..., a_m\}$.
+*   **$\Phi_t$**: The set of active Logical Sentences at round $t$.
+*   **$W_t \in \mathbb{R}_{\ge 0}^m$**: The Wealth Vector of compute credits for each agent at round $t$.
+*   **$O:\Phi \to \{0,1,\perp\}$**: The Oracle function, which resolves the truth value of a sentence.
 
 ### A. The Assets: Sentences & Oracles
 
-Every tradeable asset is a Sentence  $\varphi$ .
+Every tradeable asset is a **Sentence** $\varphi$, which is a claim about the system.
 
-<!-- how do we handle verifiers that dont actually verify the sentence? - thsi isn't clear to me -->
+*   **Sentence Requirement:** Every proposed sentence $\varphi$ must be accompanied by a **Verifier** $V_\varphi$. The arbitrator will reject sentences without a valid, executable verifier. This is a primary mechanism to prevent a flood of useless or untestable sentences.
+*   **Verifier-Sentence Mismatch:** It is possible for an agent to propose a verifier that does not logically correspond to its sentence description (e.g., a sentence "The code is bug-free" with a verifier `assert 1==1`). The system does *not* attempt to semantically validate this link. Instead, it is the responsibility of other agents in the market to identify this mismatch, propose a new sentence exposing the flawed verifier (e.g., "The verifier for $\varphi_{123}$ is trivial"), and bet accordingly. This is part of the adversarial process.
+*   **Computability:** While verifiers are required to be syntactically valid executable code, they may in practice be non-computable (e.g., contain an infinite loop) or exceed resource constraints. This is handled by the Oracle.
 
-<!-- Note that some sentences may have a supposedly computable verifier - but in practice this verifier could be non-computable - maybe infinite looop - maybe resoruce timeout -->
-*   **Verifiable Sentences ( $\varphi _{test}$ ):** Possess a computable verifier function  $V_{\varphi }$ . The Oracle  $O\left(\varphi \right)$  is the return value of  $Exec\left(V_{\varphi }\right)$ .
-<!-- how do we prevent a glut of unverifiable sentences? - this isn't clear to me - do we let agents propose unverifiable sentences? -->
-*   **Unverifiable Sentences ( $\varphi _{goal}$ ):** Do not possess a direct verifier (e.g., "This code is 'good'").  $O\left(\varphi \right)=\perp$  (Undefined).
-    *   _Note:_ In v0,  $\varphi _{goal}$  is settled only by proxy (correlation with tests). In v1, this could be settled by a Human Adjudicator.
+### B. The Oracle Function (O)
 
-### B. Consensus Price ( $P_{t}$ )
+The Oracle resolves sentences. For a given sentence $\varphi$:
+*   $O(\varphi) = 1$ if $Exec(V_\varphi)$ runs successfully and returns `True`.
+*   $O(\varphi) = 0$ if $Exec(V_\varphi)$ runs successfully and returns `False`.
+*   $O(\varphi) = \perp$ (Undefined) in all other cases. This includes:
+    *   The verifier $V_\varphi$ is syntactically invalid or fails to compile.
+    *   The verifier $V_\varphi$ exceeds its resource limits (timeout, memory).
+    *   The sentence is inherently unverifiable (like $\varphi_{goal}$).
+Bets on sentences that resolve to $\perp$ do not settle in the current round. The wealth invested in them is effectively frozen until they can be resolved, creating a strong incentive for agents to only propose and bet on decidable, efficient claims.
 
-<!-- Why - does this relate to kelly criterion? - i thin kyou need to explain how we go from beliefe -> kelly bet -> market price -->
-<!-- explain relation to logical induction -->
-The Market Price is the **Wealth-Weighted Centroid** of agent beliefs. Let  $b_{i,t}$  be the belief vector of agent  $a_{i}$ .
+### C. Consensus Price ( $P_{t}$ )
+
+The Market Price is the **Wealth-Weighted Centroid** of agent beliefs. Let $b_{i,t}(\varphi)$ be the belief (a probability estimate from 0 to 1) of agent $a_i$ on sentence $\varphi$ at time $t$.
 
 $$
 P_{t}\left(\varphi \right)=\frac{\sum_{i=1}^{m} W_{i,t}\cdot b_{i,t}\left(\varphi \right)}{\sum_{i=1}^{m} W_{i,t}}
 $$
 
-> **Interpretation:** A "Rich" agent (one with high historical accuracy) moves the market price significantly more than a "Poor" agent.
+*   **Relation to Logical Induction:** This formulation is directly inspired by the update rule in Logical Induction. The market's price represents the most credible current belief, giving more weight to agents who have proven to be more accurate in the past (i.e., have more wealth).
+*   **Relation to Kelly Criterion:** While not a direct implementation, the principle is related. The Kelly criterion suggests that bet size should be proportional to the edge (the difference between your belief and the odds). Here, an agent's "bet" is implicitly its belief's deviation from the market price. The wealth-weighting means agents with more capital (who have "survived" longer) are effectively making larger, more influential bets, similar to a Kelly gambler with a larger bankroll.
 
-### C. The Payout (Logarithmic Scoring)
-<!-- Why? provide explanatoin for this payout calculation -->
-<!-- explain relation to logical induction -->
-<!-- how are sentence bets adjudicated in cases where oracles aren't comptjuable or don't finish w/in the time/resource constraints -->
-Wealth is updated based on **Information Gain**. The payout  $\Pi _{i,t}$  for agent  $a_{i}$  given Oracle result  $1_{\varphi }$ :
+### D. The Payout (Logarithmic Scoring Rule)
 
-$$
-\Pi _{i,t}\left(\varphi \right)=\alpha \cdot W_{i,t}\cdot \left[1_{\varphi }\ln \left(\frac{b_{i,t}\left(\varphi \right)}{P_{t}\left(\varphi \right)}\right)+\left(1-1_{\varphi }\right)\ln \left(\frac{1-b_{i,t}\left(\varphi \right)}{1-P_{t}\left(\varphi \right)}\right)\right]
-$$
-
-*   **Implicit Betting:** Agents do not choose stakes. If  $b_{i}\ne P_{t}$ , a bet is automatically placed.
-*   **Zero-Sum Logic:** To gain wealth, an agent must **correct** the market. Agreeing with the consensus ( $b_{i}\approx P_{t}$ ) yields  $\Pi \approx 0$ .
-
-### D. Wealth Dynamics
-<!-- flesh this sectoin out  -->
-<!-- explain relation to logical induction -->
+Wealth is updated based on **Information Gain**. The payout $\Pi_{i,t}$ for agent $a_i$ on a single sentence $\varphi$ that resolves to an outcome $o_\varphi \in \{0,1\}$ is calculated using a logarithmic scoring rule (log loss):
 
 $$
-W_{i,t+1}=W_{i,t}+\Pi _{i,t}-Proposal Fees\gamma \cdot N_{props}​​-Inference Cost\lambda \cdot Tokens_{i}​​
+\Pi _{i,t}\left(\varphi \right)=\alpha \cdot W_{i,t}\cdot \left[o_{\varphi }\ln \left(\frac{b_{i,t}\left(\varphi \right)}{P_{t}\left(\varphi \right)}\right)+\left(1-o_{\varphi }\right)\ln \left(\frac{1-b_{i,t}\left(\varphi \right)}{1-P_{t}\left(\varphi \right)}\right)\right]
 $$
+
+*   **Why Logarithmic Scoring?** This is a "proper scoring rule," which means it incentivizes agents to report their true beliefs. The maximum expected payout occurs when an agent submits $b_i(\varphi)$ equal to their true internal probability estimate.
+*   **Implicit Betting & Zero-Sum:** Agents do not choose stakes. A bet is automatically placed if an agent's belief $b_i$ differs from the market price $P_t$. To gain wealth, an agent must **correct the market's belief**. If you agree with the market ($b_i \approx P_t$), your payout is approximately zero. The total payout across all agents for a given sentence is zero, meaning wealth is redistributed, not created.
+
+### E. Wealth Dynamics
+
+The wealth of an agent is updated each round according to the following formula:
+
+$$
+W_{i,t+1}=W_{i,t} + \sum_{\varphi \in \Phi_t, O(\varphi)\ne\perp} \Pi_{i,t}(\varphi) - (\gamma \cdot N_{i, props}) - (\lambda \cdot Tokens_{i, used})
+$$
+
+*   $W_{i,t}$: Wealth at the start of the round.
+*   $\sum \Pi_{i,t}(\varphi)$: The sum of payouts from all settled sentences in the round.
+*   $\gamma$: The fixed fee for proposing a new sentence.
+*   $N_{i, props}$: The number of sentences proposed by agent $a_i$ in the round.
+*   $\lambda$: The cost per token for the LLM inference used by agent $a_i$.
+*   $Tokens_{i, used}$: The number of tokens consumed by the agent in the round.
 
 * * *
 
 5\. Incentive Dynamics (Why it works)
 -------------------------------------
-<!-- how do thse properties derive from the lgoical inductoin paper? -->
-This formal structure creates specific evolutionary pressures:
+The formal structure described above is not arbitrary; it is designed to create specific evolutionary pressures that reward useful work and punish useless or malicious behavior. These properties are direct consequences of the market mechanism, which itself is an implementation of the principles in the Logical Induction paper.
 
-1.  **The "Sure-Thing" Sink:**
-    *   _Scenario:_ Agent A proposes `assert 1==1`.
-    *   _Outcome:_ Everyone agrees ( $b_{i}\approx 1.0$ ). The price  $P\approx 1.0$ . Payout is 0.
-    <!-- what is this proposal fee? is this enforced by market adjudicator - doe sthis relate to compute costs? - fine if you dont have an answer - you an list each optoin as a design choice -->
-    *   _Result:_ Agent A loses money (the Proposal Fee  $\gamma$ ) for wasting the market's time.
-2.  **The "Unverifiable" Lock:**
-    *   _Scenario:_ Agent B proposes "Code is elegant" (No Verifier).
-    *   _Outcome:_  $O\left(\varphi \right)=\perp$ . The bet never settles.
-    *   _Result:_ Agent B's wealth is effectively "frozen" in this belief, unable to generate returns, while their Inference Costs drain them.
-3.  **The "Adversarial" Jackpot:**
-    *   _Scenario:_ The market is optimistic ( $P\approx 0.9$ ). Agent C finds a "Black Swan" bug and bets  $b_{C}=0.05$ .
-    *   _Outcome:_ The test runs and fails ( $1=0$ ).
-    *   _Result:_ Agent C captures massive wealth from the optimistic agents. This incentivizes deep, creative testing over superficial agreement.
+1.  **The "Sure-Thing" Sink (Punishing Trivial Claims):**
+    *   _Scenario:_ Agent A proposes a sentence that is trivially true, like `assert 1==1`.
+    *   _Mechanism:_ The market will quickly converge on a price $P \approx 1.0$. Since all agents agree with the price ($b_i \approx P$), the information gain is near zero, and the resulting payout $\Pi$ from the scoring rule is also near zero.
+    *   _Result:_ Agent A receives no payout but has paid the non-refundable **Proposal Fee** $\gamma$. The agent loses wealth for wasting the market's time on a claim that provides no new information. This fee is enforced by the market arbitrator upon submission. It can be a fixed value or be dynamically tied to system load or the complexity of the proposed verifier.
 
-* * *
+2.  **The "Unverifiable" Lock (Punishing Ambiguity):**
+    *   _Scenario:_ Agent B proposes a sentence with no verifier, or a verifier that is non-terminating (e.g., "This code is 'elegant'").
+    *   _Mechanism:_ The market arbitrator either rejects the sentence outright (if no verifier is provided) or the Oracle resolves it to $\perp$ upon settlement (if the verifier times out). In either case, the bet never settles to a 0 or 1 outcome.
+    *   _Result:_ The agent's belief (and therefore, their implicit wealth stake) is "frozen" in this undecidable sentence. It cannot generate returns, yet the agent continues to incur **Inference Costs** ($\lambda$) each round just by participating in the market. This creates a strong pressure to only propose sentences that are efficiently and definitively verifiable.
 
+3.  **The "Adversarial" Jackpot (Rewarding Novel Insight):**
+    *   _Scenario:_ The market is broadly optimistic about a code candidate, pricing its validity at $P(\varphi_{valid}) \approx 0.9$. Agent C discovers a subtle, critical bug (a "Black Swan").
+    *   _Mechanism:_ Agent C proposes a new sentence $\varphi_{bug}$ with a verifier that triggers the bug. It simultaneously submits a belief vector betting against the code's validity and for its new bug sentence: $b_C(\varphi_{valid})=0.05$, $b_C(\varphi_{bug})=0.95$.
+    *   _Result:_ When the Oracle runs the verifier for $\varphi_{bug}$, it resolves to 1 (true). Agent C's belief was far from the market price, resulting in a large positive payout via the log scoring rule. It captures wealth from the mass of agents who were wrong. This creates the core incentive loop: agents are financially rewarded for finding and proving flaws, which drives the system toward more robust and correct code. This dynamic is a direct parallel to the "surprising sequence" condition in logical induction, where traders are rewarded for anticipating patterns the market has not yet priced in.
 
-<!-- i think this theoretical motivatoin should be placed elsewhere -->
-<!-- is there actually much deductoin in this system? I don't think so - the market adjucitaor is not establishing relatoinships b/w sentences  -->
-**Theoretical Motivation:** This system is motivated by the _Logical Induction Criterion_, which states that a market of bounded traders will eventually assign probabilities to logical statements that respect the rules of deduction. In software engineering, this means the market will converge on the realization that "If Test A fails, Goal B cannot be True," without needing a human to explicitly program that dependency.
 
