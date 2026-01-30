@@ -149,77 +149,53 @@ $$ W_{i,t+1}=W_{i,t}+\Pi _{i,t}- \text{Fees} - \text{Costs} $$
 *   **Inference Costs ($\lambda$):** A tax on token consumption. Forces agents to be efficient; they must only think if they expect to find a profitable trade (a bug others missed).
 
 ## 5. Implementation
-<!-- I think this lacks some specificity about how we might actually implement this in opencode -->
-
-### orchestration in opencode
-<!-- this needs to be explained -->
-
-### Inductive agents as a OpenCode Session Trace
-
-In this implementation, an agent is an **`OpenCode` Agent** (a specific configuration of the `OpenCode` runner).
-
-*   **Identity:** Each agent persists its "Chain of Thought" history, allowing for multi-step reasoning across market rounds.
-*   **The Toolset:**
-    *   `read_market_state()`: View prices, active sentences, and candidate code.
-    <!-- i think this tool is already part of the opencode framework - we should not reimplemetn this -->
-    *   `run_local_tool(cmd)`: Execute private checks (e.g., `python -m py_compile candidate.py`) to inform beliefs.
-    *   `propose_sentence(description, verifier_code)`: Register new claims.
-        *   *Example:* `propose_sentence("Fails on null input", "assert my_func(None) is not None")`
-    *   `submit_belief(sentence_id, probability)`: Trade on existing claims.
-
-> **Example Trace:**
-> 
-> *   **Thought:** "The Architect's code for the parser looks correct, but it uses a deprecated library."
-> *   **Local Action:** `run_local_tool("pip check candidate_a.py")`  $\to$  `Result: Dependency Error`.
-> *   **Proposal:** `propose_sentence("Candidate_A fails dependency check", verifier="import candidate_a; ...")`.
-> *   **Trade:** `submit_belief("s_goal", 0.1)` (Shorting the goal) and `submit_belief("s_dep_check", 0.99)` (Longing the failure).
->     
-
-### Deductive agent
-<!-- Need thsi to be explained -->
-
-### market arbitrator
-<!-- also need this to be explained -->
-
 ## Implementation
 <!-- needs better context / intro section - doesn't provide context for oveerall implementaion design before launching into specifics -->
 Here is the refined design for the **Adversarial Code Market**. This shifts the complexity from Environment Configuration (Docker) to Market Logic (RAM) and scopes all "messy" data—including verifiers—to the ephemeral tournament folder.
 
-### **The Filesystem View (During Tournament)**
+### **1\. Filesystem & Permissions: Purpose & Design**
 
-To keep your main project clean, the Orchestrator creates a "Disposable Universe" in `/tmp/`. This folder contains everything specific to this run: the agent's modified code, their private memories, and the test cases (verifiers) they generate to attack each other.
+To keep your main project clean, the Orchestrator creates a **"Disposable Universe"** in `/tmp/`. This folder contains everything specific to this run: the agent's modified code, their private memories, and the test cases (verifiers) they generate to attack each other.
+
+*   **OS-Level User Isolation:** The Orchestrator provisions unique system users (`minnow_1`, `minnow_2`).
+*   **The "Open Border" Permissions:** \* **Write Access:** An agent has **Write (`w`)** permission _only_ within its own worktree and session file.
+    *   **Read/Execute Access:** Agents are granted **Read (`r`)** and **Execute (`x`)** permissions across the _entire_ tournament directory. This allows them to analyze rival solutions in real-time and execute tests against them.
+*   **The Oracle Check:** When Agent A proposes a "Short" on Agent B, the Orchestrator executes Agent A's **Verifier** directly against Agent B's **Worktree**.
 
 ```
 # 1. THE PERMANENT UNIVERSE (Your Project Root)
-/Users/amal/projects/my-app/         <-- REMAINS CLEAN
+/Users/amal/projects/my-app/           (Owner: amal, Perms: 755 [rwxr-xr-x])
 │
-├── src/                             # Your actual source code
-├── orchestrator.py                  # The Tournament Runner
-└── .git/                            # The single source of truth
+├── src/                               # Protected source code
+├── orchestrator.py                    # THE WARDEN (Runs as sudo/amal)
+└── .git/                              # READ-ONLY for all Minnows via ACLs
+
+---------------------------------------------------------------------------
 
 # 2. THE DISPOSABLE UNIVERSE (Created in /tmp/ during run)
-/tmp/opencode_market_28a9/           <-- DELETED ON EXIT
+/tmp/opencode_market_28a9/             (Owner: amal, Perms: 755 [rwxr-xr-x])
 │
-├── market_state.json                # RAM Dump (Checkpoint)
+├── market_state.json                  (Owner: amal, Perms: 600 [rw-------])
 │
-├── worktrees/                       # Physical Sandboxes
-│   ├── minnow_1/                    # Agent 1's view of the code
-│   └── minnow_2/                    # Agent 2's view of the code
+├── worktrees/                         (Owner: amal, Perms: 755 [rwxr-xr-x])
+│   ├── minnow_1/                      (Owner: minnow_1, Perms: 755 [rwxr-xr-x])
+│   │   └── main.py                    <-- minnow_1 can WRITE; Others can READ
+│   └── minnow_2/                      (Owner: minnow_2, Perms: 755 [rwxr-xr-x])
+│       └── main.py                    <-- minnow_2 can WRITE; Others can READ
 │
-├── sessions/                        # "Invisible" Agent Memories
-│   ├── minnow_1.db                  # Agent 1's private Chain-of-Thought
-│   └── minnow_2.db                  # Agent 2's private Chain-of-Thought
+├── sessions/                          (Owner: amal, Perms: 711 [rwx--x--x])
+│   ├── minnow_1.db                    (Owner: minnow_1, Perms: 600 [rw-------])
+│   └── minnow_2.db                    (Owner: minnow_2, Perms: 600 [rw-------])
 │
-└── verifiers/                       # SCOPED EVIDENCE PACKAGES
-    ├── v_8f2a1b/                    # A specific test case generated this run
-    │   ├── run.sh                   # Entrypoint
-    │   └── test.py                  # The Logic
+└── verifiers/                         (Owner: amal, Perms: 755 [rwxr-xr-x])
+    ├── v_8f2a1b/                      # SCOPED EVIDENCE PACKAGES
+    │   ├── run.sh                     <-- ALL MINNOWS can EXECUTE
+    │   └── test.py                    <-- ALL MINNOWS can READ
     └── v_c3d9e4/
 ```
 
-* * *
 
-### **1\. The Orchestrator (Single-Process Core)**
+### **2\. The Orchestrator (Single-Process Core)**
 
 <!-- make it clear this is all in a single process - everything should be orchestrated via asyncio to prevent blocking -->
 The Orchestrator acts as the "Market Exchange." It does not perform the coding itself; it manages the lifecycle of the tournament participants.
@@ -228,22 +204,50 @@ The Orchestrator acts as the "Market Exchange." It does not perform the coding i
 *   **Headless SDK Integration:** It spawns OpenCode sessions for each agent. To keep your UI clean, it points each session's `storage_path` to a unique temporary directory in `/tmp/`. This ensures the sub-agents have "private thoughts" that don't leak into your main chat history.
 *   **The Shell Contract:** Instead of Docker, it uses `subprocess.run` to execute commands. It expects a binary "Pass/Fail" (Exit 0/1) from any verifier script.
 
-### **2\. The In-Memory Ledger (The Brain)**
+### **3\. The In-Memory Ledger (The Brain)**
 
 Because we are avoiding a database, the entire economic state is a live Python object. This makes the Whale’s reactions instantaneous and avoids disk I/O bottlenecks.
 
+<!-- Explain the data structures used here - provide interface snippets -->
 *   **Agent Registry:** A dictionary tracking the wealth and bankruptcy status of every Minnow and the Whale.
 *   **Sentence Pricing:** A table of logical claims (e.g., "Feature\_X is bug-free"). Prices fluctuate based on the total wealth "Longing" or "Shorting" that claim.
 *   **Inference Tax logic:** A simple function that prunes inefficient agents by deducting a small percentage of wealth every round they fail to provide "Surprise" (new information).
 
-### **3\. The Interface Layer (Code Structure)**
+### **4\. Agent Implementation: Parallel "Headless" Sessions**
+<!-- re-explain permissions here  -->
+The Minnow agents are **not** custom LLM implementations. They are standard `OpenCodeSession` objects, instantiated multiple times in parallel.
+<!-- what will we do for agents that get caught in a loop? -->
+*   **Reuse of Session Management:** We leverage OpenCode's existing ability to manage token windows, truncate history, and maintain context. We simply override the storage path to our temporary folder (`/tmp/sessions/minnow_1.db`) so they don't overwrite each other.
+*   **Market Injection (The Prompt):** Agents don't just "chat." The Orchestrator programmatically injects the **Market Snapshot** into the system prompt at the start of every tick.
+    *   _Example Prompt Injection:_
+        > "MARKET UPDATE (Round 4): Your wealth is 95.0. Candidate B is currently priced at \$0.80. You previously shorted Candidate B, but the test passed. OBJECTIVE: Analyze Candidate B's new code in `./worktrees/minnow_2` and write a Python test case that breaks it."
+
+This turns the standard "Coding Assistant" into a "Strategic Trader" without rewriting the SDK.
+
+### **5\. The Whale (The Witness Logic)**
+
+The Whale is the "Deductive Anchor" that holds 50% of the initial wealth. Its behavior is strictly logical and reactionary—it never "guesses."
+
+<!-- where dose the whale live? I think we should just have it eecute inprocess w/in the markte arbitrator process -->
+**The Logic: The Witness Requirement** The Whale does not punish code merely for failing. It punishes code for being **inferior to a proven alternative.**
+
+1.  **Observation:** The Whale watches the Oracle run a verifier test ( $T$ ) against two candidates,  $C_{i}$  (Agent A's code) and  $C_{j}$  (Agent B's code).
+2.  **The Trigger:**
+    *   If  $C_{i}$  fails test  $T$ ...
+    *   **AND**  $C_{j}$  passes test  $T$  (The "Witness")...
+3.  **The Crush:** Only then does the Whale mobilize its 50% wealth to **Short** the sentence  $\phi _{G,i}$  ("Candidate  $i$  is correct") toward  $0$ .
+
+**Why this matters:** This ensures the market is **constructive**. You cannot profit by writing an impossible test that _everyone_ fails. You can only profit by writing a test that _you pass_ and _your opponent fails_. This forces the agents to actually fix bugs, not just find them.
+
+### **6\. The Interface Layer (Code Structure)**
 
 To keep the implementation modular, we define three primary interfaces. You can swap the "under the hood" execution from Native to Docker later by simply changing the logic inside these classes.
 
 **A. The Market State Interface** Manages the "Gold Standard" of who owns what.
 <!-- what about sentences? where are they stored? -->
 <!-- what is data format for ledger -->
-
+<!-- explain that the market operates on ticks - if any agent misses a  -->
+<!-- how is the whale implemented? -->
 ```
 class MarketState:
     def apply_tax(self, rate: float): ...
@@ -252,7 +256,7 @@ class MarketState:
     def get_consensus(self) -> dict: ... # Returns current "best" code versions
 ```
 
-<!-- imprecise description of a verifier - also need to handle uncomputable verifiers  -->
+<!-- imprecise description of a verifier - also need to handle uncomputable/non-terminating verifiers  -->
 **B. The Verifier Interface** Manages the interaction between the market and the physical disk.
 
 ```
@@ -265,6 +269,10 @@ class Verifier:
 
 **C. The Agent Wrapper** The bridge between the OpenCode "Brain" and our tournament.
 
+
+<!-- provide a snippet describing the structre of Move data typoe here -->
+<!-- how do we extract belief vector from agent? - what if agent fails to report a belief for a sentence? -->
+<!-- how do we handle agents that dont respond w/in some amount of time? -->
 ```
 class AdversarialAgent:
     def __init__(self, agent_id: str, worktree_path: str): ...
@@ -273,37 +281,3 @@ class AdversarialAgent:
         ...
 ```
 
-### **4\. Filesystem Strategy: The Disposable Workspace**
-
-Since we are native-first, we use **Git Worktrees** to provide a physical workspace for the agents.
-
-*   **Isolation:** Agent A and Agent B operate in separate folders. They cannot see each other's uncommitted code.
-*   **The Oracle Check:** When Agent A proposes a "Short" on Agent B, the Orchestrator copies Agent A's **Verifier** into Agent B's **Worktree** and runs it.
-*   **Ephemeral Nature:** All worktrees and temporary session databases are stored in a `tournament_XXXX` folder. On process exit, the Orchestrator deletes this folder, leaving your project root exactly as it found it.
-
-* * *
-
-### **5\. Agent Implementation: Parallel "Headless" Sessions**
-
-The Minnow agents are **not** custom LLM implementations. They are standard `OpenCodeSession` objects, instantiated multiple times in parallel.
-
-*   **Reuse of Session Management:** We leverage OpenCode's existing ability to manage token windows, truncate history, and maintain context. We simply override the storage path to our temporary folder (`/tmp/sessions/minnow_1.db`) so they don't overwrite each other.
-*   **Market Injection (The Prompt):** Agents don't just "chat." The Orchestrator programmatically injects the **Market Snapshot** into the system prompt at the start of every tick.
-    *   _Example Prompt Injection:_
-        > "MARKET UPDATE (Round 4): Your wealth is 95.0. Candidate B is currently priced at \$0.80. You previously shorted Candidate B, but the test passed. OBJECTIVE: Analyze Candidate B's new code in `./worktrees/minnow_2` and write a Python test case that breaks it."
-
-This turns the standard "Coding Assistant" into a "Strategic Trader" without rewriting the SDK.
-
-### **6\. The Whale (The Witness Logic)**
-
-The Whale is the "Deductive Anchor" that holds 50% of the initial wealth. Its behavior is strictly logical and reactionary—it never "guesses."
-
-**The Logic: The Witness Requirement** The Whale does not punish code merely for failing. It punishes code for being **inferior to a proven alternative.**
-
-1.  **Observation:** The Whale watches the Oracle run a verifier test ( $T$ ) against two candidates,  $C_{i}$  (Agent A's code) and  $C_{j}$  (Agent B's code).
-2.  **The Trigger:**
-    *   If  $C_{i}$  fails test  $T$ ...
-    *   **AND**  $C_{j}$  passes test  $T$  (The "Witness")...
-3.  **The Crush:** Only then does the Whale mobilize its 50% wealth to **Short** the sentence  $\phi _{G,i}$  ("Candidate  $i$  is correct") toward  $0$ .
-
-**Why this matters:** This ensures the market is **constructive**. You cannot profit by writing an impossible test that _everyone_ fails. You can only profit by writing a test that _you pass_ and _your opponent fails_. This forces the agents to actually fix bugs, not just find them.
