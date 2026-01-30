@@ -122,6 +122,7 @@ In this implementation, an agent is an **`OpenCode` Agent** (a specific configur
 <!-- also need this to be explained -->
 
 ## Implementation
+<!-- needs better context / intro section - doesn't provide context for oveerall implementaion design before launching into specifics -->
 Here is the refined design for the **Adversarial Code Market**. This shifts the complexity from Environment Configuration (Docker) to Market Logic (RAM) and scopes all "messy" data—including verifiers—to the ephemeral tournament folder.
 
 ### **The Filesystem View (During Tournament)**
@@ -160,6 +161,7 @@ To keep your main project clean, the Orchestrator creates a "Disposable Universe
 
 ### **1\. The Orchestrator (Single-Process Core)**
 
+<!-- make it clear this is all in a single process - everything should be orchestrated via asyncio to prevent blocking -->
 The Orchestrator acts as the "Market Exchange." It does not perform the coding itself; it manages the lifecycle of the tournament participants.
 
 *   **Round Management:** It executes a discrete loop (The Tick). Each tick involves syncing file states, collecting "Sealed Moves," and executing verifiers.
@@ -179,6 +181,8 @@ Because we are avoiding a database, the entire economic state is a live Python o
 To keep the implementation modular, we define three primary interfaces. You can swap the "under the hood" execution from Native to Docker later by simply changing the logic inside these classes.
 
 **A. The Market State Interface** Manages the "Gold Standard" of who owns what.
+<!-- what about sentences? where are they stored? -->
+<!-- what is data format for ledger -->
 
 ```
 class MarketState:
@@ -188,6 +192,7 @@ class MarketState:
     def get_consensus(self) -> dict: ... # Returns current "best" code versions
 ```
 
+<!-- imprecise description of a verifier - also need to handle uncomputable verifiers  -->
 **B. The Verifier Interface** Manages the interaction between the market and the physical disk.
 
 ```
