@@ -5,9 +5,15 @@
 
 **Theoretical Foundation:** Computable approximation of _Logical Induction_ [Garrabrant et al., 2016](https://arxiv.org/abs/1609.03543).
 
-<!-- this is pretty dense and vague - what is goalB - what is test A etcc... -->
 **Theoretical Motivation:**
-This system is motivated by the _Logical Induction Criterion_, which states that a market of bounded traders will eventually assign probabilities to logical statements that respect the rules of deduction. In software engineering, this means the market will converge on the realization that "If Test A fails, Goal B cannot be True," without needing a human to explicitly program that dependency. The market aggregates "computational hunches" from diverse agents into a coherent probability distribution over code correctness.
+This system is motivated by the _Logical Induction Criterion_ [Garrabrant et al., 2016], which proves that a market of bounded traders will eventually assign probabilities to logical statements that respect the rules of deduction. 
+
+*Example:* Consider a sorting algorithm. 
+- **Sentence G (Goal):** "The function `sort(list)` correctly sorts any input."
+- **Sentence T (Test):** "The function returns `[1, 2]` when input is `[2, 1]`."
+- **Logic:** If $T$ is false (test fails), then $G$ must be false.
+
+In a Logical Induction market, agents who realize this implication first can profit by "shorting" $G$ as soon as they see $T$ fail, even if the system explicitly rewards $G$. This forces the market price of $G$ to drop, reflecting the code's broken state without a human arbiter manually flagging the bug.
 
 * * *
 
@@ -19,12 +25,15 @@ Current Agentic coding systems (like Devin or standard RAG loops) typically rely
 
 ### The Solution: A Logical Induction Market (Truth via Consensus)
 
-<!-- explain that we are looking not for code correctness but some unverifiable property of code "quality" - how well does it address the prompt - how "correct" is it - etc...  -->
-We replace the traditional "Judge" with a **Logical Induction Market**. This approach treats code correctness as a dynamic market consensus that converges through rigorous verification and continuous economic alignment.
+We replace the traditional "Judge" with a **Logical Induction Market**. 
 
-*   **The Foundation:** This framework treats "truth" as a state where no computationally bounded trader can find a "surprise" (an overlooked bug).
-<!-- this is not really true - agents are incentivized to fix bugs in their code and findd bugs in other pieces of code - explain how verifiable bugs can be linked to non veriable goals like "how well does this candiate address the prompt" -->
-*   **The Incentive:** Agents are incentivized to **accurately predict the output of verifiers**. This creates a collaborative ecosystem where agents act as _Architects_ (building and patching robust code) and _Auditors_ (proposing new verifiers to stress-test the market’s assumptions).
+**What is "Truth" here?**
+We represent code quality as a probability, not a boolean. "Truth" is not merely "compiles and runs," but a measure of **Market Confidence** that a candidate satisfies the user's prompt. This allows us to quantify soft goals (e.g., "Is this code clean?") alongside hard goals (e.g., "Does it pass test X?").
+
+*   **The Foundation:** The market converges to a state where no computationally bounded trader can find a profitable "surprise." If a bug exists that no agent can find (given their compute budget), the market treats the code as correct *for now*.
+*   **The Incentive:** Agents are incentivized to link **Verifiable Facts** (Test A passed/failed) to **Unverifiable Goals** (Candidate X is good).
+    *   If Agent A spots a bug in Candidate B, they don't just report it; they **bet against** Candidate B's goal sentence.
+    *   When the test runs and fails, the price of Candidate B crashes. Agent A profits from the "spread" between the market's optimism and the cold hard reality of the failed test.
 *   **Logical Anchoring (The Whale):** To ensure the market respects fundamental logic without using a rigid arbitrator, we introduce a **Deductive Agent** (The Whale). It possesses a wealth balance continuously rebalanced to equal the sum of all other agents. It enforces a "witnessed failure" rule: if a test fails one candidate but passes another, the Whale bets heavily against the failing candidate.
 *   **The Result:** The system naturally filters out fragile code and generates useful verifiers (tests).
 
@@ -48,21 +57,21 @@ The system begins when the user provides a prompt  $P_{user}$  and a budget $B$.
 The market operates in discrete rounds where agents privately analyze code, improve their own work, and share findings to update the consensus.
 
 1.  **Observation:** Agents observe the **Market Board**
-    - Source code for each candidate
-    <!-- terminology for sentence and verifier is not yet defined - its also not clear that in this context - verifier must be quickly and cheaply computable - so basically a unit test - when defining terminology give examples -->
-    - Sentences and their verifiers.
-    - Optionally, we may or may not expose prices ( $P_{t}$ ) for sentences to agents
-<!-- its a little confusing that verifirers are introduced here despits being mentioned eariler -->
-2.  **Inference (Private Sandbox):** Agents use credits to run private simulations. They write **Verifiers** (tests) to validate candidates and develop **Patches** for their own code.
+    - **Source Code:** The current version of each candidate solution.
+    - **Asset List (Sentences):** A list of active statements about the code (e.g., "Candidate 1 passes Test X").
+    - **Price History:** The current market probability ($P_t$) for each sentence.
+2.  **Inference (Private Sandbox):** Agents use credits to run private simulations. They write **Verifiers** (fast, cheap unit tests) to validate candidates and develop **Patches** for their own code.
 3.  **The Atomic Action:** Agents submit a **Sealed Envelope** containing three linked actions:
-<!-- give examples of verifiers - explain why a verifier that differentiates candiates is the most valuable -->
-<!-- link differentiating verifiers to the deductive betting agent and exlpain how that agent rewards differentiating tests -->
-    *   **Action A (Propose Verifier):** Introduce new evidence. Proposing a verifier requires a **Proposal Fee**. Proposers gain wealth not by the test itself (which is public), but by being the first to bet on the _implications_ of that test.
-<!-- explain how uopdating code (finding bugs in their own code) can enable agents to gain wealth  -->
-    *   **Action B (Update Candidate):** Agents may submit a **new version** ( $C_{k,v+1}$ ) to fix bugs they've discovered before auditors can exploit them.
-<!-- exxplain this belief vector -->
-    *   **Action C (Bet):** Submit a **Belief Vector**  $b$  (probabilities  $0\dots 1$ ).
-<!-- explain how the inductive agents (LLMs) and deductive whale calculate their beliefs -->
+    *   **Action A (Propose Verifier):** Introduce new evidence in the form of a unit test.
+        *   *Example:* `test_sort_empty_list.py`
+        *   *Value:* The most valuable verifiers are **Differentiators**—tests that pass one candidate but fail another. These trigger the Whale (Deductive Agent) to bet heavily against the loser, allowing the proposer (who bet early) to capture significant wealth.
+    *   **Action B (Update Candidate):** Agents may submit a **new version** ( $C_{k,v+1}$ ) to fix bugs.
+        *   *Incentive:* Fixing a bug allows the agent to bet *Long* (1.0) on their own candidate with certainty. If they don't fix it, an opponent will find the bug, bet *Short*, and drain their wealth.
+    *   **Action C (Bet):** Submit a **Belief Vector**  $b$ .
+        *   *Definition:* A map of `{ Sentence_ID: Probability }`. e.g., `{ "Cand1_is_Good": 0.05, "Test_Sort_Empty": 0.99 }`.
+        *   *Source:* 
+            *   **Inductive Agents (LLMs):** Derive beliefs from their internal logic and private test results ("I ran the test and it failed, so I bet 0.0").
+            *   **Deductive Whale:** Derives beliefs from witnessed contradictions ("Cand 1 failed a test that Cand 2 passed, so Cand 1 must be False").
 
 ### Phase C: Settlement
 
@@ -130,8 +139,8 @@ After payouts are processed, the system resets for the next tick:
 *   **Inference Tax:** The cost of tokens and thinking time is deducted from the agents.
 
 *   **Whale Reset:** The Whale's budget is re-indexed to  $W_{whale}=∑W_{agents}$ , maintaining the logical anchor.
+*   **Liquidation:** Agents whose wealth falls below a critical threshold (e.g., < 1% of initial stake) are marked as **Bankrupt**. They are removed from the active loop to conserve system compute resources.
 
-<!-- how are agents w/ no or very low funds cleaned up / liquidated? -->
 
 ### Phase D: Iteration & Convergence (Market Settlement)
 
@@ -143,7 +152,7 @@ The cycle resets. The market re-evaluates the candidates against the accumulated
 
 ## 3. Incentive Dynamics (Why it works)
 This formal structure creates specific evolutionary pressures:
-<!-- update the incentive dynamics to reflect the design evolutoin in the section above -->
+
 1.  **The "Sure-Thing" Sink:**
     *   _Scenario:_ Agent A proposes `assert 1==1`.
     *   _Outcome:_ Everyone agrees ( $b_{i}\approx 1.0$ ). The price  $P\approx 1.0$ . Payout is $\approx 0$.
@@ -152,14 +161,14 @@ This formal structure creates specific evolutionary pressures:
     *   _Scenario:_ Agent B proposes "Code is elegant" (No Verifier).
     *   _Outcome:_  $O\left(\varphi \right)=\perp$ . The bet never settles.
     *   _Result:_ Agent B's wealth is effectively "frozen" in this belief, unable to generate returns, while their Inference Costs drain them.
-3.  **The "Adversarial" Jackpot:**
-    *   _Scenario:_ The market is optimistic ( $P\approx 0.9$ ). Agent C finds a "Black Swan" bug and bets  $b_{C}=0.05$ .
-    *   _Outcome:_ The test runs and fails ( $1=0$ ).
-    *   _Result:_ Agent C captures massive wealth from the optimistic agents. This incentivizes deep, creative testing over superficial agreement.
+3.  **The "Adversarial" Jackpot (Witnessed Failure):**
+    *   _Scenario:_ The market is optimistic ( $P\approx 0.9$ ) about Candidate X. Agent C finds a bug that Candidate Y avoids.
+    *   _Action:_ Agent C bets Short on X ($b_C=0.05$) and Long on Y, then submits the test.
+    *   _Outcome:_ Test runs. X fails. Y passes. The Whale sees the Witness and sets $b_{whale,X}=0.0$.
+    *   _Result:_ The price of X crashes. Agent C captures massive wealth from the optimistic agents. This incentivizes deep, creative testing over superficial agreement.
 
 ## 4. Formal System Specification
 
-<!-- this needs an update to reflect design changes above -->
 The market is defined as a discrete-time dynamical system  $\Sigma =\left⟨A,\Phi ,W,O\right⟩$ .
 
 *   ** $A$ **: The set of  $m$  Agents.
@@ -185,7 +194,6 @@ $$ P_{t}\left(\varphi \right)=\frac{\sum_{i=1}^{m} W_{i,t}\cdot b_{i,t}\left(\va
 > **Interpretation:** A "Rich" agent (one with high historical accuracy) moves the market price significantly more than a "Poor" agent. This aligns with the Logical Induction formalism where the market probability dominates any bounded trader.
 
 ### C. The Payout (Logarithmic Scoring)
-<!-- similarly this needs an update -->
 
 Wealth is updated based on the **Logarithmic Scoring Rule**. This rule is "strictly proper," meaning an agent maximizes expected wealth *only* by reporting their true subjective probability.
 
@@ -204,9 +212,12 @@ $$ W_{i,t+1}=W_{i,t}+\Pi _{i,t}- \text{Fees} - \text{Costs} $$
 *   **Inference Costs ($\lambda$):** A tax on token consumption. Forces agents to be efficient; they must only think if they expect to find a profitable trade (a bug others missed).
 
 ## 5. Implementation
-## Implementation
-<!-- needs better context / intro section - doesn't provide context for oveerall implementaion design before launching into specifics -->
-Here is the refined design for the **Adversarial Code Market**. This shifts the complexity from Environment Configuration (Docker) to Market Logic (RAM) and scopes all "messy" data—including verifiers—to the ephemeral tournament folder.
+
+### Overview
+The system is designed as a **Single-Process Orchestrator** managing a "Disposable Universe" of files and sub-processes. 
+- **Concurrency:** Uses `asyncio` to manage multiple "Headless" agent sessions and non-blocking I/O (verifiers).
+- **Isolation:** Relies on OS-level file permissions and temporary directories rather than heavy Docker containers for this prototype.
+- **State:** The entire economic ledger lives in-memory (Python objects) for speed, with periodic JSON snapshots to disk for recovery/analysis.
 
 ### **1\. Filesystem & Permissions: Purpose & Design**
 
@@ -252,8 +263,7 @@ To keep your main project clean, the Orchestrator creates a **"Disposable Univer
 
 ### **2\. The Orchestrator (Single-Process Core)**
 
-<!-- make it clear this is all in a single process - everything should be orchestrated via asyncio to prevent blocking -->
-The Orchestrator acts as the "Market Exchange." It does not perform the coding itself; it manages the lifecycle of the tournament participants.
+The Orchestrator acts as the "Market Exchange" and runs as a single Python process using `asyncio` event loops. It does not perform the coding itself; it manages the lifecycle of the tournament participants.
 
 *   **Round Management:** It executes a discrete loop (The Tick). Each tick involves syncing file states, collecting "Sealed Moves," and executing verifiers.
 *   **Headless SDK Integration:** It spawns OpenCode sessions for each agent. To keep your UI clean, it points each session's `storage_path` to a unique temporary directory in `/tmp/`. This ensures the sub-agents have "private thoughts" that don't leak into your main chat history.
@@ -263,15 +273,18 @@ The Orchestrator acts as the "Market Exchange." It does not perform the coding i
 
 Because we are avoiding a database, the entire economic state is a live Python object. This makes the Whale’s reactions instantaneous and avoids disk I/O bottlenecks.
 
-<!-- Explain the data structures used here - provide interface snippets -->
-*   **Agent Registry:** A dictionary tracking the wealth and bankruptcy status of every Minnow and the Whale.
-*   **Sentence Pricing:** A table of logical claims (e.g., "Feature\_X is bug-free"). Prices fluctuate based on the total wealth "Longing" or "Shorting" that claim.
-*   **Inference Tax logic:** A simple function that prunes inefficient agents by deducting a small percentage of wealth every round they fail to provide "Surprise" (new information).
+**Core Data Structures:**
+*   **Agent Registry:** `Dict[AgentID, AgentState]`
+    *   `AgentState = { "wealth": float, "is_bankrupt": bool }`
+*   **Sentence Board:** `Dict[SentenceID, SentenceData]`
+    *   `SentenceData = { "text": str, "verifier_path": Optional[str], "current_price": float, "history": List[float] }`
+*   **Order Book:** `Dict[RoundID, List[Bet]]`
+    *   `Bet = { "agent_id": str, "sentence_id": str, "belief": float, "stake": float }`
 
 ### **4\. Agent Implementation: Parallel "Headless" Sessions**
-<!-- re-explain permissions here  -->
+
 The Minnow agents are **not** custom LLM implementations. They are standard `OpenCodeSession` objects, instantiated multiple times in parallel.
-<!-- what will we do for agents that get caught in a loop? -->
+
 *   **Reuse of Session Management:** We leverage OpenCode's existing ability to manage token windows, truncate history, and maintain context. We simply override the storage path to our temporary folder (`/tmp/sessions/minnow_1.db`) so they don't overwrite each other.
 *   **Market Injection (The Prompt):** Agents don't just "chat." The Orchestrator programmatically injects the **Market Snapshot** into the system prompt at the start of every tick.
     *   _Example Prompt Injection:_
@@ -283,7 +296,6 @@ This turns the standard "Coding Assistant" into a "Strategic Trader" without rew
 
 The Whale is the "Deductive Anchor" that holds 50% of the initial wealth. Its behavior is strictly logical and reactionary—it never "guesses."
 
-<!-- where dose the whale live? I think we should just have it eecute inprocess w/in the markte arbitrator process -->
 **The Logic: The Witness Requirement** The Whale does not punish code merely for failing. It punishes code for being **inferior to a proven alternative.**
 
 1.  **Observation:** The Whale watches the Oracle run a verifier test ( $T$ ) against two candidates,  $C_{i}$  (Agent A's code) and  $C_{j}$  (Agent B's code).
@@ -299,11 +311,12 @@ The Whale is the "Deductive Anchor" that holds 50% of the initial wealth. Its be
 To keep the implementation modular, we define three primary interfaces. You can swap the "under the hood" execution from Native to Docker later by simply changing the logic inside these classes.
 
 **A. The Market State Interface** Manages the "Gold Standard" of who owns what.
-<!-- what about sentences? where are they stored? -->
-<!-- what is data format for ledger -->
-<!-- explain that the market operates on ticks - if any agent misses a  -->
-<!-- how is the whale implemented? -->
-```
+*   **Sentences:** Stored in `self.sentences` (Dict).
+*   **Ledger:** Stored in `self.agents` (Dict).
+*   **Tick System:** The market operates on discrete `ticks`. If an agent misses a tick (times out), their previous beliefs are carried forward (Passive Hold) or they are forced to "sit out" (0 risk) depending on config.
+*   **The Whale:** Implemented as a specialized method `_calculate_whale_bets()` called at the end of every tick before price settlement.
+
+```python
 class MarketState:
     def apply_tax(self, rate: float): ...
     def update_price(self, sentence_id: str, new_bet: float): ...
@@ -311,10 +324,10 @@ class MarketState:
     def get_consensus(self) -> dict: ... # Returns current "best" code versions
 ```
 
-<!-- imprecise description of a verifier - also need to handle uncomputable/non-terminating verifiers  -->
 **B. The Verifier Interface** Manages the interaction between the market and the physical disk.
+*   **Timeout/Error Handling:** If `execute()` times out or crashes, it returns `Result.UNDEFINED` ($\perp$), ensuring no wealth transfer occurs for bad tests.
 
-```
+```python
 class Verifier:
     def __init__(self, test_script: str, cmd: str): ...
     def execute(self, target_worktree: str) -> bool:
@@ -324,15 +337,20 @@ class Verifier:
 
 **C. The Agent Wrapper** The bridge between the OpenCode "Brain" and our tournament.
 
+```python
+@dataclass
+class Move:
+    proposed_verifier: Optional[str]  # Path to new test or None
+    updated_code_path: Optional[str] # Path to new code or None
+    belief_vector: Dict[str, float]   # { "Sentence_ID": 0.0-1.0 }
 
-<!-- provide a snippet describing the structre of Move data typoe here -->
-<!-- how do we extract belief vector from agent? - what if agent fails to report a belief for a sentence? -->
-<!-- how do we handle agents that dont respond w/in some amount of time? -->
-```
 class AdversarialAgent:
     def __init__(self, agent_id: str, worktree_path: str): ...
+    
     async def get_next_move(self, market_snapshot: dict) -> Move:
-        # Returns a "Sealed Envelope" containing Code + Bets
+        # 1. Inject market_snapshot into Prompt
+        # 2. Await LLM response (JSON mode)
+        # 3. Parse JSON to Move object
+        # 4. Handle Timeout: If > 30s, return empty Move (Fold)
         ...
 ```
-
