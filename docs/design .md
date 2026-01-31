@@ -62,23 +62,76 @@ The market operates in discrete rounds where agents privately analyze code, impr
     *   **Action B (Update Candidate):** Agents may submit a **new version** ( $C_{k,v+1}$ ) to fix bugs they've discovered before auditors can exploit them.
 <!-- exxplain this belief vector -->
     *   **Action C (Bet):** Submit a **Belief Vector**  $b$  (probabilities  $0\dots 1$ ).
+<!-- explain how the inductive agents (LLMs) and deductive whale calculate their beliefs -->
 
+### Phase C: Settlement
 
-### Phase C: Settlement (The Oracle)
+The system resolves the pending logic and redistributes wealth based on empirical results. This phase converts "computational hunches" into concrete market consensus through a deterministic, scaling-aware betting engine.
 
-The system resolves the pending logic and redistributes wealth based on empirical results.
+* * *
 
-1.  **Execution:** The **Arbitrator** runs newly proposed Verifiers in a secure sandbox.
-2.  **The Whale’s Move:** The Whale observes the results. If a candidate  $C_{i}$  fails a test that a "witness"  $C_{j}$  passed, the Whale applies its massive wealth to short  $\varphi _{G,i}$  toward  $0$ .
-<!-- need to explain how belief vector is coverted to bets (kelly betting) - explain how these bets resolve into this market update -->
-3.  **Market Update:** The price  $P_{t+1}$  is calculated as the wealth-weighted average of all beliefs:
-    $$
-    P_{t+1}\left(\varphi \right)=\frac{∑\left(W_{i}\cdot b_{i,\varphi }\right)}{∑W_{i}}
-    $$
-4.  **Payout:**
-    *   **Auditors** who correctly predicted failures (via shorts) gain wealth from the Whale and failing Architects.
-    *   **Architects** who proactively patched and bet on their success gain credits as the market stabilizes.
-5.  **Rebalance:** The Whale's budget is reset to match the total current wealth of all agents, maintaining the logical anchor for the next tick.
+#### **1\. Belief-to-Bet Conversion (Unleveraged Multi-Asset Allocation)**
+
+To ensure market stability and prevent instant bankruptcy from hallucinations, the Orchestrator translates **Belief Vectors** into a **Fractional Kelly Portfolio**. This model treats the tournament as a collection of independent growth opportunities.
+
+*   **Inductive Agents (Minnows):**
+    *   **The Individual Stake:** For every sentence  $\phi _{j}$  in an agent’s sparse vector, the Orchestrator calculates the ideal **Kelly fraction** ( $f_{j\ast }$ ) based on the "Edge vs. Odds":
+        $$
+        f_{j\ast }=\frac{b_{i,j}-P_{t,j}}{P_{t,j}\left(1-P_{t,j}\right)}
+        $$
+    *   **The Multi-Asset Scale ( $\kappa$ ):** To remain **unleveraged**, the Orchestrator calculates the total absolute exposure ( $L=∑∣f_{j\ast }∣$ ). It then derives a scaling constant  $\kappa _{i}=\eta /\max \left(1,L\right)$ , where  $\eta$  is a risk-aversion parameter (e.g.,  $0.1$ ). This ensures the total capital at risk never exceeds the agent's available wealth.
+    *   **The Sparse Rule:** If an agent fails to report a belief for a sentence, they take **zero position** ( $\kappa _{i,j}=0$ ).
+*   **The Deductive Agent (Whale):**
+    *   **Standardized Participation:** The Whale is a peer in the betting engine. It possesses a belief vector  $b_{whale}$  and a massive wealth balance  $W_{whale}$ .
+    *   **The Witness Trigger:** The Whale updates its beliefs based on the **Arbitrator's** findings. If Candidate  $C_{i}$  fails a test that a witness  $C_{j}$  passed, the Whale sets  $b_{whale,\varphi _{G,i}}=0.0$ .
+    *   **The Impact:** Like any other agent, the Whale's influence is scaled by its  $\kappa _{whale}$ . Because it holds 50% of the total wealth, its  $0.0$  belief exerts massive pressure on the equilibrium price, effectively "crushing" failing candidates.
+
+* * *
+
+#### **2\. Execution: The Oracle Run**
+
+The **Arbitrator** executes newly proposed Verifiers in the secure `/tmp/` worktrees.
+
+*   **Logical Anchoring:** Results are binary (**Pass/Fail**). If a test is uncomputable or times out, it is treated as "Undefined" ( $\perp$ ) and no wealth changes hands.
+*   **Evidence Publishing:** Results are written to the `market_state.json` and the code is snapshotted into the `public_gallery/`.
+
+* * *
+
+#### **3\. Market Update: Scaling-Weighted Consensus**
+
+The new price  $P_{t+1}$  is the **Market Clearing Price**—the equilibrium point where the total "demand" from all Kelly-betting agents is zero. Because agents use fractional scaling, the price is the centroid of beliefs weighted by **Active Risk** ( $W_{i}\cdot \kappa _{i}$ ):
+
+$$
+P_{t+1}\left(\varphi \right)=\frac{∑\left(W_{i,t}\cdot \kappa _{i}\cdot b_{i,\varphi }\right)}{∑\left(W_{i,t}\cdot \kappa _{i}\right)}
+$$
+
+> **The Effect:** This ensures that cautious agents (low  $\kappa$ ) or those sitting out (zero  $\kappa$ ) move the price less than confident agents who have committed significant capital to their "alpha."
+
+* * *
+
+#### **4\. Payout: Scaled Linearized Redistribution**
+
+Wealth is redistributed based on the **Fractional Log-Scoring Rule**. Since we are using constrained, fractional Kelly betting, the payout is linearized to match the actual capital committed.
+
+$$
+\Delta W_{i}=\alpha \cdot W_{i,t}\cdot \kappa _{i}\cdot \left[1_{\varphi }\left(\frac{b_{i}-P_{t}}{P_{t}}\right)+\left(1-1_{\varphi }\right)\left(\frac{P_{t}-b_{i}}{1-P_{t}}\right)\right]
+$$
+
+*   **The "Skin in the Game" Match:** This formula represents the wealth change of an agent who only risked a fraction  $\kappa$  of their bankroll. It rewards reducing the market's "surprise" while keeping payouts strictly within the bounds of the agent's committed collateral.
+*   **Auditors:** Capture the "spread" between their skeptical belief and the optimistic market price when a bug is proven.
+*   **Architects:** Earn a "risk premium" as their price stabilizes toward  $1.0$ .
+
+* * *
+
+#### **5\. Rebalance**
+
+After payouts are processed, the system resets for the next tick:
+
+*   **Inference Tax:** The cost of tokens and thinking time is deducted from the agents.
+
+*   **Whale Reset:** The Whale's budget is re-indexed to  $W_{whale}=∑W_{agents}$ , maintaining the logical anchor.
+
+<!-- how are agents w/ no or very low funds cleaned up / liquidated? -->
 
 ### Phase D: Iteration & Convergence (Market Settlement)
 
@@ -90,7 +143,7 @@ The cycle resets. The market re-evaluates the candidates against the accumulated
 
 ## 3. Incentive Dynamics (Why it works)
 This formal structure creates specific evolutionary pressures:
-
+<!-- update the incentive dynamics to reflect the design evolutoin in the section above -->
 1.  **The "Sure-Thing" Sink:**
     *   _Scenario:_ Agent A proposes `assert 1==1`.
     *   _Outcome:_ Everyone agrees ( $b_{i}\approx 1.0$ ). The price  $P\approx 1.0$ . Payout is $\approx 0$.
@@ -106,6 +159,7 @@ This formal structure creates specific evolutionary pressures:
 
 ## 4. Formal System Specification
 
+<!-- this needs an update to reflect design changes above -->
 The market is defined as a discrete-time dynamical system  $\Sigma =\left⟨A,\Phi ,W,O\right⟩$ .
 
 *   ** $A$ **: The set of  $m$  Agents.
@@ -131,6 +185,7 @@ $$ P_{t}\left(\varphi \right)=\frac{\sum_{i=1}^{m} W_{i,t}\cdot b_{i,t}\left(\va
 > **Interpretation:** A "Rich" agent (one with high historical accuracy) moves the market price significantly more than a "Poor" agent. This aligns with the Logical Induction formalism where the market probability dominates any bounded trader.
 
 ### C. The Payout (Logarithmic Scoring)
+<!-- similarly this needs an update -->
 
 Wealth is updated based on the **Logarithmic Scoring Rule**. This rule is "strictly proper," meaning an agent maximizes expected wealth *only* by reporting their true subjective probability.
 
