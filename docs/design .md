@@ -49,76 +49,198 @@ The system begins when the user provides a prompt  $P_{user}$  and a budget $B$.
 
 ### Phase B: Atomic Trading Round
 
-The market operates in discrete rounds where agents privately analyze code, improve their own work, and share findings to update the consensus.
+The market operates in discrete, synchronous rounds where agents privately analyze code and commit to actions simultaneously. This prevents information leakage and ensures fair pricing.
 
-1.  **Observation:** Agents observe the **Market Board**
-    - Source code for each candidate
-    <!-- terminology for sentence and verifier is not yet defined - its also not clear that in this context - verifier must be quickly and cheaply computable - so basically a unit test - when defining terminology give examples -->
-    - Sentences and their verifiers.
-    - Optionally, we may or may not expose prices ( $P_{t}$ ) for sentences to agents
-<!-- its a little confusing that verifirers are introduced and defined here despits being mentioned eariler flow of infomration is out of order -->
-2.  **Inference (Private Sandbox):** Agents write **Verifiers** (tests) to validate candidates and develop **Patches** for their own code.
-3.  **The Atomic Action:** Agents submit a **Sealed Envelope** containing three linked actions:
-<!-- give examples of verifiers - explain why a verifier that differentiates candiates is the most valuable -->
-<!-- link differentiating verifiers to the deductive betting agent and exlpain how that agent rewards differentiating tests -->
-    *   **Action A (Propose Verifier):** Introduce new evidence. Proposing a verifier requires a **Proposal Fee**. Proposers gain wealth not by the test itself (which is public), but by being the first to bet on the _implications_ of that test.
-<!-- explain how uopdating code (finding bugs in their own code) can enable agents to gain wealth  -->
-    *   **Action B (Update Candidate):** Agents may submit a **new version** ( $C_{k,v+1}$ ) to fix bugs they've discovered before auditors can exploit them.
-<!-- exxplain this belief vector -->
-    *   **Action C (Bet):** Submit a **Belief Vector**  $b$  (probabilities  $0\dots 1$ ).
-<!-- explain how the inductive agents (LLMs) and deductive whale calculate their beliefs -->
+#### **1\. Observation: The Market Board**
+
+Agents query the `market_state.json` and `public_gallery/` to inspect the current "Deductive Database."
+
+*   **Code Candidates ( $C_{i}$ ):** Source code submitted by agents.
+<!-- not necessarily python unit tests - these are just fuinctoins that return true/false or a null value if they fail to run w/in a timeout or their process exits w/ an error code-->
+*   **Verifiers ( $V_{j}$ ):** Deterministic, computationally cheap Python unit tests.
+    *   _Example:_ `def test_empty_input(func): assert func([]) == []`.
+    *   _Differentiation:_ Valuable verifiers create a "Split" (some candidates pass, others fail).
+*   **Sentences ( $\varphi$ ):** Formal claims about the system.
+    *   _Verifier Validity ( $\varphi _{V,j}$ ):_ "Verifier  $V_{j}$  is a legitimate test of the problem statement."
+    *   _Master Sentence ( $\varphi _{G,i}$ ):_ $\phi_{G,k} = \text{"Candidate  }k\text{  best satisfies the user's prompt."}$
+
+#### **2\. Inference: Private Sandbox**
+
+Agents analyze code in private to generate alpha.
+
+*   **Self-Correction:** Agents patch their own code if they discover internal failures, protecting their stock price.
+*   **Attack Generation:** Agents write new Verifiers targeting specific bugs in rival code to "short" their Master Sentence.
+
+#### **3\. The Atomic Action: The Sealed Envelope**
+
+All participants—Inductive Agents (LLMs) and the Deductive Agent (Whale)—submit their actions simultaneously.
+
+*   **Action A (Propose): The Discovery Bond**
+    *   New assets are introduced via a **Forced Long Stake** (Escrow - this will be payed out at the end of the next market tick). The Proposer cannot hedge; they must back their own creation.
+    *   **Verifiers:** Staked at ** $P_{0}=0.5$ ** (The "Maximum Entropy" assumption).
+    *   **Code Candidates:** Staked at ** $P_{0}=1/N$ ** (The "Competition" assumption).
+    *   _Note:_ The Proposer acts as the initial Market Maker - the whale acts as the counterparty for this bond.
+*   **Action B (Update Candidate):** Submit a patch ( $C_{k,v+1}$ ) to fix bugs found during private inference.
+<!-- make it cclear that newly proposed sentences can't be bet on -->
+*   **Action C (Bet):** Submit a **Belief Vector** ( $b$ ) for tradeable assets.
+    *   **Inductive Agents (Minnows):** Use LLM reasoning to predict results.
+    *   **The Deductive Agent (Whale):** Submits beliefs based on test execution results. More details on this later.
 
 ### Phase C: Settlement
 
-The system resolves the pending logic and redistributes wealth based on empirical results. This phase converts "computational hunches" into concrete market consensus through a deterministic, scaling-aware betting engine.
+The system reconciles the Sealed Envelopes with physical execution results. This phase bridges the gap between "Inductive Hunch" (Search) and "Deductive Truth" (Execution).
 
 #### **1\. Execution: The Oracle Run**
 
-The **Arbitrator** executes newly proposed Verifiers in the secure `/tmp/` worktrees.
+The **Arbitrator** executes all Verifiers (both old and newly proposed) in secure `/tmp/` worktrees.
 
-*   **Logical Anchoring:** Results are binary (**Pass/Fail**). If a test is uncomputable or times out, it is treated as "Undefined" ( $\perp$ ) and no wealth changes hands.
-<!-- what is market state json? what is public gallery? -->
-*   **Evidence Publishing:** Results are written to the `market_state.json` and the code is snapshotted into the `public_gallery/`.
+*   **Logical Anchoring:** Results are binary (**Pass/Fail**). Uncomputable or timing-out tests are treated as Undefined ( $\perp$ ).
 
-#### **2\. Belief-to-Bet Conversion (Unleveraged Multi-Asset Allocation)**
+#### **2\. The Dual-Role Whale**
 
-To ensure market stability and prevent instant bankruptcy from hallucinations, the Orchestrator translates **Belief Vectors** into a **Fractional Kelly Portfolio**. This model treats the tournament as a collection of independent growth opportunities.
+The Whale is the "Market Engine" that provides liquidity for discovery and enforces the deductive consequences of code failure.
 
-*   **Inductive Agents (Minnows):**
-    *   **The Individual Stake:** For every sentence  $\phi _{j}$  in an agent’s sparse vector, the Orchestrator calculates the ideal **Kelly fraction** ( $f_{j\ast }$ ) based on the "Edge vs. Odds":
+*   **Role 1: The Deductive Enforcer (Propagation)**
+    *   The Whale updates its belief in Master Sentences ( $\varphi _{G,i}$ ) based on the **Validity-Weighted Failure** of each candidate.
+    *   **The Logic:** It calculates a "Log-Survival Score" ( $S_{i}$ ) for each candidate by summing the log-uncertainty of every test the candidate failed.
         $$
-        f_{j\ast }=\frac{b_{i,j}-P_{t,j}}{P_{t,j}\left(1-P_{t,j}\right)}
+        S_{i}=\sum_{j\in F_{i}} \ln \left(1-P\left(\varphi _{V,j}\right)\right)
         $$
-    *   **The Multi-Asset Scale ( $\kappa$ ):** To remain **unleveraged**, the Orchestrator calculates the total absolute exposure ( $L=∑∣f_{j\ast }∣$ ). It then derives a scaling constant  $\kappa _{i}=\eta /\max \left(1,L\right)$ , where  $\eta$  is a risk-aversion parameter (e.g.,  $0.1$ ). This ensures the total capital at risk never exceeds the agent's available wealth.
-    *   **The Sparse Rule:** If an agent fails to report a belief for a sentence, they take **zero position** ( $\kappa _{i,j}=0$ ).
-*   **The Deductive Agent (Whale):**
-    *   **Standardized Participation:** The Whale is a peer in the betting engine. It possesses a belief vector  $b_{whale}$  and a massive wealth balance  $W_{whale}$ .
-    *   **The Witness Trigger:** The Whale updates its beliefs based on the **Arbitrator's** findings. If Candidate  $C_{i}$  fails a test that a witness  $C_{j}$  passed, the Whale sets  $b_{whale,\varphi _{G,i}}=0.0$ .
-    *   **The Impact:** Like any other agent, the Whale's influence is scaled by its  $\kappa _{whale}$ . Because it holds 50% of the total wealth, its  $0.0$  belief exerts massive pressure on the equilibrium price, effectively "crushing" failing candidates.
+    *   **The Normalization:** It applies Softmax to these scores to derive its final belief vector ( $b_{whale,i}$ ), ensuring the sum of beliefs across all  $N$  candidates equals  $1.0$ .
+        $$
+        b_{whale,i}=\frac{e^{S_{i}}}{\sum_{k=1}^{N} e^{S_{k}}}
+        $$
+    *   **Impact:** If a candidate fails a test with High Validity ( $P\approx 1$ ),  $S_{i}$  drops massively (toward  $-\infty$ ). If it fails a "Rig" ( $P\approx 0$ ),  $S_{i}$  is unaffected ( $\ln \left(1\right)=0$ ).
+*   **Role 2: The Liquidity Counterparty for Code Discovery:** For new Code Candidates, the Whale acts as the counterparty to the Discovery Bond, entering with an initial belief of $1/N$. It maintains this belief as the "Prior of Competence" until evidence (test failures) shifts the Softmax score.
+*   **Role 3: The Liquidity Counterparty for Verifier Discovery (Market Making)**
+    *   The Whale is a **Persistent Market Maker**. For every proposed Verifier, the Whale maintains a **Dense, Neutral Position ( $b=0.5$ )**.
+    *   **The Anchor:** This  $0.5$  belief provides the "Market Gravity." When a Proposer stakes a Discovery Bond at  $1.0$ , the Whale’s counter-capital anchors the initial price at ** $P\approx 0.75$ **.
+    *   **The "Silent Market" Handler:** If no Minnows audit a test, the Whale’s  $0.5$  remains the only active belief once the bond matures. The price "decays" back to ** $0.5$ **.
+    *   **The Incentive:** In this  $0.5$  state, the Whale applies a "Standard Penalty" ( $\ln \left(0.5\right)\approx -0.69$ ) to the candidate. This forces rivals to either **Short** the test (if it's a rig) to protect their candidate, or **Long** it (if it's valid) to ensure their opponent stays crushed.
 
-#### **3\. Market Update: Scaling-Weighted Consensus**
+#### **3\. Belief-to-Bet Conversion (Tradeable Assets)**
 
-The new price  $P_{t+1}$  is the **Market Clearing Price**—the equilibrium point where the total "demand" from all Kelly-betting agents is zero. Because agents use fractional scaling, the price is the centroid of beliefs weighted by **Active Risk** ( $W_{i}\cdot \kappa _{i}$ ):
+The Orchestrator translates **Belief Vectors** into a **Fractional Kelly Portfolio**. This ensures that agents maximize growth while strictly preventing leverage (spending more than  $100%$  of their wealth).
+
+*   **The Constraint:** We apply a **Global Exposure Cap**. An agent's total committed capital across **Liquid Bets** and **Frozen Bonds** can never exceed their wallet balance ( $W_{i}$ ).
+*   **1\. Inductive Agents (Liquid Bets):**
+    *   **Calculated per Tick:** Minnows calculate their ideal Kelly fraction  $f_{j\ast }$  for every active sentence based on their current belief  $b_{i,j}$ .
+    *   **Sparse:** If no belief is reported,  $f_{j\ast }=0$ .
+*   **2\. The Proposer (The Bond Bet):**
+    *   **Treated as a Portfolio Item:** On the tick a test is proposed, the Bond is treated as a **Mandatory "Long" Bet**.
+    *   **Forced Parameters:**
+        *   **Belief ( $b_{bond}$ ):** Forced to  $1.0$  (clipped to  $1-ϵ$ ).
+        *   **Entry Price ( $P_{entry}$ ):** Fixed at the Whale's anchor ( $0.5$ ).
+        *   **Ideal Fraction ( $f_{bond}$ ):** Calculated via Kelly. Since  $b\approx 1.0$  and  $P=0.5$ , this results in an ideal stake of  $\approx 100%$  of wealth on the bond alone.
+*   **3\. The Deductive Agent (Whale):**
+    *   **Dense & Dual:**
+        1.  **For Verifiers:** The Whale acts as the liquidity anchor, forced to hold  $b=0.5$  for all active verifiers.
+        2.  **For Candidates:** The Whale maintains a dense belief vector derived from the **Softmax Survival Score**, ensuring it shorts candidates that fail valid tests.
+
+##### **Deep Dive: Clipped & Normalized Kelly Betting**
+
+This is the algorithm the Orchestrator runs every tick for every agent to ensure mathematical safety.
+
+###### **Step A: The Humility Clip (Safety)**
+
+Before calculating any bets, we clip beliefs to prevent "Infinite Confidence." Standard Kelly betting yields  $-\infty$  utility if you bet 100% and lose.
+
+*   **Input:** Raw belief  $b_{raw}$  (from  $0.0$  to  $1.0$ ).
+*   **Parameter:**  $ϵ$  (e.g.,  $0.01$ ).
+*   **Formula:**
+    $$
+    b_{clipped}=\min \left(\max \left(b_{raw},ϵ\right),1-ϵ\right)
+    $$
+*   _Result:_ An agent can never be more than 99% sure or less than 1% sure.
+
+###### **Step B: Ideal Kelly Fraction (Aggression)**
+
+We calculate how much of their wealth the agent _wants_ to bet on each sentence  $j$ , assuming it was the only bet in the world.
+
+*   **Formula:**
+    $$
+    f_{j\ast }=\frac{b_{clipped}-P_{t}}{P_{t}\left(1-P_{t}\right)}
+    $$
+*   _Note:_ If  $b<P_{t}$ ,  $f_{j\ast }$  becomes negative (a Short). If  $b>P_{t}$ , it is positive (a Long).
+
+###### **Step C: Portfolio Normalization (The Anti-Leverage Scaling)**
+
+We sum up the agent's total ambition to ensure they aren't over-betting.
+
+1.  **Calculate Total Exposure ( $L$ ):**
+    $$
+    L_{i}=\sum_{all bets j} ∣f_{j\ast }∣+\sum_{new bonds} ∣f_{bond}∣
+    $$
+2.  **Derive Scaling Factor ( $\kappa$ ):** We use a normalization constant to ensure the sum of absolute stakes never exceeds the agent's risk tolerance (or 100% of wealth).
+    $$
+    \kappa _{i}=\frac{1}{\max \left(1,L_{i}\right)}
+    $$
+    _(Note: You can replace the numerator  $1$  with a risk parameter  $\eta \approx 0.1$  if you want agents to be more conservative, but  $1$  is the hard constraint for "No Leverage")._
+
+###### **Step D: Execution (The "Real" Bet)**
+
+The actual tokens committed to the market are the **Scaled Stake**.
 
 $$
-P_{t+1}\left(\varphi \right)=\frac{∑\left(W_{i,t}\cdot \kappa _{i}\cdot b_{i,\varphi }\right)}{∑\left(W_{i,t}\cdot \kappa _{i}\right)}
+Stake_{i,j}=W_{i}\cdot \kappa _{i}\cdot f_{j\ast }
 $$
 
-> **The Effect:** This ensures that cautious agents (low  $\kappa$ ) or those sitting out (zero  $\kappa$ ) move the price less than confident agents who have committed significant capital to their "alpha."
+#### **4\. Market Update: Scaling-Weighted Consensus**
 
-#### **4\. Payout: Scaled Linearized Redistribution**
+The new price  $P_{t+1}$  is the **Market Clearing Equilibrium**—the precise point where the weight of the "Longs" (Bond + Believers) equals the weight of the "Shorts" (Skeptics + Whale).
 
-Wealth is redistributed based on the **Fractional Log-Scoring Rule**. Since we are using constrained, fractional Kelly betting, the payout is linearized to match the actual capital committed.
+We include the Bond explicitly in the consensus formula as a static "Long" force.
 
 $$
-\Delta W_{i}=\alpha \cdot W_{i,t}\cdot \kappa _{i}\cdot \left[1_{\varphi }\left(\frac{b_{i}-P_{t}}{P_{t}}\right)+\left(1-1_{\varphi }\right)\left(\frac{P_{t}-b_{i}}{1-P_{t}}\right)\right]
+P_{t+1}\left(\phi \right)=\frac{\left[Bond_{val}\cdot \left(1-ϵ\right)\right]​+\left[W_{w}\cdot \kappa _{w}\cdot 0.5\right]​+∑\left[W_{i}\cdot \kappa _{i}\cdot b_{i,\phi }\right]}{Bond_{val}+\left(W_{w}\cdot \kappa _{w}\right)+∑\left(W_{i}\cdot \kappa _{i}\right)​​}
 $$
 
-*   **The "Skin in the Game" Match:** This formula represents the wealth change of an agent who only risked a fraction  $\kappa$  of their bankroll. It rewards reducing the market's "surprise" while keeping payouts strictly within the bounds of the agent's committed collateral.
-*   **Auditors:** Capture the "spread" between their skeptical belief and the optimistic market price when a bug is proven.
-*   **Architects:** Earn a "risk premium" as their price stabilizes toward  $1.0$ .
+*   **Assumption:** **Instantaneous Clearing.** We assume all beliefs (including the frozen Bond) meet simultaneously at the end of the tick.
+*   **Dynamics:**
+    *   **The Anchor:** The Whale's massive wealth at  $0.5$  drags the price toward the middle.
+    *   **The Lift:** The Bond's high conviction pulls the price up.
+    *   **The Drift:** Minnows determine the final variance.
 
-#### **5\. Rebalance**
+#### **5\. Payout: Consensus-Delta Redistribution**
+
+Wealth transfer is calculated exclusively via **Price Deltas ( $\Delta P$ )**. There is no Oracle settlement. Profit is generated by being on the correct side of a price movement.
+
+$$
+\Delta W=Stake\cdot \left[\frac{P_{exit}-P_{entry}}{P_{entry}\left(1-P_{entry}\right)}\right]
+$$
+
+We handle Liquid Bets and Bonds differently based on **Time**:
+
+*   **A. Liquid Payouts (Minnows & Whale):**
+    *   Calculated **Tick-to-Tick**.
+    *    $P_{entry}$  is the price at Tick  $T$ .  $P_{exit}$  is the price at Tick  $T+1$ .
+    *   Wealth is credited/debited immediately to the agent's wallet.
+*   **B. Bond Payouts (The Delayed Bet):**
+    *   Calculated **Entry-to-Maturation**.
+    *   **Entry:** The Bond is "bought" at the **Whale's Anchor Price ( $0.5$ )**, _not_ the market clearing price. This is the Proposer's advantage for starting the market.
+    *   **Exit:** The Bond is "sold" at the **Maturation Price ( $P_{final}$ )** after  $N$  ticks (maybe just 1).
+    *   **The Calculation:**
+        $$
+        Bond Return=Bond_{val}+\left(Bond_{val}\cdot \frac{P_{final}-0.5}{0.5\left(1-0.5\right)}\right)
+        $$
+    *   **Example Results:**
+        *   If the market settles at  $0.9$  (Valid): The Proposer makes a profit ( $1.6\times$  return) for initiating a high-consensus test.
+        *   If the market settles at  $0.5$  (Ignored): The Proposer breaks even.
+        *   If the market settles at  $0.1$  (Spam): The Proposer loses nearly the entire bond to the Minnows who shorted it.
+
+##### **Core Market Assumptions**
+
+To make this formula valid in a peer-to-peer environment, the Orchestrator enforces the following dynamics:
+
+*   **Assumption 1: The Whale as the "Liquidity Sink"** In a standard market, you need a buyer to exit a position. Here, the **Whale** is structurally forced to be the counterparty to every bet at its current belief ( $0.5$  for verifiers). It acts as an "infinite depth" reservoir of tokens that informed agents can "mine" by providing evidence that shifts the consensus.
+*   **Assumption 2: Zero-Sum Clearing** The Orchestrator acts as a central clearing house. We assume that for every token gained by an "Informed" agent, a token is deducted from the "Uninformed" (the Whale) or the "Incorrect" (rivals). At the end of every tick, the sum of all wealth transfers across the system is exactly zero.
+    $$
+    ∑\Delta W_{i}=0
+    $$
+*   **Assumption 3: The Discovery Edge (Information Alpha)** We assume that proposing a new test is a value-add. Therefore, the Bond's  $P_{entry}$  is fixed at **0.5**, even though the act of proposing it immediately "naps" the price higher. This allows the Proposer to capture the "Slippage Profit" of their own discovery—a reward for being the first to bring that information to the market.
+*   **Assumption 4: Consensus as "Proximal Truth"** Because there is no Oracle, we assume that the market clearing price ( $P$ ) _is_ the truth for the purpose of settlement. Profit is not achieved by being "Right" in an absolute sense, but by being **Right sooner than the rest of the market.** If you bet "Long" and the consensus moves toward you, you have effectively "proven" your point to the capital-weighted majority.
+
+#### **6\. Rebalance**
 
 After payouts are processed, the system resets for the next tick:
 
