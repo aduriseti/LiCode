@@ -24,8 +24,9 @@ We replace the traditional "Judge" with a **Logical Induction Market**. This app
 
 *   **The Foundation:** This framework treats "truth" as a state where no computationally bounded trader can find a "surprise" (an overlooked bug).
 <!-- this is not really true - agents are incentivized to fix bugs in their code and findd bugs in other pieces of code - explain how verifiable bugs can be linked to non veriable goals like "how well does this candiate address the prompt" -->
-*   **The Incentive:** Agents are incentivized to **accurately predict the output of verifiers**. This creates a collaborative ecosystem where agents act as _Architects_ (building and patching robust code) and _Auditors_ (proposing new verifiers to stress-test the market’s assumptions).
-*   **Logical Anchoring (The Whale):** To ensure the market respects fundamental logic without using a rigid arbitrator, we introduce a **Deductive Agent** (The Whale). It possesses a wealth balance continuously rebalanced to equal the sum of all other agents. It enforces a "witnessed failure" rule: if a test fails one candidate but passes another, the Whale bets heavily against the failing candidate.
+<!-- good to define induction vs deduction and their roles w/in this system and other LI systems -->
+*   **The Incentive:** Agents are incentivized to **accurately predict the output of verifiers**. This creates an environment where agents act as _Architects_ (building and patching robust code) and _Auditors_ (proposing new verifiers to stress-test the market’s assumptions).
+*   **Logical Anchoring (The Whale):** To ensure the market respects fundamental logic without using a rigid arbitrator, we introduce a **Deductive Arbitrager** (The Whale). It possesses a wealth balance continuously rebalanced to equal the sum of all other agents. It enforces a "witnessed failure" rule: if a test fails one candidate but passes another, the Whale bets heavily against the failing candidate.
 *   **The Result:** The system naturally filters out fragile code and generates useful verifiers (tests).
 
 ## 2. Operational Workflow
@@ -35,13 +36,16 @@ We replace the traditional "Judge" with a **Logical Induction Market**. This app
 The system begins when the user provides a prompt  $P_{user}$  and a budget $B$. 
 
 1.  **Draft:** The Orchestrator prompts  $N$  agents to generate initial code solutions ( $C_{1},\dots ,C_{N}$ ).
-2.  **Initial Assets (Master Goals):** The Orchestrator registers a **Master Goal Sentence** for each solution: $\phi_{G,k} = \text{"Candidate  }k\text{  satisfies the user's prompt."}$
-    *   _Note:_ These act as the primary index of confidence for each solution.
+2.  **Initial Assets (Master Goals):** The Orchestrator registers a **Master Goal Sentence** for each solution: $\phi_{G,k} = \text{"Candidate  }k\text{  best satisfies the user's prompt."}$
+    *   *Note*: These act as the primary index of confidence for each solution.
+    *   *Note*: Because only one candidate can *best* satisfy the prompt, these sentences are mutually exclusive.
 3.  **Capital:** Agents (various rollouts of AI coding tools) are initialized with a bankroll of **Compute Credits** ( $W_{i} = B / N$ ). This wealth represents their "computational voting power" or reputation within the system.
 3.  **Capital Allocation:**
+<!-- explain the role of the whale & deductive agents in general w/in LI -->
     *   **Deductive Whale:** Initialized with 50% of the total market wealth ( $W_{whale}=∑W_{agents}$ ).
-    *   **Inductive Minnows (LLMs):** Agents (various rollouts of AI coding tools) are initialized with a bankroll of **Compute Credits** ( $W_{i} = B / N$ ). 
-    *   **The Inference Tax:** To represent the cost of "thinking," agents pay a recurring fee ( $T_{inf}$ ) that decreases their budget over time, ensuring only efficient, accurate traders survive. Note this also decreases the budget allocated to the deductive trader.
+<!-- explain the role of indeuctive agents w/in LI - and their specific role w/in this system -->
+    *   **Inductive Minnows (LLMs):** Agents (various rollouts of AI coding tools) are initialized with a bankroll of **Compute Credits** ( $W_{i} = B / N$ ).
+    *   **The Inference Tax:** To represent the cost of "thinking," agents pay a recurring fee ( $T_{inf}$ ) that decreases their budget over time, ensuring only efficient, accurate traders survive.
 
 ### Phase B: Atomic Trading Round
 
@@ -52,8 +56,8 @@ The market operates in discrete rounds where agents privately analyze code, impr
     <!-- terminology for sentence and verifier is not yet defined - its also not clear that in this context - verifier must be quickly and cheaply computable - so basically a unit test - when defining terminology give examples -->
     - Sentences and their verifiers.
     - Optionally, we may or may not expose prices ( $P_{t}$ ) for sentences to agents
-<!-- its a little confusing that verifirers are introduced here despits being mentioned eariler -->
-2.  **Inference (Private Sandbox):** Agents use credits to run private simulations. They write **Verifiers** (tests) to validate candidates and develop **Patches** for their own code.
+<!-- its a little confusing that verifirers are introduced and defined here despits being mentioned eariler flow of infomration is out of order -->
+2.  **Inference (Private Sandbox):** Agents write **Verifiers** (tests) to validate candidates and develop **Patches** for their own code.
 3.  **The Atomic Action:** Agents submit a **Sealed Envelope** containing three linked actions:
 <!-- give examples of verifiers - explain why a verifier that differentiates candiates is the most valuable -->
 <!-- link differentiating verifiers to the deductive betting agent and exlpain how that agent rewards differentiating tests -->
@@ -68,9 +72,15 @@ The market operates in discrete rounds where agents privately analyze code, impr
 
 The system resolves the pending logic and redistributes wealth based on empirical results. This phase converts "computational hunches" into concrete market consensus through a deterministic, scaling-aware betting engine.
 
-* * *
+#### **1\. Execution: The Oracle Run**
 
-#### **1\. Belief-to-Bet Conversion (Unleveraged Multi-Asset Allocation)**
+The **Arbitrator** executes newly proposed Verifiers in the secure `/tmp/` worktrees.
+
+*   **Logical Anchoring:** Results are binary (**Pass/Fail**). If a test is uncomputable or times out, it is treated as "Undefined" ( $\perp$ ) and no wealth changes hands.
+<!-- what is market state json? what is public gallery? -->
+*   **Evidence Publishing:** Results are written to the `market_state.json` and the code is snapshotted into the `public_gallery/`.
+
+#### **2\. Belief-to-Bet Conversion (Unleveraged Multi-Asset Allocation)**
 
 To ensure market stability and prevent instant bankruptcy from hallucinations, the Orchestrator translates **Belief Vectors** into a **Fractional Kelly Portfolio**. This model treats the tournament as a collection of independent growth opportunities.
 
@@ -86,17 +96,6 @@ To ensure market stability and prevent instant bankruptcy from hallucinations, t
     *   **The Witness Trigger:** The Whale updates its beliefs based on the **Arbitrator's** findings. If Candidate  $C_{i}$  fails a test that a witness  $C_{j}$  passed, the Whale sets  $b_{whale,\varphi _{G,i}}=0.0$ .
     *   **The Impact:** Like any other agent, the Whale's influence is scaled by its  $\kappa _{whale}$ . Because it holds 50% of the total wealth, its  $0.0$  belief exerts massive pressure on the equilibrium price, effectively "crushing" failing candidates.
 
-* * *
-
-#### **2\. Execution: The Oracle Run**
-
-The **Arbitrator** executes newly proposed Verifiers in the secure `/tmp/` worktrees.
-
-*   **Logical Anchoring:** Results are binary (**Pass/Fail**). If a test is uncomputable or times out, it is treated as "Undefined" ( $\perp$ ) and no wealth changes hands.
-*   **Evidence Publishing:** Results are written to the `market_state.json` and the code is snapshotted into the `public_gallery/`.
-
-* * *
-
 #### **3\. Market Update: Scaling-Weighted Consensus**
 
 The new price  $P_{t+1}$  is the **Market Clearing Price**—the equilibrium point where the total "demand" from all Kelly-betting agents is zero. Because agents use fractional scaling, the price is the centroid of beliefs weighted by **Active Risk** ( $W_{i}\cdot \kappa _{i}$ ):
@@ -106,8 +105,6 @@ P_{t+1}\left(\varphi \right)=\frac{∑\left(W_{i,t}\cdot \kappa _{i}\cdot b_{i,\
 $$
 
 > **The Effect:** This ensures that cautious agents (low  $\kappa$ ) or those sitting out (zero  $\kappa$ ) move the price less than confident agents who have committed significant capital to their "alpha."
-
-* * *
 
 #### **4\. Payout: Scaled Linearized Redistribution**
 
@@ -120,8 +117,6 @@ $$
 *   **The "Skin in the Game" Match:** This formula represents the wealth change of an agent who only risked a fraction  $\kappa$  of their bankroll. It rewards reducing the market's "surprise" while keeping payouts strictly within the bounds of the agent's committed collateral.
 *   **Auditors:** Capture the "spread" between their skeptical belief and the optimistic market price when a bug is proven.
 *   **Architects:** Earn a "risk premium" as their price stabilizes toward  $1.0$ .
-
-* * *
 
 #### **5\. Rebalance**
 
