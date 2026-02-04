@@ -749,26 +749,83 @@ $$k^* = \arg\min_{k} |F_k|$$
 11. **Termination Check:** If $\mathcal{T}(t+1)$, terminate and select winner
 
 ## 5. Implementation
-## Implementation
-<!-- needs better context / intro section - doesn't provide context for oveerall implementaion design before launching into specifics -->
-Here is the refined design for the **Adversarial Code Market**. This shifts the complexity from Environment Configuration (Docker) to Market Logic (RAM) and scopes all "messy" data—including verifiers—to the ephemeral tournament folder.
 
-### **1\. Filesystem & Permissions: Purpose & Design**
+### Overview & Design Philosophy
 
-To keep your main project clean, the Orchestrator creates a **"Disposable Universe"** in `/tmp/`. This folder contains everything specific to this run: the agent's modified code, their private memories, and the test cases (verifiers) they generate to attack each other.
+The tournament system is implemented as a **custom OpenCode tool** that orchestrates multiple headless agent sessions within a single process. The design shifts complexity from environment configuration (Docker containers, network isolation) to market logic (in-memory LMSR state) while maintaining clean separation between agents through filesystem permissions and isolated session databases.
 
-*   **OS-Level User Isolation:** The Orchestrator provisions unique system users (`minnow_1`, `minnow_2`).
-*   **The "Open Border" Permissions:** \* **Write Access:** An agent has **Write (`w`)** permission _only_ within its own worktree and session file.
-    *   **Read/Execute Access:** Agents are granted **Read (`r`)** and **Execute (`x`)** permissions across the _entire_ tournament directory. This allows them to analyze rival solutions in real-time and execute tests against them.
-*   **The Oracle Check:** When Agent A proposes a "Short" on Agent B, the Orchestrator executes Agent A's **Verifier** directly against Agent B's **Worktree**.
+The goal is to create a "disposable universe" for each tournament—a self-contained workspace in `/tmp/` that contains all agent code, test cases, and market state, which can be completely deleted after the tournament concludes. This approach keeps the main project clean while allowing agents to freely read rival code and propose adversarial tests.
+
+### Tool Integration with OpenCode
+
+The tournament is exposed to OpenCode's LLM as a **custom tool** using OpenCode's plugin system.
+
+**Tool Definition:**
+
+The tool is registered via an OpenCode plugin that defines the tournament interface:
+
+```typescript
+// In .opencode/plugins/tournament.ts
+import { Plugin, tool } from '@opencode-ai/plugin'
+
+export const TournamentPlugin: Plugin = async (ctx) => {
+  return {
+    tool: {
+      run_tournament: tool({
+        description: 'Run a Logical Induction Market tournament to solve a coding problem',
+        args: {
+          prompt: tool.schema.string().describe('The coding problem to solve'),
+          n_agents: tool.schema.number().default(5).describe('Number of competing agents'),
+          budget: tool.schema.number().default(1000).describe('Total compute budget'),
+          max_rounds: tool.schema.number().default(100).describe('Maximum tournament rounds')
+        },
+        async execute(args, context) {
+          // Spawn tournament orchestrator and dashboard
+          // Return results when complete
+        }
+      })
+    }
+  }
+}
+```
+
+**Invocation Flow:**
+
+1. **User initiates via chat:** "Run a tournament to solve [problem]"
+2. **LLM recognizes pattern:** Calls `run_tournament` tool with extracted parameters
+3. **Tool spawns orchestrator:** Subprocess managing market rounds
+4. **Dashboard renders:** TUI overlay showing live tournament status
+5. **Blocking execution:** Main session waits for completion (but displays updates)
+6. **Results returned:** Winner code, test suite, and market history
+
+**TUI Integration:**
+
+The tool creates a Bubble Tea dashboard component that renders as an overlay in the main OpenCode TUI. This dashboard:
+- Updates reactively via Server-Sent Events from orchestrator
+- Displays live price charts, standings, and events
+- Accepts keyboard input (minimize, cancel, accept winner)
+- Returns control to main session when tournament completes
+
+### Filesystem & Permissions Structure
+
+To keep the main project clean, the Orchestrator creates a **"Disposable Universe"** in `/tmp/`. This folder contains everything specific to this run: agent code, private memories, and test cases (verifiers) that agents generate to attack each other.
+
+**Permission Model:**
+
+The system uses OS-level permissions to enforce isolation while allowing read access:
+- **Write Access:** Each agent can only write to its own worktree and session database
+- **Read/Execute Access:** All agents can read all code and execute all verifiers
+- **Oracle Execution:** When an agent proposes a verifier, the orchestrator executes it against all candidate worktrees
+
+**Filesystem Layout:**
 
 ```
 # 1. THE PERMANENT UNIVERSE (Your Project Root)
 /Users/amal/projects/my-app/           (Owner: amal, Perms: 755 [rwxr-xr-x])
 │
 ├── src/                               # Protected source code
-├── orchestrator.py                    # THE WARDEN (Runs as sudo/amal)
-└── .git/                              # READ-ONLY for all Minnows via ACLs
+├── .opencode/plugins/tournament.ts    # Tournament tool plugin
+└── .git/                              # READ-ONLY for all agents
 
 ---------------------------------------------------------------------------
 
@@ -778,108 +835,286 @@ To keep your main project clean, the Orchestrator creates a **"Disposable Univer
 ├── market_state.json                  (Owner: amal, Perms: 600 [rw-------])
 │
 ├── worktrees/                         (Owner: amal, Perms: 755 [rwxr-xr-x])
-│   ├── minnow_1/                      (Owner: minnow_1, Perms: 755 [rwxr-xr-x])
-│   │   └── main.py                    <-- minnow_1 can WRITE; Others can READ
-│   └── minnow_2/                      (Owner: minnow_2, Perms: 755 [rwxr-xr-x])
-│       └── main.py                    <-- minnow_2 can WRITE; Others can READ
+│   ├── candidate_0/
+│   │   └── solution.py                <-- Agent 0 can WRITE; others can READ
+│   ├── candidate_1/
+│   │   └── solution.py                <-- Agent 1 can WRITE; others can READ
+│   └── ...
 │
 ├── sessions/                          (Owner: amal, Perms: 711 [rwx--x--x])
-│   ├── minnow_1.db                    (Owner: minnow_1, Perms: 600 [rw-------])
-│   └── minnow_2.db                    (Owner: minnow_2, Perms: 600 [rw-------])
+│   ├── agent_0.db                     (Owner: amal, Perms: 600 [rw-------])
+│   ├── agent_1.db                     (Owner: amal, Perms: 600 [rw-------])
+│   └── ...
 │
 └── verifiers/                         (Owner: amal, Perms: 755 [rwxr-xr-x])
-    ├── v_8f2a1b/                      # SCOPED EVIDENCE PACKAGES
-    │   ├── run.sh                     <-- ALL MINNOWS can EXECUTE
-    │   └── test.py                    <-- ALL MINNOWS can READ
+    ├── v_8f2a1b/                      # SCOPED TEST PACKAGES
+    │   ├── test.py                    <-- ALL agents can READ/EXECUTE
+    │   └── metadata.json
     └── v_c3d9e4/
 ```
 
+**Design Rationale:**
 
-### **2\. The Orchestrator (Single-Process Core)**
+This "open border" permission model serves several purposes:
+1. **Transparency:** Agents can analyze rival solutions (encouraging adversarial testing)
+2. **Constructive Competition:** Must propose tests that discriminate (you pass, opponent fails)
+3. **Simplicity:** No complex sandboxing; rely on filesystem permissions
+4. **Auditability:** All code and tests visible in plain filesystem for debugging
 
-<!-- make it clear this is all in a single process - everything should be orchestrated via asyncio to prevent blocking -->
-The Orchestrator acts as the "Market Exchange." It does not perform the coding itself; it manages the lifecycle of the tournament participants.
+### Core Architecture Components
 
-*   **Round Management:** It executes a discrete loop (The Tick). Each tick involves syncing file states, collecting "Sealed Moves," and executing verifiers.
-*   **Headless SDK Integration:** It spawns OpenCode sessions for each agent. To keep your UI clean, it points each session's `storage_path` to a unique temporary directory in `/tmp/`. This ensures the sub-agents have "private thoughts" that don't leak into your main chat history.
-*   **The Shell Contract:** Instead of Docker, it uses `subprocess.run` to execute commands. It expects a binary "Pass/Fail" (Exit 0/1) from any verifier script.
+The system consists of four primary components communicating via async message passing:
 
-### **3\. The In-Memory Ledger (The Brain)**
+#### 1. **Orchestrator (Main Process)**
 
-Because we are avoiding a database, the entire economic state is a live Python object. This makes the Whale’s reactions instantaneous and avoids disk I/O bottlenecks.
+The orchestrator manages the tournament lifecycle and acts as the central coordinator.
 
-<!-- Explain the data structures used here - provide interface snippets -->
-*   **Agent Registry:** A dictionary tracking the wealth and bankruptcy status of every Minnow and the Whale.
-*   **Sentence Pricing:** A table of logical claims (e.g., "Feature\_X is bug-free"). Prices fluctuate based on the total wealth "Longing" or "Shorting" that claim.
-*   **Inference Tax logic:** A simple function that prunes inefficient agents by deducting a small percentage of wealth every round they fail to provide "Surprise" (new information).
+**Responsibilities:**
+- Spawn N agent sessions (headless OpenCode instances)
+- Execute discrete market rounds (the "tick")
+- Run oracle (execute verifiers in isolated subprocesses)
+- Convert agent beliefs to LMSR trades
+- Apply economic rules (inference tax, bankruptcy)
+- Emit progress updates to dashboard
+- Serialize state periodically (crash recovery)
 
-### **4\. Agent Implementation: Parallel "Headless" Sessions**
-<!-- re-explain permissions here  -->
-The Minnow agents are **not** custom LLM implementations. They are standard `OpenCodeSession` objects, instantiated multiple times in parallel.
-<!-- what will we do for agents that get caught in a loop? -->
-*   **Reuse of Session Management:** We leverage OpenCode's existing ability to manage token windows, truncate history, and maintain context. We simply override the storage path to our temporary folder (`/tmp/sessions/minnow_1.db`) so they don't overwrite each other.
-*   **Market Injection (The Prompt):** Agents don't just "chat." The Orchestrator programmatically injects the **Market Snapshot** into the system prompt at the start of every tick.
-    *   _Example Prompt Injection:_
-        > "MARKET UPDATE (Round 4): Your wealth is 95.0. Candidate B is currently priced at \$0.80. You previously shorted Candidate B, but the test passed. OBJECTIVE: Analyze Candidate B's new code in `./worktrees/minnow_2` and write a Python test case that breaks it."
+**Execution Model:**
+Single Python process using `asyncio`. Agent inference happens concurrently via `asyncio.gather()`, but market settlement is sequential and atomic to ensure deterministic state transitions.
 
-This turns the standard "Coding Assistant" into a "Strategic Trader" without rewriting the SDK.
+#### 2. **Agent Sessions (Headless OpenCode Instances)**
 
-### **5\. The Whale (The Witness Logic)**
+Agents are standard `OpenCodeSession` objects running in headless mode.
 
-The Whale is the "Deductive Anchor" that holds 50% of the initial wealth. Its behavior is strictly logical and reactionary—it never "guesses."
+**Isolation Mechanism:**
+Each agent gets a unique storage path (`/tmp/sessions/agent_N.db`) to prevent context leakage. Sessions reuse OpenCode's existing token window management, history truncation, and context handling—no custom LLM implementation needed.
 
-<!-- where dose the whale live? I think we should just have it eecute inprocess w/in the markte arbitrator process -->
-**The Logic: The Witness Requirement** The Whale does not punish code merely for failing. It punishes code for being **inferior to a proven alternative.**
+**Market Injection:**
+At each round, the orchestrator programmatically injects the current market state into the agent's system prompt, transforming it from a "coding assistant" into a "strategic trader."
 
-1.  **Observation:** The Whale watches the Oracle run a verifier test ( $T$ ) against two candidates,  $C_{i}$  (Agent A's code) and  $C_{j}$  (Agent B's code).
-2.  **The Trigger:**
-    *   If  $C_{i}$  fails test  $T$ ...
-    *   **AND**  $C_{j}$  passes test  $T$  (The "Witness")...
-3.  **The Crush:** Only then does the Whale mobilize its 50% wealth to **Short** the sentence  $\phi _{G,i}$  ("Candidate  $i$  is correct") toward  $0$ .
+**Belief Extraction:**
+Agents return structured responses (JSON) containing:
+- Belief vector (sentence_id → probability, **sparse** representation)
+- Optional code updates
+- Optional verifier proposals
 
-**Why this matters:** This ensures the market is **constructive**. You cannot profit by writing an impossible test that _everyone_ fails. You can only profit by writing a test that _you pass_ and _your opponent fails_. This forces the agents to actually fix bugs, not just find them.
+#### 3. **The Whale (In-Process Pure Logic)**
 
-### **6\. The Interface Layer (Code Structure)**
+The Whale runs as pure Python functions within the orchestrator—no separate process, no LLM calls.
 
-To keep the implementation modular, we define three primary interfaces. You can swap the "under the hood" execution from Native to Docker later by simply changing the logic inside these classes.
+**Dual Behavior:**
+- **Passive LMSR Market Maker:** Provides liquidity automatically via cost function (structural role)
+- **Active Deductive Trader:** Computes and submits beliefs on candidate quality based on softmax over test failures
 
-**A. The Market State Interface** Manages the "Gold Standard" of who owns what.
-<!-- what about sentences? where are they stored? -->
-<!-- what is data format for ledger -->
-<!-- explain that the market operates on ticks - if any agent misses a  -->
-<!-- how is the whale implemented? -->
-```
+#### 4. **Dashboard (TUI Overlay)**
+
+A Bubble Tea component rendering in the main OpenCode session.
+
+**Display Elements:**
+- Live ASCII price chart (updates each round)
+- Current standings (sorted by market price)
+- Recent events (proposals, bankruptcies, convergence signals)
+- Status indicators (round counter, active agents, termination progress)
+
+**Interactivity:**
+- Keyboard shortcuts for minimize, detail view, cancel
+- Non-blocking updates via reactive rendering
+- Returns winner to main session on completion
+
+### Interface Definitions
+
+The system is structured around three primary interfaces to maintain modularity and allow future execution model changes (e.g., Docker containers, distributed agents).
+
+#### A. Market State Interface
+
+Manages the authoritative state of markets, wealth, and sentences.
+
+```python
 class MarketState:
-    def apply_tax(self, rate: float): ...
-    def update_price(self, sentence_id: str, new_bet: float): ...
-    def settle_truth(self, sentence_id: str, result: bool): ...
-    def get_consensus(self) -> dict: ... # Returns current "best" code versions
-```
-
-<!-- imprecise description of a verifier - also need to handle uncomputable/non-terminating verifiers  -->
-**B. The Verifier Interface** Manages the interaction between the market and the physical disk.
-
-```
-class Verifier:
-    def __init__(self, test_script: str, cmd: str): ...
-    def execute(self, target_worktree: str) -> bool:
-        # Returns True for Exit 0, False for Exit 1+
+    """
+    Central ledger tracking all market state
+    
+    Responsibilities:
+    - Maintain LMSR market state (shares outstanding, prices)
+    - Track agent and Whale wealth
+    - Manage sentence registry (metadata, verifier paths)
+    - Handle bond lifecycle (creation, maturation)
+    - Calculate dynamic liquidity parameter
+    """
+    
+    def calculate_liquidity(self) -> float:
+        """
+        Compute b_t based on current Whale wealth and active markets
+        Returns liquidity parameter ensuring 50% max loss per round
+        """
+        ...
+    
+    def serialize(self) -> dict:
+        """
+        Export complete state to JSON for persistence/recovery
+        """
+        ...
+    
+    def get_prices(self) -> dict[str, float]:
+        """
+        Return current LMSR prices for all active sentences
+        """
         ...
 ```
 
-**C. The Agent Wrapper** The bridge between the OpenCode "Brain" and our tournament.
+#### B. Oracle Interface
 
+Manages verifier execution in isolation with timeout handling.
 
-<!-- provide a snippet describing the structre of Move data typoe here -->
-<!-- how do we extract belief vector from agent? - what if agent fails to report a belief for a sentence? -->
-<!-- how do we handle agents that dont respond w/in some amount of time? -->
-```
-class AdversarialAgent:
-    def __init__(self, agent_id: str, worktree_path: str): ...
-    async def get_next_move(self, market_snapshot: dict) -> Move:
-        # Returns a "Sealed Envelope" containing Code + Bets
+```python
+class OracleExecutor:
+    """
+    Executes verifiers against candidate code in isolated subprocesses
+    
+    Responsibilities:
+    - Run verifier against target worktree
+    - Enforce timeout (default 5s)
+    - Handle non-terminating/crashing verifiers
+    - Return Pass/Fail/Undefined (⊥)
+    """
+    
+    async def execute_verifier(
+        self,
+        verifier_path: str,
+        candidate_worktree: str,
+        timeout: float = 5.0
+    ) -> VerifierResult:
+        """
+        Run verifier in subprocess with resource limits
+        
+        Returns:
+            PASS: Exit code 0
+            FAIL: Exit code != 0
+            UNDEFINED: Timeout or crash
+        """
+        ...
+    
+    async def execute_all(
+        self,
+        verifiers: list[str],
+        candidates: list[str]
+    ) -> dict[tuple[str, str], VerifierResult]:
+        """
+        Run all verifiers against all candidates in parallel
+        Returns grid of results: (verifier_id, candidate_id) -> result
+        """
         ...
 ```
+
+#### C. Agent Interface
+
+Bridges OpenCode sessions with the tournament market.
+
+```python
+class TournamentAgent:
+    """
+    Wrapper around OpenCodeSession for market participation
+    
+    Responsibilities:
+    - Maintain isolated session (unique storage path)
+    - Inject market state into agent prompt each round
+    - Extract structured responses (beliefs, actions)
+    - Handle timeouts and malformed responses
+    """
+    
+    async def get_move(self, snapshot: MarketSnapshot) -> AgentMove:
+        """
+        Present market state, request agent's next action
+        
+        Args:
+            snapshot: Read-only market view (prices, code, events)
+            
+        Returns:
+            AgentMove containing:
+            - beliefs: Sparse dict[sentence_id, float] (no default)
+            - code_update: Optional patch to own candidate
+            - verifier_proposal: Optional new test with bond size
+        """
+        ...
+```
+
+#### D. Trading Engine Interface
+
+Converts beliefs to LMSR trades using Kelly heuristic.
+
+```python
+class TradingEngine:
+    """
+    Translates agent beliefs into LMSR share purchases
+    
+    Responsibilities:
+    - Clip beliefs to prevent extreme confidence
+    - Compute Kelly fractions for portfolio
+    - Normalize to prevent leverage (total exposure ≤ 100%)
+    - Generate LMSR trade instructions
+    """
+    
+    def beliefs_to_trades(
+        self,
+        agent_id: str,
+        beliefs: dict[str, float],  # Sparse! Only reported beliefs
+        wealth: float,
+        current_prices: dict[str, float],
+        liquidity: float
+    ) -> list[Trade]:
+        """
+        Apply Kelly heuristic to convert beliefs to trades
+        
+        Missing beliefs are NOT defaulted to 0.5
+        No belief = no trade (avoids unintended large positions)
+        
+        Returns list of trades: (sentence_id, delta_q, cost)
+        """
+        ...
+```
+
+### Round Execution Flow
+
+Each round follows a deterministic sequence:
+
+1. **Observation:** Agents query market state concurrently
+2. **Oracle Execution:** Run all verifiers against all candidates (parallel)
+3. **Whale Belief Update:** Compute softmax beliefs based on test results
+4. **Liquidity Recalculation:** Update $b_t$ based on current Whale wealth
+5. **Agent Submission:** Collect belief vectors and actions (with timeout)
+6. **Trade Conversion:** Convert all beliefs (Whale + agents) to LMSR trades
+7. **Atomic Settlement:** Execute all trades sequentially, update markets
+8. **Economic Rules:** Apply inference tax, process bankruptcies
+9. **Bond Management:** Unlock matured bonds, create new ones
+10. **Dashboard Update:** Emit events to TUI for display
+11. **Termination Check:** Evaluate convergence conditions
+
+This flow ensures deterministic state evolution and makes the system fully reproducible from serialized state.
+
+### Error Handling & Edge Cases
+
+**Agent Timeout:**
+- If agent doesn't respond within 60s, forfeit round (no trades, no actions)
+- Inference tax still applied (drains wealth)
+- Repeated timeouts lead to bankruptcy
+
+**Verifier Timeout:**
+- Result = $\perp$ (undefined)
+- No oracle signal, but agents can still trade on validity
+- Timeout duration configurable per tournament
+
+**Malformed Agent Response:**
+- Cannot parse JSON or invalid structure → forfeit round
+- Logged as event, agent warned (optional)
+
+**Whale Bankruptcy:**
+- If $W_{whale} < 0.05B$, terminate with error
+- Indicates agents collectively exploited market maker
+- Rare but valid outcome (exceptional market dynamics)
+
+**System Crash:**
+- Market state serialized every N rounds to disk
+- Orchestrator can resume from last checkpoint
+- Dashboard reconnects to existing orchestrator process
 
 ## 6. Theoretical Foundations
 
