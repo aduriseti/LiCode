@@ -201,7 +201,7 @@ After tests execute, the Whale computes and TRADES beliefs on candidate quality:
 **Wealth Conservation:**
 
 Total system wealth strictly decreases over time:
-$$W_{total,t} = \sum_{i=1}^m W_{i,t} + W_{whale,t} = 2B - \sum_{s=0}^{t-1}(\text{taxes and fees collected at round } s)$$
+$$W_{total,t} = \sum_{i=1}^m W_{i,t} + W_{whale,t} = 2B - \sum_{s=0}^{t-1}(\text{taxes collected at round } s)$$
 
 This guarantees convergence: as wealth drains from the system, eventually termination conditions are met.
 
@@ -274,14 +274,12 @@ $$\text{Proceeds} = C(q_{yes}, q_{no}) - C(q_{yes} - \Delta q, q_{no})$$
 #### **5. Wealth Updates**
 
 **For Agents:**
-$$W_{i,t+1} = W_{i,t} - \sum_{j} \text{Cost}_{i,j} - T_{inf} - \gamma \cdot N_{proposals}$$
+$$W_{i,t+1} = W_{i,t} - \sum_{j} \text{Cost}_{i,j} - T_{inf}$$
 
 Where:
 - $\text{Cost}_{i,j}$: Net cost of LMSR trades on sentence $j$ (can be negative = profit)
 - $T_{inf}$: Inference tax (fixed per round)
-<!-- no need to have a proposal fee - taken care of by needing to go long when proposing -->
-- $\gamma$: Proposal fee (prevents spam)
-- $N_{proposals}$: Number of new assets proposed this round
+- $N_{proposals}$: Number of new assets proposed this round (no explicit fee; bond requirement prevents spam)
 
 **For Whale:**
 $$W_{whale,t+1} = W_{whale,t} - \sum_{j} \text{Cost}_{whale,j}$$
@@ -292,9 +290,9 @@ Where:
 - Whale wealth only changes via trading and market making
 
 **Wealth Conservation:**
-$$\sum_i W_{i,t+1} + W_{whale,t+1} = 2B - \sum_{s=0}^{t}(\text{total taxes and fees at round } s)$$
+$$\sum_i W_{i,t+1} + W_{whale,t+1} = 2B - \sum_{s=0}^{t}(\text{total taxes collected at round } s)$$
 
-Total wealth strictly decreases by the amount of taxes and fees collected each round.
+Total wealth strictly decreases by the amount of taxes collected each round.
 
 **Bond Maturation:**
 When bond unlocks (after $N_{lock}$ ticks):
@@ -391,8 +389,7 @@ This formal structure creates specific evolutionary pressures:
 - **Price Movement:** $P(\phi_V) \to 0.2$ (low validity consensus)
 - **Outcome:**
   - Proposer's bond loses value (bought at 0.5, sells at 0.2)
-  - Proposer pays proposal fee $\gamma$
-  - Net loss for wasting market's time
+  - Net loss for wasting market's time (bond acts as implicit proposal fee)
 
 ### **2. The "Discriminating Test" Jackpot**
 - **Scenario:** Agent B proposes test that fails candidate 1 but passes candidates 2,3
@@ -485,9 +482,8 @@ The market is a discrete-time dynamical system $\Sigma = \langle \mathcal{A}, \P
 - $N$: Number of initial candidates (typically $N = m$)
 - $b_{min}$: Minimum LMSR liquidity parameter ($b_{min} = B/200$ typically)
 - $T_{inf}$: Inference tax per round (e.g., $T_{inf} = 0.01 \cdot B/N$)
-- $\gamma$: Proposal fee (e.g., $\gamma = 0.05 \cdot B/N$)
 - $\epsilon$: Belief clipping parameter ($\epsilon = 0.01$)
-- $N_{lock}$: Bond lock period in rounds (e.g., $N_{lock} = 5$)
+- $N_{lock}$: Bond lock period in rounds (e.g., $N_{lock} = 1$)
 
 ### A. Sentences & Assets
 
@@ -590,10 +586,8 @@ Each round, agent $a_i$ can perform:
 1. **Propose New Asset:** Submit new verifier $V_{new}$ or candidate $C_{new}$
    - Creates new sentence $\varphi_{new}$
 <!-- make it clear this bond size will be determined by a kelly bet w/ clipped max belief 1-eps -->
-   - Requires bond: force-buy $\Delta q_{bond}$ shares at $P_0 = 0.5$
+   - Requires bond: force-buy $\Delta q_{bond}$ shares at $P_0 = 0.5$ (prevents spam)
    - Shares locked for $N_{lock}$ rounds
-<!-- no need to have a proposal fee - taken care of by needing to go long when proposing -->
-   - Costs proposal fee $\gamma$
 
 2. **Update Code:** Submit patch $C_{k} \to C_{k}'$ (no direct cost, but requires inference)
 
@@ -652,13 +646,11 @@ After all agents submit trades in round $t$:
 3. **Aggregate Wealth Change from Trading:**
    $$\Delta W_{i,t}^{trade} = -\sum_{\varphi \in \Phi_t} \text{Cost}_{i,\varphi,t}$$
    
-4. **Fees and Taxes:**
-   $$\Delta W_{i,t}^{fees} = -T_{inf} - \gamma \cdot N_{proposals,i,t}$$
-   
-   where $N_{proposals,i,t}$ is the number of new assets agent $i$ proposed in round $t$
+4. **Taxes:**
+   $$\Delta W_{i,t}^{taxes} = -T_{inf}$$
 
 **End-of-Round Wealth:**
-$$W_{i,t+1} = W_{i,t} + \Delta W_{i,t}^{trade} + \Delta W_{i,t}^{fees}$$
+$$W_{i,t+1} = W_{i,t} + \Delta W_{i,t}^{trade} + \Delta W_{i,t}^{taxes}$$
 
 **Whale Wealth (No Rebalancing):**
 $$W_{whale,t+1} = W_{whale,t} - \sum_{\varphi \in \Phi_t} \text{Cost}_{whale,\varphi,t}$$
@@ -666,9 +658,9 @@ $$W_{whale,t+1} = W_{whale,t} - \sum_{\varphi \in \Phi_t} \text{Cost}_{whale,\va
 where $\text{Cost}_{whale,\varphi,t}$ is the Whale's net cost from LMSR liquidity provision and active trading.
 
 **Conservation Law:**
-$$\sum_{i=1}^m W_{i,t+1} + W_{whale,t+1} = 2B - \sum_{s=0}^{t} (\text{total taxes and fees at round } s)$$
+$$\sum_{i=1}^m W_{i,t+1} + W_{whale,t+1} = 2B - \sum_{s=0}^{t} (\text{total taxes at round } s)$$
 
-Total wealth strictly decreases each round by the amount of inference tax and proposal fees collected.
+Total wealth strictly decreases each round by the amount of inference tax collected.
 
 **Bond Maturation:**
 
@@ -743,7 +735,7 @@ $$k^* = \arg\min_{k} |F_k|$$
 5. **Liquidity Recalculation:** Update $b_t$ based on current Whale wealth
 6. **Trade Conversion:** Convert beliefs to $\Delta q$ via Kelly heuristic
 7. **Trade Execution:** Update LMSR markets, deduct costs from wealth
-8. **Fee Application:** Deduct $T_{inf}$ and $\gamma$ from agent wealth
+8. **Tax Application:** Deduct $T_{inf}$ from agent wealth
 9. **Bankruptcy Check:** Remove agents with $W_i < T_{inf}$
 10. **Bond Maturation:** Unlock and settle bonds from round $t - N_{lock}$
 11. **Termination Check:** If $\mathcal{T}(t+1)$, terminate and select winner
@@ -848,7 +840,7 @@ The system uses OS-level permissions to enforce isolation while allowing read ac
 │
 └── verifiers/                         (Owner: amal, Perms: 755 [rwxr-xr-x])
     ├── v_8f2a1b/                      # SCOPED TEST PACKAGES
-    │   ├── test.py                    <-- ALL agents can READ/EXECUTE
+    │   ├── run.sh                    <-- ALL agents can READ/EXECUTE
     │   └── metadata.json
     └── v_c3d9e4/
 ```
@@ -1148,7 +1140,7 @@ $$\mathbb{P}(\text{agent } i \text{ bankrupt before round } T) \to 1 \text{ as }
 **Theorem 4 (Convergence Guarantee):** *Total system wealth strictly decreases, guaranteeing eventual termination.*
 
 *Formal Statement:*
-$$W_{total,t+1} = W_{total,t} - (m \cdot T_{inf} + \text{fees}_t) < W_{total,t}$$
+$$W_{total,t+1} = W_{total,t} - (m \cdot T_{inf}) < W_{total,t}$$
 
 Since $W_{total,t} \geq 0$ and decreases by at least $m \cdot T_{inf} > 0$ each round:
 $$\lim_{t \to \infty} \mathbb{P}(\mathcal{T}(t)) = 1$$
@@ -1438,7 +1430,7 @@ We considered several mechanisms before choosing LMSR:
 | Min Liquidity | $b_{min}$ | $B/200$ | Prevents death spiral while allowing dynamic adjustment |
 | Inference Tax | $T_{inf}$ | $0.01 \cdot B/N$ per round | Should eliminate poor traders in ~100 rounds |
 | Belief Clip | $\epsilon$ | $0.01$ | Prevents catastrophic losses from overconfidence |
-| Bond Lock Period | $N_{lock}$ | 5 rounds | Long enough to see market reaction, short enough to iterate |
+| Bond Lock Period | $N_{lock}$ | 1 round | Long enough to see market reaction, short enough to iterate |
 | Max Rounds | $t_{max}$ | 100 | Safety valve; most markets should converge faster |
 
 **Sensitivity Analysis:**
@@ -1456,7 +1448,7 @@ We considered several mechanisms before choosing LMSR:
 - **Adaptive:** Could increase tax over time (accelerate endgame)
 
 **Bond Lock Period ($N_{lock}$):**
-- **Too short** (e.g., $N_{lock} = 1$): Can't capture information alpha; proposers exit before market reacts
+- **Too short** (e.g., $N_{lock} = 0$): Can't capture information alpha; proposers exit before market reacts
 - **Too long** (e.g., $N_{lock} = 50$): Discourages exploration; capital tied up too long
-- **Typical:** 3-10 rounds depending on market speed
+- **Typical:** 1-5 rounds depending on market speed
 - **Adaptive:** Could vary based on sentence type (longer for candidates, shorter for tests)
