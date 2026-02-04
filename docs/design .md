@@ -225,14 +225,14 @@ $$f_{j}^{*}=\frac{b_{clipped}-P_{t}}{P_{t}(1-P_{t})}$$
 
 **Step C: Portfolio Normalization (No Leverage)**
 Ensure total exposure doesn't exceed wealth:
-$$L_{i}=\sum_{j} |f_{j}^{*}| + \sum_{bonds} |f_{bond}|$$
+$$L_{i}=\sum_{j} |f_{j}^{*}| + \sum_{k \in \text{NewProposals}} |f_{bond,k}|$$
 $$\kappa_{i}=\frac{1}{\max(1,L_{i})}$$
 
-If $L_i > 1$, scale down all bets proportionally
+If $L_i > 1$, scale down all positions (bets and bonds) proportionally.
 
 **Step D: Convert to LMSR Share Purchases**
-For each sentence, determine shares to buy/sell:
-$$\Delta q_{i,j} = W_{i} \cdot \kappa_{i} \cdot f_{j}^{*}$$
+For each sentence (existing or newly proposed), determine shares to buy/sell:
+$$\Delta q_{i,j} = W_{i,t} \cdot \kappa_{i} \cdot f_{j}^{*}$$
 
 *Note:* This is a heuristic approximation. See Appendix B for true Kelly-optimal approach using convex optimization.
 
@@ -585,8 +585,7 @@ Each round, agent $a_i$ can perform:
 
 1. **Propose New Asset:** Submit new verifier $V_{new}$ or candidate $C_{new}$
    - Creates new sentence $\varphi_{new}$
-<!-- make it clear this bond size will be determined by a kelly bet w/ clipped max belief 1-eps -->
-   - Requires bond: force-buy $\Delta q_{bond}$ shares at $P_0 = 0.5$ (prevents spam)
+   - Requires bond: force-buy $\Delta q_{bond}$ shares at $P_0 = 0.5$ (prevents spam). Bond size is determined by a Kelly bet with maximal belief $b = 1-\epsilon$.
    - Shares locked for $N_{lock}$ rounds
 
 2. **Update Code:** Submit patch $C_{k} \to C_{k}'$ (no direct cost, but requires inference)
@@ -618,17 +617,17 @@ $$f_{\varphi}^* = \frac{b_{i,t}^{clip}(\varphi) - P_t(\varphi)}{P_t(\varphi)(1 -
 - $|f_{\varphi}^*|$: Fraction of wealth to commit
 
 **Step 3 - Normalize Portfolio (No Leverage):**
-$$L_i = \sum_{\varphi \in \Phi_t} |f_{\varphi}^*|$$
+$$L_i = \sum_{\varphi \in \Phi_t} |f_{\varphi}^*| + \sum_{k \in \text{NewProposals}} |f_{bond,k}|$$
 
 $$\kappa_i = \frac{1}{\max(1, L_i)}$$
 
-*Purpose:* If total desired exposure exceeds 100% of wealth, scale down proportionally.
+*Purpose:* If total desired exposure (bets + bonds) exceeds 100% of wealth, scale down all positions proportionally.
 
 **Step 4 - Execute Trades:**
-For each sentence $\varphi$:
-$$\Delta q_{i,\varphi} = W_{i,t} \cdot \kappa_i \cdot f_{\varphi}^*$$
+For each sentence $\varphi$ (existing or newly proposed):
+$$\Delta q_{i, \varphi} = W_{i, t} \cdot \kappa_i \cdot f_{\varphi}^*$$
 
-Execute LMSR trade: buy $\Delta q_{i,\varphi}$ shares of $\varphi$
+Execute LMSR trade: buy $\Delta q_{i, \varphi}$ shares of $\varphi$
 
 **Output:** Set of trades $\{(\varphi, \Delta q_{i,\varphi})\}_{\varphi \in \Phi_t}$
 
@@ -1353,7 +1352,7 @@ $$\max_{w} \mathbb{E}[\ln(1 + \sum_j w_j R_j)]$$
 where $R_j$ is the random return from sentence $j$.
 
 **Constraints:**
-- $\sum_j |w_j| \leq 1$ (no leverage)
+- $\sum_j |w_j| + \sum_{k \in \text{NewProposals}} |w_{bond,k}| \leq 1$ (no leverage)
 - $w_j \in [-1, 1]$ (can short)
 
 **Expected Return:**
