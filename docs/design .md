@@ -33,7 +33,7 @@ The market links these through economic incentives: agents who correctly predict
 
 | Role | Agent Type | Function | Incentive | Capital |
 |------|-----------|----------|-----------|---------|
-| **Inductive Agents (Minnows)** | LLM-based traders | Search for bugs, propose tests, predict outcomes, improve code | Gain wealth by accurate predictions | $W_i = B/N$ each |
+| **Inductive Agents (Sharks)** | LLM-based traders | Search for bugs, propose tests, predict outcomes, improve code | Gain wealth by accurate predictions | $W_i = B/N$ each |
 | **Deductive Agent (Whale)** | Algorithmic market maker | Provides liquidity, enforces logical consequences | Not profit-seeking; maintains market structure | $W_{whale} = B$ (fixed) |
 | **Orchestrator** | Neutral arbiter | Runs oracles, executes trades, enforces rules | Not a participant; executes deterministic protocol | N/A |
 
@@ -58,7 +58,7 @@ The system begins when the user provides a prompt $P_{user}$ and a budget $B$.
    *Note*: These sentences are mutually exclusive (only one can be "best"), though the market mechanism does not enforce $\sum P(\phi_{G,k}) = 1.0$. Prices are interpreted as market credences rather than formal probabilities.
 
 3.  **Capital Allocation:**
-    - **Inductive Minnows (LLM Agents):** Each initialized with $W_{i} = B / N$ compute credits
+    - **Inductive Sharks (LLM Agents):** Each initialized with $W_{i} = B / N$ compute credits
     - **Deductive Whale (Market Maker):** Initialized with $W_{whale} = \sum_{i} W_{i} = B$
     - **Total System Wealth:** $2B$ (conserved throughout)
 
@@ -451,9 +451,9 @@ The market is a discrete-time dynamical system $\Sigma = \langle \mathcal{A}, \P
 **Components:**
 
 - **$\mathcal{A} = \{a_1, \ldots, a_m, a_{whale}\}$**: The set of market participants
-  - $a_1, \ldots, a_m$: The Minnows (inductive agents)
+  - $a_1, \ldots, a_m$: The Sharks (inductive agents)
   - $a_{whale}$: The Whale (deductive agent + market maker)
-  - $m$: Number of Minnow agents (typically $m = N$ where $N$ is from initialization)
+  - $m$: Number of Shark agents (typically $m = N$ where $N$ is from initialization)
 
 - **$\Phi_t = \Phi_V \cup \Phi_G$**: The set of active sentences at round $t$
   - $\Phi_V = \{\varphi_{V,1}, \varphi_{V,2}, \ldots\}$: Verifier validity sentences
@@ -472,7 +472,7 @@ The market is a discrete-time dynamical system $\Sigma = \langle \mathcal{A}, \P
 
 - **$\mathcal{W}_t = (W_{1,t}, \ldots, W_{m,t}, W_{whale,t}) \in \mathbb{R}_{\geq 0}^{m+1}$**: The wealth vector
   - $W_{i,t}$: Wealth of agent $a_i$ at round $t$ (in compute credits)
-  - Initial condition: $W_{i,0} = B/N$ for all Minnows
+  - Initial condition: $W_{i,0} = B/N$ for all Sharks
   - Initial condition: $W_{whale,0} = B$
   - Conservation: $\sum_{i=1}^m W_{i,t} + W_{whale,t} = 2B - \sum_{s=0}^{t-1}(\text{taxes}_s)$ (strictly decreasing)
 
