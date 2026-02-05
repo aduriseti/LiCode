@@ -778,7 +778,7 @@ export const TournamentPlugin: Plugin = async (ctx) => {
         description: 'Run a Logical Induction Market tournament to solve a coding problem',
         args: {
           prompt: tool.schema.string().describe('The coding problem to solve'),
-          n_agents: tool.schema.number().default(5).describe('Number of competing agents'),
+          n_agents: tool.schema.number().default(3).describe('Number of competing agents'),
           budget: tool.schema.number().default(1000).describe('Total compute budget'),
           max_rounds: tool.schema.number().default(100).describe('Maximum tournament rounds')
         },

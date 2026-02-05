@@ -59,7 +59,7 @@ class TestOrchestrator(unittest.TestCase):
         
         # Verify basic structure
         self.assertIn("ROUND 0", summary)
-        self.assertIn("Candidate", summary)
+        self.assertIn("Asset", summary)
         self.assertIn("cand_0", summary)
         self.assertIn("Whale Wealth", summary)
         

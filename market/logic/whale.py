@@ -1,4 +1,5 @@
 import math
+import logging
 from typing import Dict, List, Tuple
 
 # Use relative imports if running as package, or assume PYTHONPATH set
@@ -83,6 +84,10 @@ class Whale:
         scores = Whale.compute_survival_scores(state)
         beliefs = Whale.compute_whale_beliefs(scores)
         
+        if scores:
+            logging.info(f"Whale Analysis - Scores: {scores}")
+            logging.info(f"Whale Analysis - Target Beliefs: {beliefs}")
+        
         trades = []
         
         # For each candidate, Whale wants to move price to belief
@@ -100,6 +105,8 @@ class Whale:
             if abs(target_p - current_p) < 0.01:
                 continue
                 
+            logging.info(f"Whale correcting {cid}: {current_p:.3f} -> {target_p:.3f}")
+            
             # Inverse LMSR Price Function:
             # P = e^(q_yes/b) / (e^q_yes/b + e^q_no/b)
             # P = 1 / (1 + e^((q_no - q_yes)/b))
