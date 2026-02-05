@@ -1,6 +1,7 @@
 import unittest
 import os
 import tempfile
+import shutil
 from market.logic.oracle import Oracle
 
 class TestOracle(unittest.TestCase):
@@ -24,30 +25,38 @@ class TestOracle(unittest.TestCase):
         with open(self.loop_cand, "w") as f:
             f.write("def add(a, b): \n while True: pass\n return 0")
             
-        # 4. Valid Test
-        self.valid_test = os.path.join(self.tmp_dir, "test_valid.py")
-        with open(self.valid_test, "w") as f:
+        # 4. Valid Verifier Package
+        self.valid_verifier_dir = os.path.join(self.tmp_dir, "v_valid")
+        os.makedirs(self.valid_verifier_dir)
+        
+        # Write test.py that imports solution
+        with open(os.path.join(self.valid_verifier_dir, "test.py"), "w") as f:
             f.write("import solution\nassert solution.add(1, 2) == 3")
+            
+        # Write run.sh
+        run_sh = os.path.join(self.valid_verifier_dir, "run.sh")
+        with open(run_sh, "w") as f:
+            f.write("#!/bin/bash\npython3 test.py")
+        os.chmod(run_sh, 0o755)
 
     def tearDown(self):
-        import shutil
         shutil.rmtree(self.tmp_dir)
 
     def test_pass(self):
-        res = Oracle.run_test(self.good_cand, self.valid_test)
+        res = Oracle.run_test(self.good_cand, self.valid_verifier_dir)
         self.assertEqual(res, "PASS")
         
     def test_fail(self):
-        res = Oracle.run_test(self.bad_cand, self.valid_test)
+        res = Oracle.run_test(self.bad_cand, self.valid_verifier_dir)
         self.assertEqual(res, "FAIL")
         
     def test_timeout(self):
         # We need the TEST to call the function
-        res = Oracle.run_test(self.loop_cand, self.valid_test, timeout=1)
+        res = Oracle.run_test(self.loop_cand, self.valid_verifier_dir, timeout=1)
         self.assertEqual(res, "TIMEOUT")
         
     def test_missing_file(self):
-        res = Oracle.run_test("ghost.py", self.valid_test)
+        res = Oracle.run_test("ghost.py", self.valid_verifier_dir)
         self.assertEqual(res, "ERROR")
 
 if __name__ == '__main__':

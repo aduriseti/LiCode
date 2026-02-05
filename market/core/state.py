@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, asdict
-from typing import Dict, Literal, Optional
+from typing import Dict, List, Literal, Optional
 import json
 
 AssetType = Literal["VERIFIER", "CANDIDATE"]
@@ -47,12 +47,25 @@ class AgentPortfolio:
         return AgentPortfolio(**data)
 
 @dataclass
+class MarketBond:
+    agent_id: str
+    asset_id: str
+    q_shares: float
+    unlock_round: int
+
+    def to_dict(self):
+        return asdict(self)
+
+@dataclass
 class MarketState:
     round_num: int
     liquidity_b: float
+    prompt: str = ""
     assets: Dict[str, MarketAsset] = field(default_factory=dict)
     agents: Dict[str, AgentPortfolio] = field(default_factory=dict)
     whale_wealth: float = 0.0
+    whale_shares: Dict[str, float] = field(default_factory=dict) # Track Whale inventory
+    bonds: List[MarketBond] = field(default_factory=list)
     
     # Track which tests failed which candidates
     # (verifier_id, candidate_id) -> bool (True = failed)
@@ -62,10 +75,13 @@ class MarketState:
         return json.dumps({
             "round_num": self.round_num,
             "liquidity_b": self.liquidity_b,
+            "prompt": self.prompt,
             "whale_wealth": self.whale_wealth,
+            "whale_shares": self.whale_shares,
             "assets": {k: v.to_dict() for k, v in self.assets.items()},
             "agents": {k: v.to_dict() for k, v in self.agents.items()},
-            "test_failures": self.test_failures
+            "test_failures": self.test_failures,
+            "bonds": [b.to_dict() for b in self.bonds]
         }, indent=2)
 
     @staticmethod
@@ -74,7 +90,9 @@ class MarketState:
         state = MarketState(
             round_num=data["round_num"],
             liquidity_b=data["liquidity_b"],
+            prompt=data.get("prompt", ""),
             whale_wealth=data["whale_wealth"],
+            whale_shares=data.get("whale_shares", {}),
             test_failures=data.get("test_failures", {})
         )
         
@@ -83,6 +101,9 @@ class MarketState:
             
         for k, v in data["agents"].items():
             state.agents[k] = AgentPortfolio.from_dict(v)
+            
+        if "bonds" in data:
+            state.bonds = [MarketBond(**b) for b in data["bonds"]]
             
         return state
 
