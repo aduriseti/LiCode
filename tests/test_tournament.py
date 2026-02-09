@@ -1,19 +1,19 @@
-from fibonacci import fib
+from fibonacci_tournament import fib
 import unittest
 
-class TestFib(unittest.TestCase):
-    def test_fib(self):
+class TestFibonacci(unittest.TestCase):
+    def test_values(self):
         self.assertEqual(fib(0), 0)
         self.assertEqual(fib(1), 1)
         self.assertEqual(fib(2), 1)
         self.assertEqual(fib(3), 2)
         self.assertEqual(fib(4), 3)
         self.assertEqual(fib(5), 5)
+        self.assertEqual(fib(6), 8)
         self.assertEqual(fib(10), 55)
 
     def test_negative(self):
-        with self.assertRaises(ValueError):
-            fib(-1)
+        self.assertIsNone(fib(-1))
 
 if __name__ == '__main__':
     unittest.main()
