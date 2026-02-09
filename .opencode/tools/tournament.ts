@@ -1,9 +1,111 @@
 import { tool } from "@opencode-ai/plugin"
 import { spawn } from "child_process";
 import fs from "fs/promises";
+import express from "express";
+import { Server } from "socket.io";
+import http from "http";
+import path from "path";
+
+// Simple Dashboard HTML
+const DASHBOARD_HTML = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Market Tournament Dashboard</title>
+    <style>
+        body { background-color: #1e1e1e; color: #d4d4d4; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; display: flex; flex-direction: column; height: 100vh; box-sizing: border-box; }
+        h1 { margin-top: 0; color: #9cdcfe; }
+        .container { display: flex; flex: 1; gap: 20px; overflow: hidden; }
+        .panel { background: #252526; padding: 15px; border-radius: 8px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; }
+        .panel h2 { margin-top: 0; color: #ce9178; border-bottom: 1px solid #3e3e42; padding-bottom: 5px; }
+        #logs { font-family: 'Consolas', 'Courier New', monospace; font-size: 14px; white-space: pre-wrap; }
+        .log-entry { margin-bottom: 2px; }
+        .log-info { color: #d4d4d4; }
+        .log-error { color: #f48771; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { text-align: left; padding: 8px; border-bottom: 1px solid #3e3e42; }
+        th { color: #569cd6; }
+        .bar-container { background: #3e3e42; height: 10px; border-radius: 5px; overflow: hidden; width: 100px; }
+        .bar { height: 100%; background: #4ec9b0; }
+        #status { font-weight: bold; color: #6a9955; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <h1>Logical Induction Market Dashboard</h1>
+    <div id="status">Connecting...</div>
+    <div class="container">
+        <div class="panel" style="flex: 2;">
+            <h2>Market State</h2>
+            <div id="round-info">Waiting for data...</div>
+            <div id="tables"></div>
+        </div>
+        <div class="panel" style="flex: 1;">
+            <h2>Live Logs</h2>
+            <div id="logs"></div>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        const statusEl = document.getElementById('status');
+        const logsEl = document.getElementById('logs');
+        const roundInfoEl = document.getElementById('round-info');
+        const tablesEl = document.getElementById('tables');
+
+        socket.on('connect', () => {
+            statusEl.textContent = 'Connected to Tournament Runner';
+        });
+
+        socket.on('disconnect', () => {
+            statusEl.textContent = 'Disconnected';
+            statusEl.style.color = '#f48771';
+        });
+
+        socket.on('log', (data) => {
+            if (data.type === 'log') {
+                const line = document.createElement('div');
+                line.className = 'log-entry log-info';
+                line.textContent = \`[\${new Date().toLocaleTimeString()}] \${data.message}\`;
+                logsEl.appendChild(line);
+                logsEl.scrollTop = logsEl.scrollHeight;
+            } else if (data.type === 'state') {
+                renderState(data);
+            } else if (data.type === 'agent_init') {
+                const line = document.createElement('div');
+                line.className = 'log-entry log-info';
+                line.textContent = \`Agent \${data.agent_id} initialized (Session: \${data.session_id})\`;
+                logsEl.appendChild(line);
+            }
+        });
+
+        function renderState(state) {
+            roundInfoEl.textContent = \`Round: \${state.round} | Whale Wealth: \${state.whale_wealth.toFixed(2)}\`;
+            
+            let html = '<h3>Assets</h3><table><tr><th>ID</th><th>Price</th><th>Vis</th></tr>';
+            state.assets.forEach(asset => {
+                const width = Math.min(100, asset.price * 100);
+                html += \`<tr><td>\${asset.id}</td><td>\${asset.price.toFixed(3)}</td><td><div class="bar-container"><div class="bar" style="width: \${width}%"></div></div></td></tr>\`;
+            });
+            html += '</table>';
+
+            html += '<h3>Agents</h3><table><tr><th>ID</th><th>Wealth</th></tr>';
+            state.agents.sort((a, b) => b.wealth - a.wealth).forEach(agent => {
+                html += \`<tr><td>\${agent.id}</td><td>\${agent.wealth.toFixed(2)}</td></tr>\`;
+            });
+            html += '</table>';
+
+            tablesEl.innerHTML = html;
+        }
+    </script>
+</body>
+</html>
+`;
 
 export default tool({
-  description: "Runs a Logical Induction Market tournament. ALWAYS use 'opencode' provider and 'gemini-3-flash' model to utilize available credits.",
+  description: "Runs a Logical Induction Market tournament with a live web dashboard. ALWAYS use 'opencode' provider and 'gemini-3-flash' model to utilize available credits.",
   args: {
     prompt: tool.schema.string().describe("The coding task"),
     rounds: tool.schema.number().default(2),
@@ -14,9 +116,51 @@ export default tool({
     log_level: tool.schema.string().default("ERROR").describe("Logging level (DEBUG, INFO, WARNING, ERROR). Defaults to ERROR."),
     timeout: tool.schema.number().default(300.0).describe("Timeout for each agent's response in seconds. Increase for complex tasks.")
   },
-  async execute({ prompt, rounds, agents, model, provider, target_file, log_level, timeout }) {
-    console.log(`Starting tournament for: "${prompt}" (Log Level: ${log_level})`);
-    
+  async execute({ prompt, rounds, agents, model, provider, target_file, log_level, timeout }, ctx: any) {
+    // 1. Start Dashboard Server
+    const app = express();
+    const server = http.createServer(app);
+    const io = new Server(server);
+
+    app.get('/', (req, res) => {
+        res.send(DASHBOARD_HTML);
+    });
+
+    const portPromise = new Promise<string>((resolve) => {
+        server.listen(0, () => {
+            const addr = server.address();
+            const port = typeof addr === 'string' ? 0 : addr?.port;
+            resolve(`http://localhost:${port}`);
+        });
+    });
+
+    const dashboardUrl = await portPromise;
+
+    // 2. Report URL via Chat Message (session.prompt)
+    if (ctx?.client?.session?.prompt) {
+        await ctx.client.session.prompt({
+            path: { id: ctx.sessionID },
+            body: {
+                noReply: true,
+                parts: [{ 
+                    type: "text", 
+                    text: `[SYSTEM]: Live tournament dashboard available at ${dashboardUrl}` 
+                }]
+            }
+        });
+    }
+
+    // 3. Structured Logging (replace console.log)
+    if (ctx?.client?.app?.log) {
+        await ctx.client.app.log({
+            body: {
+                service: "tournament-tool",
+                level: "info",
+                message: `Dashboard running at: ${dashboardUrl}`
+            }
+        });
+    }
+
     return new Promise((resolve, reject) => {
         const env = { 
             ...process.env, 
@@ -34,61 +178,81 @@ export default tool({
             "--agents", String(agents),
             "--model", model,
             "--provider", provider,
-            "--timeout", String(timeout)
+            "--timeout", String(timeout),
+            "--json-logs" // Use JSON logs
         ];
         
         if (target_file) {
             args.push("--target-file", target_file);
         }
 
-        // Use spawn for streaming
+        // Use spawn
         const child = spawn("python3", args, { env });
 
-        let stdoutBuffer = "";
+        let stdoutBuffer = ""; // For accumulating full report if needed
         let stderrBuffer = "";
+        let lineBuffer = "";   // For handling stream chunks
+        let finalReport = "No report generated.";
 
-        // Stream stderr (UI) to console immediately
-        child.stderr.on("data", (data) => {
-            process.stderr.write(data);
-            stderrBuffer += data.toString();
-        });
-
-        // Collect stdout (JSON State)
+        // Handle JSON output from stdout
         child.stdout.on("data", (data) => {
-            stdoutBuffer += data.toString();
+            const chunk = data.toString();
+            stdoutBuffer += chunk;
+            lineBuffer += chunk;
+            
+            // Process complete lines
+            if (lineBuffer.includes('\n')) {
+                const lines = lineBuffer.split('\n');
+                // The last element is either empty (if ended with \n) or a partial line
+                lineBuffer = lines.pop() || "";
+                
+                for (const line of lines) {
+                    if (!line.trim()) continue;
+                    try {
+                        const event = JSON.parse(line);
+                        
+                        if (event.type === 'final_result') {
+                            finalReport = event.report;
+                            io.emit('log', { type: 'log', message: 'Tournament Finished. Processing results...' });
+                        } else {
+                            // Forward everything else to dashboard
+                            io.emit('log', event);
+                        }
+                    } catch (e) {
+                        // Not JSON? Maybe normal output mixed in
+                        // console.log("Non-JSON output:", line);
+                    }
+                }
+            }
         });
 
-                child.on("close", async (code) => {
+        // Capture stderr for debugging (or forward as errors)
+        child.stderr.on("data", (data) => {
+            const msg = data.toString();
+            stderrBuffer += msg;
+            // process.stderr.write(msg); // Optional: keep writing to console for debugging
+            io.emit('log', { type: 'log', message: `[STDERR] ${msg}` });
+        });
 
-                    if (code !== 0) {
+        child.on("close", async (code) => {
+            // Stop server after a delay or immediately? 
+            // If we stop immediately, user might lose the dashboard connection.
+            // But the tool needs to return.
+            // We'll give it a few seconds or just close it. 
+            // Ideally, we keep it open, but MCP tool must finish.
+            
+            server.close();
 
-                        resolve(`Market crashed (Exit Code ${code}):\n${stderrBuffer}`);
+            if (code !== 0) {
+                resolve(`Market crashed (Exit Code ${code}):\n${stderrBuffer}`);
+                return;
+            }
 
-                        return;
-
-                    }
-
-        
-
-                    try {
-
-                        const result = JSON.parse(stdoutBuffer.trim());
-
-                        // The CLI now returns { state: ..., report: "..." }
-
-                        resolve(result.report || "Tournament finished but no report was generated.");
-
-                        
-
-                    } catch (e: any) {
-
-                        resolve(`Tournament ran, but output parsing failed: ${e.message}\nOutput start: ${stdoutBuffer.substring(0, 100)}...`);
-
-                    }
-
-                });
+            resolve(finalReport);
+        });
 
         child.on("error", (err) => {
+            server.close();
             resolve(`Failed to start market process: ${err.message}`);
         });
     });

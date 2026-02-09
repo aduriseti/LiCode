@@ -1,26 +1,188 @@
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { EventEmitter } from "events";
+import http from "http";
 
-// Mock child_process before importing the tool if possible, or just test the logic that doesn't run exec immediately
-// Since default export is the tool definition, we can inspect its properties without running it.
+// Use vi.hoisted for variables used in vi.mock
+const mocks = vi.hoisted(() => ({
+  spawn: vi.fn(),
+  expressGet: vi.fn(),
+  serverListen: vi.fn(),
+  serverClose: vi.fn(),
+  serverAddress: vi.fn(),
+  socketIoEmit: vi.fn(),
+  socketIoOn: vi.fn(),
+}));
 
+vi.mock("@opencode-ai/plugin", () => {
+  const schemaItem = () => ({
+    default: schemaItem,
+    describe: schemaItem,
+    optional: schemaItem,
+  });
+  return {
+    tool: Object.assign(vi.fn((config) => config), {
+      schema: {
+        string: schemaItem,
+        number: schemaItem,
+      }
+    })
+  };
+});
+
+vi.mock("child_process", () => ({
+  spawn: mocks.spawn
+}));
+
+vi.mock("express", () => {
+  return {
+    default: Object.assign(vi.fn(() => ({
+      get: mocks.expressGet,
+    })), {
+      json: vi.fn(),
+      static: vi.fn()
+    })
+  };
+});
+
+vi.mock("http", () => ({
+  default: {
+    createServer: vi.fn(() => ({
+      listen: mocks.serverListen,
+      address: mocks.serverAddress,
+      close: mocks.serverClose
+    }))
+  }
+}));
+
+vi.mock("socket.io", () => {
+  return {
+    Server: function() {
+      return {
+        emit: mocks.socketIoEmit,
+        on: mocks.socketIoOn
+      };
+    }
+  };
+});
+
+// Import the tool AFTER mocks are defined
 import tournamentTool from "../tools/tournament";
 
-describe("Tournament Tool Definition", () => {
-  it("should have correct name and description", () => {
-    expect(tournamentTool.description).toContain("Logical Induction Market");
-    expect(tournamentTool.description).toContain("ALWAYS use 'opencode'");
+describe("Tournament Tool", () => {
+  let mockContext: any;
+  let mockChildProcess: any;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+
+    // Setup Mock Context
+    mockContext = {
+      sessionID: "test-session-123",
+      client: {
+        session: {
+          prompt: vi.fn().mockResolvedValue({})
+        },
+        app: {
+          log: vi.fn().mockResolvedValue({})
+        }
+      }
+    };
+
+    // Setup Mock Child Process
+    mockChildProcess = new EventEmitter();
+    (mockChildProcess as any).stdout = new EventEmitter();
+    (mockChildProcess as any).stderr = new EventEmitter();
+    mocks.spawn.mockReturnValue(mockChildProcess);
+
+    // Setup Mock Server Address
+    mocks.serverAddress.mockReturnValue({ port: 5001 });
+    
+    // Setup Mock Server Listen to call callback immediately
+    mocks.serverListen.mockImplementation((port: any, cb: any) => {
+      if (cb) cb();
+    });
   });
 
-  it("should have correct arguments", () => {
-    const args = tournamentTool.args;
-    expect(args.prompt).toBeDefined();
-    expect(args.rounds).toBeDefined();
-    expect(args.agents).toBeDefined();
-    expect(args.model).toBeDefined();
-    expect(args.provider).toBeDefined();
+  it("should start dashboard, report URL, and run python process", async () => {
+    // 1. Start the tool execution
+    const executionPromise = tournamentTool.execute({
+      prompt: "Test Task",
+      rounds: 2,
+      agents: 3,
+      model: "gemini-3-flash",
+      provider: "opencode",
+      log_level: "INFO",
+      timeout: 10
+    }, mockContext);
+
+    // 2. Wait a tick for async server startup
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    // 4. Verify URL Reporting via session.prompt
+    expect(mockContext.client.session.prompt).toHaveBeenCalledWith(expect.objectContaining({
+      path: { id: "test-session-123" },
+      body: expect.objectContaining({
+        parts: [expect.objectContaining({
+          text: expect.stringContaining("http://localhost:5001")
+        })]
+      } )
+    }));
+
+    // 5. Verify Structured Logging via app.log
+    expect(mockContext.client.app.log).toHaveBeenCalledWith(expect.objectContaining({
+      body: expect.objectContaining({
+        service: "tournament-tool",
+        message: expect.stringContaining("Dashboard running at")
+      })
+    }));
+
+    // 6. Verify Python Process Spawn
+    expect(mocks.spawn).toHaveBeenCalledWith(
+      "python3",
+      expect.arrayContaining(["--prompt", "Test Task"]),
+      expect.any(Object)
+    );
+
+    // 7. Simulate Python Output (JSON Logs)
+    const logEvent = { type: "log", message: "Processing round 1" };
+    mockChildProcess.stdout.emit("data", Buffer.from(JSON.stringify(logEvent) + "\n"));
+    
+    // Verify it was emitted to Socket.io
+    expect(mocks.socketIoEmit).toHaveBeenCalledWith("log", logEvent);
+
+    // 8. Simulate Final Result
+    const finalReport = "Final Analysis Report";
+    const resultEvent = { type: "final_result", report: finalReport };
+    mockChildProcess.stdout.emit("data", Buffer.from(JSON.stringify(resultEvent) + "\n"));
+    
+    // 9. Simulate Process Exit
+    mockChildProcess.emit("close", 0);
+
+    // 10. Await Result
+    const result = await executionPromise;
+    expect(result).toBe(finalReport);
+
+    // 11. Verify Server Cleanup
+    expect(mocks.serverClose).toHaveBeenCalled();
   });
-  
-  // Testing the execute function requires mocking execAsync which is internal to the module.
-  // In a real setup we'd use a rewiring tool or dependency injection.
-  // For now, this verifies the schema definition which was the source of the crash.
+
+  it("should handle partial JSON chunks correctly", async () => {
+    const executionPromise = tournamentTool.execute({
+        prompt: "Test", rounds: 1, agents: 2, model: "m", provider: "p", log_level: "E", timeout: 1
+    }, mockContext);
+    
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    const part1 = '{"type": "log", "mess';
+    const part2 = 'age": "Split JSON"}\n';
+
+    mockChildProcess.stdout.emit("data", Buffer.from(part1));
+    expect(mocks.socketIoEmit).not.toHaveBeenCalled();
+
+    mockChildProcess.stdout.emit("data", Buffer.from(part2));
+    expect(mocks.socketIoEmit).toHaveBeenCalledWith("log", { type: "log", message: "Split JSON" });
+
+    mockChildProcess.emit("close", 0);
+    await executionPromise;
+  });
 });

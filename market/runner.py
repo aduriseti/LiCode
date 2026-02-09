@@ -196,12 +196,12 @@ class MarketRunner:
         
         return layout
 
-    async def run_loop(self, max_rounds: int, stream_ui: bool = True):
+    async def run_loop(self, max_rounds: int, stream_ui: bool = True, json_logs: bool = False):
         """
         Executes the main game loop until convergence or max_rounds (Async).
         """
         try:
-            if stream_ui:
+            if stream_ui and not json_logs:
                 # Setup custom handler for dashboard + file logging
                 log_file = os.path.join(self.arena_dir, "tournament.log")
                 handler = BufferedLogHandler(self.log_buffer, log_file=log_file)
@@ -229,7 +229,10 @@ class MarketRunner:
                     "session_file": session_file,
                     "log_path": rel_log_path
                 }
-                logging.info(f"Agent {aid} connected with session: {shark.session.id}")
+                if json_logs:
+                    print(json.dumps({"type": "agent_init", "agent_id": aid, "session_id": session_id}))
+                else:
+                    logging.info(f"Agent {aid} connected with session: {shark.session.id}")
             
             # Add metadata
             session_map["_meta"] = {
@@ -242,20 +245,26 @@ class MarketRunner:
             with open(os.path.join(self.arena_dir, "session_map.json"), "w") as f:
                 json.dump(session_map, f, indent=2)
 
-            if stream_ui:
+            if stream_ui and not json_logs:
                 sys.stderr.write(f"Starting Tournament: {len(self.sharks)} Agents (Server: {self.api_url})\n")
 
             # Use Rich Live Display if stream_ui is True
             # Force terminal to ensure Rich renders control codes through the pipe
-            console = Console(stderr=True, force_terminal=True)
-            with Live(self._render_dashboard(), refresh_per_second=4, console=console, transient=False) as live:
-                if not stream_ui:
-                    live.stop() # Disable if not requested
+            if stream_ui and not json_logs:
+                console = Console(stderr=True, force_terminal=True)
+                live = Live(self._render_dashboard(), refresh_per_second=4, console=console, transient=False)
+                live.start()
+            else:
+                live = None
 
+            try:
                 for i in range(max_rounds):
                     # ... existing loop logic ...
                     # 1. Collect Actions in Parallel
-                    logging.info(f"Round {i+1}: Collecting agent actions...")
+                    if json_logs:
+                        print(json.dumps({"type": "log", "message": f"Round {i+1}: Collecting agent actions..."}))
+                    else:
+                        logging.info(f"Round {i+1}: Collecting agent actions...")
                     
                     tasks = []
                     for aid, shark in self.sharks.items():
@@ -263,25 +272,59 @@ class MarketRunner:
                             tasks.append(shark.get_action(self.orchestrator.state))
                     
                     actions = await asyncio.gather(*tasks)
-                    logging.info(f"Round {i+1}: All agents decided.")
+                    
+                    if json_logs:
+                        print(json.dumps({"type": "log", "message": f"Round {i+1}: All agents decided."}))
+                    else:
+                        logging.info(f"Round {i+1}: All agents decided.")
                     
                     # 2. Step Market
                     self.orchestrator.process_round(list(actions))
                     
                     # 3. Update UI
-                    if stream_ui:
+                    if live:
                         live.update(self._render_dashboard())
+                    elif json_logs:
+                        # Output state for dashboard
+                        print(json.dumps({
+                            "type": "state", 
+                            "round": self.orchestrator.state.round_num,
+                            "whale_wealth": self.orchestrator.state.whale_wealth,
+                            "assets": [
+                                {"id": aid, "price": self.orchestrator.state.get_asset_price(aid)}
+                                for aid in self.orchestrator.state.assets
+                            ],
+                            "agents": [
+                                {"id": agent.agent_id, "wealth": agent.wealth}
+                                for agent in self.orchestrator.state.agents.values()
+                            ]
+                        }))
                         
                     # 4. Check Convergence
                     if self.check_convergence():
-                        if stream_ui:
+                        if live:
                             # sys.stderr.write(f"Convergence Reached at Round {i+1}!\n")
                             # Just let the live display persist
                             pass
-                        logging.info(f"Convergence reached at round {i+1}")
+                        elif json_logs:
+                            print(json.dumps({"type": "log", "message": f"Convergence reached at round {i+1}"}))
+                        else:
+                            logging.info(f"Convergence reached at round {i+1}")
                         break
+            finally:
+                if live:
+                    live.stop()
                 
-            logging.info(f"Tournament finished. Final report generated in {self.arena_dir}")
+            if json_logs:
+                 # Construct final output
+                output = {
+                    "type": "final_result",
+                    "state": json.loads(self.orchestrator.state.to_json()),
+                    "report": self.orchestrator.get_final_report()
+                }
+                print(json.dumps(output))
+            else:
+                logging.info(f"Tournament finished. Final report generated in {self.arena_dir}")
         finally:
             self._stop_server()
 
