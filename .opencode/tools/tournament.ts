@@ -1,13 +1,15 @@
-import { tool } from "@opencode-ai/plugin"
-import { spawn } from "child_process";
+import { tool, type ToolContext } from "@opencode-ai/plugin"
+import { type OpencodeClient } from "@opencode-ai/sdk"
+import { spawn, type ChildProcess } from "child_process";
 import fs from "fs/promises";
-import express from "express";
-import { Server } from "socket.io";
-import http from "http";
+import express, { type Express, type Request, type Response } from "express";
+import { Server, type Socket } from "socket.io";
+import http, { type Server as HttpServer } from "http";
 import path from "path";
+import { type LogEvent } from "./types";
 
 // Simple Dashboard HTML
-const DASHBOARD_HTML = `
+const DASHBOARD_HTML: string = `
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -116,17 +118,17 @@ export default tool({
     log_level: tool.schema.string().default("ERROR").describe("Logging level (DEBUG, INFO, WARNING, ERROR). Defaults to ERROR."),
     timeout: tool.schema.number().default(300.0).describe("Timeout for each agent's response in seconds. Increase for complex tasks.")
   },
-  async execute({ prompt, rounds, agents, model, provider, target_file, log_level, timeout }, ctx: any) {
+  async execute({ prompt, rounds, agents, model, provider, target_file, log_level, timeout }, ctx: ToolContext & { client: OpencodeClient }) {
     // 1. Start Dashboard Server
-    const app = express();
-    const server = http.createServer(app);
-    const io = new Server(server);
+    const app: Express = express();
+    const server: HttpServer = http.createServer(app);
+    const io: Server = new Server(server);
 
-    app.get('/', (req, res) => {
+    app.get('/', (req: Request, res: Response) => {
         res.send(DASHBOARD_HTML);
     });
 
-    const portPromise = new Promise<string>((resolve) => {
+    const portPromise: Promise<string> = new Promise((resolve) => {
         server.listen(0, () => {
             const addr = server.address();
             const port = typeof addr === 'string' ? 0 : addr?.port;
@@ -134,42 +136,73 @@ export default tool({
         });
     });
 
-    const dashboardUrl = await portPromise;
+    const dashboardUrl: string = await portPromise;
+    const msg: string = `🚀 Live tournament dashboard available at ${dashboardUrl}`;
 
-    // 2. Report URL via Chat Message (session.prompt)
-    if (ctx?.client?.session?.prompt) {
-        await ctx.client.session.prompt({
-            path: { id: ctx.sessionID },
+    // 2. Report URL via Tool Metadata (Status Bar)
+    ctx.metadata({ title: msg });
+
+    // 3. Report URL via TUI Toast
+    try {
+        await ctx.client.tui.showToast({
             body: {
-                noReply: true,
-                parts: [{ 
-                    type: "text", 
-                    text: `[SYSTEM]: Live tournament dashboard available at ${dashboardUrl}` 
-                }]
+                message: msg,
+                type: "info"
             }
         });
-    }
-
-    // 3. Structured Logging (replace console.log)
-    if (ctx?.client?.app?.log) {
+    } catch (e) {
+        const err = e as Error;
         await ctx.client.app.log({
             body: {
                 service: "tournament-tool",
-                level: "info",
-                message: `Dashboard running at: ${dashboardUrl}`
+                level: "error",
+                message: `Failed to show toast: ${err.message}`
             }
         });
     }
 
-    return new Promise((resolve, reject) => {
-        const env = { 
+    // 4. Report URL via Session Prompt (Chat Backup)
+    if (ctx.sessionID) {
+        try {
+            await ctx.client.session.promptAsync({
+                path: { id: ctx.sessionID },
+                body: {
+                    parts: [{ type: "text", text: msg }]
+                }
+            });
+        } catch (e) {
+            const err = e as Error;
+            await ctx.client.app.log({
+                body: {
+                    service: "tournament-tool",
+                    level: "error",
+                    message: `Failed to send promptAsync: ${err.message}`
+                }
+            });
+        }
+    }
+
+    // 5. Structured Logging
+    await ctx.client.app.log({
+        body: {
+            service: "tournament-tool",
+            level: "info",
+            message: msg
+        }
+    });
+
+    // D. Yield to event loop to ensure flushing
+    await new Promise<void>((resolve) => setTimeout(resolve, 2000));
+
+    return new Promise<string>((resolve, reject) => {
+        const env: NodeJS.ProcessEnv = { 
             ...process.env, 
             OPENCODE_API_KEY: process.env.OPENCODE,
             FORCE_COLOR: '1',
             PYTHONUNBUFFERED: '1'
         };
         
-        const args = [
+        const args: string[] = [
             "-m", "market.cli",
             "--log-level", log_level,
             "run",
@@ -186,32 +219,28 @@ export default tool({
             args.push("--target-file", target_file);
         }
 
-        // Use spawn
-        const child = spawn("python3", args, { env });
+        const child: ChildProcess = spawn("python3", args, { env });
 
-        let stdoutBuffer = ""; // For accumulating full report if needed
-        let stderrBuffer = "";
-        let lineBuffer = "";   // For handling stream chunks
-        let finalReport = "No report generated.";
+        let stdoutBuffer: string = "";
+        let stderrBuffer: string = "";
+        let lineBuffer: string = "";
+        let finalReport: string = "No report generated.";
 
-        // Handle JSON output from stdout
-        child.stdout.on("data", (data) => {
-            const chunk = data.toString();
+        child.stdout?.on("data", (data: Buffer) => {
+            const chunk: string = data.toString();
             stdoutBuffer += chunk;
             lineBuffer += chunk;
             
-            // Process complete lines
             if (lineBuffer.includes('\n')) {
-                const lines = lineBuffer.split('\n');
-                // The last element is either empty (if ended with \n) or a partial line
+                const lines: string[] = lineBuffer.split('\n');
                 lineBuffer = lines.pop() || "";
                 
                 for (const line of lines) {
                     if (!line.trim()) continue;
                     try {
-                        const event = JSON.parse(line);
+                        const event: LogEvent = JSON.parse(line);
                         
-                        if (event.type === 'final_result') {
+                        if (event.type === 'final_result' && typeof event.report === 'string') {
                             finalReport = event.report;
                             io.emit('log', { type: 'log', message: 'Tournament Finished. Processing results...' });
                         } else {
@@ -219,39 +248,36 @@ export default tool({
                             io.emit('log', event);
                         }
                     } catch (e) {
-                        // Not JSON? Maybe normal output mixed in
-                        // console.log("Non-JSON output:", line);
+                        // Log parsing errors for debugging
+                        const err = e as Error;
+                        ctx.client.app.log({
+                            body: {
+                                service: "tournament-tool",
+                                level: "debug",
+                                message: `Failed to parse JSON from subprocess: ${err.message}. Line: ${line}`
+                            }
+                        }).catch(() => {}); // Ignore logging failures
                     }
                 }
             }
         });
 
-        // Capture stderr for debugging (or forward as errors)
-        child.stderr.on("data", (data) => {
-            const msg = data.toString();
+        child.stderr?.on("data", (data: Buffer) => {
+            const msg: string = data.toString();
             stderrBuffer += msg;
-            // process.stderr.write(msg); // Optional: keep writing to console for debugging
             io.emit('log', { type: 'log', message: `[STDERR] ${msg}` });
         });
 
-        child.on("close", async (code) => {
-            // Stop server after a delay or immediately? 
-            // If we stop immediately, user might lose the dashboard connection.
-            // But the tool needs to return.
-            // We'll give it a few seconds or just close it. 
-            // Ideally, we keep it open, but MCP tool must finish.
-            
+        child.on("close", async (code: number | null) => {
             server.close();
-
             if (code !== 0) {
                 resolve(`Market crashed (Exit Code ${code}):\n${stderrBuffer}`);
                 return;
             }
-
             resolve(finalReport);
         });
 
-        child.on("error", (err) => {
+        child.on("error", (err: Error) => {
             server.close();
             resolve(`Failed to start market process: ${err.message}`);
         });
