@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   promptAsync: vi.fn(),
   showToast: vi.fn(),
   appLog: vi.fn(),
+  shellHelper: vi.fn().mockReturnValue({ text: vi.fn().mockResolvedValue("output") }),
 }));
 
 vi.mock("@opencode-ai/plugin", () => {
@@ -69,42 +70,18 @@ vi.mock("socket.io", () => {
   };
 });
 
-// Import the tool AFTER mocks are defined
-import tournamentTool from "../tools/tournament";
-
-// Import types
-import { type ToolContext } from "@opencode-ai/plugin";
-import { type OpencodeClient } from "@opencode-ai/sdk";
-
-// Define Mock Context Interface
-interface MockContext {
-  sessionID: string;
-  metadata: ReturnType<typeof vi.fn>;
-  client: {
-    session: {
-      promptAsync: ReturnType<typeof vi.fn>;
-    };
-    tui: {
-      showToast: ReturnType<typeof vi.fn>;
-    };
-    app: {
-      log: ReturnType<typeof vi.fn>;
-    };
-  };
-}
+// Import the tool (plugin)
+import tournamentPlugin from "../plugins/tournament";
 
 describe("Tournament Tool", () => {
-  let mockContext: MockContext;
-  let mockChildProcess: EventEmitter & { stdout: EventEmitter; stderr: EventEmitter };
+  let mockContext: any;
+  let mockChildProcess: any;
+  let tournamentTool: any;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
 
-    // Setup Mock Context
-    mockContext = {
-      sessionID: "test-session-123",
-      metadata: mocks.ctxMetadata,
-      client: {
+    const mockClient: any = {
         session: {
           promptAsync: mocks.promptAsync,
         },
@@ -114,7 +91,24 @@ describe("Tournament Tool", () => {
         app: {
           log: mocks.appLog
         }
-      }
+    };
+
+    // 1. Initialize Plugin
+    const hooks = await tournamentPlugin({
+        client: mockClient,
+        project: {} as any,
+        directory: "/dir",
+        worktree: "/wt",
+        serverUrl: new URL("http://localhost"),
+        $: mocks.shellHelper
+    });
+    
+    tournamentTool = hooks.tool!.tournament;
+
+    // Setup Mock Context
+    mockContext = {
+      sessionID: "test-session-123",
+      metadata: mocks.ctxMetadata,
     };
 
     // Setup Mock Child Process
@@ -133,9 +127,8 @@ describe("Tournament Tool", () => {
     });
   });
 
-  it("should start dashboard and report URL via multiple durable channels", async () => {
+  it("should start dashboard and report URL via multiple durable channels including shell helper", async () => {
     // 1. Start the tool execution
-    // Cast mockContext to the expected type for execution
     const executionPromise = tournamentTool.execute({
       prompt: "Test Task",
       rounds: 2,
@@ -144,17 +137,23 @@ describe("Tournament Tool", () => {
       provider: "opencode",
       log_level: "INFO",
       timeout: 10
-    }, mockContext as unknown as ToolContext & { client: OpencodeClient });
+    }, mockContext);
 
     // 2. Wait a tick for async server startup + message delays
     await new Promise(resolve => setTimeout(resolve, 2500));
 
-    // 3. Verify URL Reporting via ctx.metadata (Status Bar)
+    // 3. Verify Shell Helper ($) was used to stream output
+    expect(mocks.shellHelper).toHaveBeenCalledWith(
+        expect.arrayContaining(["echo "]),
+        expect.stringContaining("🚀 Live tournament dashboard available at http://localhost:5001")
+    );
+
+    // 4. Verify URL Reporting via ctx.metadata (Status Bar)
     expect(mocks.ctxMetadata).toHaveBeenCalledWith({
       title: expect.stringContaining("http://localhost:5001")
     });
 
-    // 4. Verify URL Reporting via promptAsync (Chat Message)
+    // 5. Verify URL Reporting via promptAsync (Chat Message)
     expect(mocks.promptAsync).toHaveBeenCalledWith(expect.objectContaining({
       path: { id: "test-session-123" },
       body: expect.objectContaining({
@@ -164,7 +163,7 @@ describe("Tournament Tool", () => {
       })
     }));
 
-    // 5. Verify URL Reporting via showToast (TUI Overlay)
+    // 6. Verify URL Reporting via showToast (TUI Overlay)
     expect(mocks.showToast).toHaveBeenCalledWith(expect.objectContaining({
       body: expect.objectContaining({
         message: expect.stringContaining("http://localhost:5001"),
@@ -172,7 +171,7 @@ describe("Tournament Tool", () => {
       })
     }));
 
-    // 6. Verify Structured Logging via app.log
+    // 7. Verify Structured Logging via app.log
     expect(mocks.appLog).toHaveBeenCalledWith(expect.objectContaining({
       body: expect.objectContaining({
         service: "tournament-tool",
@@ -181,40 +180,40 @@ describe("Tournament Tool", () => {
       })
     }));
 
-    // 7. Verify Python Process Spawn
+    // 8. Verify Python Process Spawn
     expect(mocks.spawn).toHaveBeenCalledWith(
       "python3",
       expect.arrayContaining(["--prompt", "Test Task"]),
       expect.any(Object)
     );
 
-    // 8. Simulate Python Output (JSON Logs)
+    // 9. Simulate Python Output (JSON Logs)
     const logEvent = { type: "log", message: "Processing round 1" };
     mockChildProcess.stdout.emit("data", Buffer.from(JSON.stringify(logEvent) + "\n"));
     
     // Verify it was emitted to Socket.io
     expect(mocks.socketIoEmit).toHaveBeenCalledWith("log", logEvent);
 
-    // 9. Simulate Final Result
+    // 10. Simulate Final Result
     const finalReport = "Final Analysis Report";
     const resultEvent = { type: "final_result", report: finalReport };
     mockChildProcess.stdout.emit("data", Buffer.from(JSON.stringify(resultEvent) + "\n"));
     
-    // 10. Simulate Process Exit
+    // 11. Simulate Process Exit
     mockChildProcess.emit("close", 0);
 
-    // 11. Await Result
+    // 12. Await Result
     const result = await executionPromise;
     expect(result).toBe(finalReport);
 
-    // 12. Verify Server Cleanup
+    // 13. Verify Server Cleanup
     expect(mocks.serverClose).toHaveBeenCalled();
   });
 
   it("should handle partial JSON chunks correctly", async () => {
     const executionPromise = tournamentTool.execute({
         prompt: "Test", rounds: 1, agents: 2, model: "m", provider: "p", log_level: "E", timeout: 1
-    }, mockContext as unknown as ToolContext & { client: OpencodeClient });
+    }, mockContext);
     
     await new Promise(resolve => setTimeout(resolve, 2500));
 
