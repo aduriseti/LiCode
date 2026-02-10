@@ -41,6 +41,22 @@ class Shark:
                     f.write(f"=== Session Created: {self.session.id} ===\n")
 
     def _log_interaction(self, prompt: str, response: Any, error: Optional[str] = None):
+        # 1. Emit trace to stdout for Dashboard
+        try:
+            trace_event = {
+                "type": "agent_trace",
+                "agent_id": self.agent_id,
+                "timestamp": logging.Formatter('%(asctime)s').format(logging.LogRecord("", 0, "", 0, "", (), None)),
+                "prompt": prompt,
+                "response": str(response),
+                "error": error
+            }
+            print(json.dumps(trace_event))
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+        # 2. Write to log file
         if not self.log_path: return
         
         try:
