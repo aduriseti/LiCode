@@ -11,11 +11,11 @@ const mocks = vi.hoisted(() => ({
   serverAddress: vi.fn(),
   socketIoEmit: vi.fn(),
   socketIoOn: vi.fn(),
-  ctxMetadata: vi.fn(),
   promptAsync: vi.fn(),
   showToast: vi.fn(),
   appLog: vi.fn(),
   shellHelper: vi.fn().mockReturnValue({ text: vi.fn().mockResolvedValue("output") }),
+  open: vi.fn(),
 }));
 
 vi.mock("@opencode-ai/plugin", () => {
@@ -36,6 +36,10 @@ vi.mock("@opencode-ai/plugin", () => {
 
 vi.mock("child_process", () => ({
   spawn: mocks.spawn
+}));
+
+vi.mock("open", () => ({
+  default: mocks.open
 }));
 
 vi.mock("express", () => {
@@ -71,7 +75,7 @@ vi.mock("socket.io", () => {
 });
 
 // Import the tool (plugin)
-import tournamentPlugin from "../plugins/tournament";
+import { tournamentPlugin } from "../plugins/tournament";
 
 describe("Tournament Tool", () => {
   let mockContext: any;
@@ -108,7 +112,6 @@ describe("Tournament Tool", () => {
     // Setup Mock Context
     mockContext = {
       sessionID: "test-session-123",
-      metadata: mocks.ctxMetadata,
     };
 
     // Setup Mock Child Process
@@ -127,7 +130,7 @@ describe("Tournament Tool", () => {
     });
   });
 
-  it("should start dashboard and report URL via multiple durable channels including shell helper", async () => {
+  it("should start dashboard and report URL via multiple channels", async () => {
     // 1. Start the tool execution
     const executionPromise = tournamentTool.execute({
       prompt: "Test Task",
@@ -142,18 +145,10 @@ describe("Tournament Tool", () => {
     // 2. Wait a tick for async server startup + message delays
     await new Promise(resolve => setTimeout(resolve, 2500));
 
-    // 3. Verify Shell Helper ($) was used to stream output
-    expect(mocks.shellHelper).toHaveBeenCalledWith(
-        expect.arrayContaining(["echo "]),
-        expect.stringContaining("🚀 Live tournament dashboard available at http://localhost:5001")
-    );
+    // 3. Verify browser was opened
+    expect(mocks.open).toHaveBeenCalledWith("http://localhost:5001");
 
-    // 4. Verify URL Reporting via ctx.metadata (Status Bar)
-    expect(mocks.ctxMetadata).toHaveBeenCalledWith({
-      title: expect.stringContaining("http://localhost:5001")
-    });
-
-    // 5. Verify URL Reporting via promptAsync (Chat Message)
+    // 4. Verify URL Reporting via promptAsync (Chat Message)
     expect(mocks.promptAsync).toHaveBeenCalledWith(expect.objectContaining({
       path: { id: "test-session-123" },
       body: expect.objectContaining({
@@ -163,50 +158,41 @@ describe("Tournament Tool", () => {
       })
     }));
 
-    // 6. Verify URL Reporting via showToast (TUI Overlay)
+    // 5. Verify URL Reporting via showToast (TUI Overlay)
     expect(mocks.showToast).toHaveBeenCalledWith(expect.objectContaining({
       body: expect.objectContaining({
         message: expect.stringContaining("http://localhost:5001"),
-        type: "info"
+        variant: "info"
       })
     }));
 
-    // 7. Verify Structured Logging via app.log
-    expect(mocks.appLog).toHaveBeenCalledWith(expect.objectContaining({
-      body: expect.objectContaining({
-        service: "tournament-tool",
-        level: "info",
-        message: expect.stringContaining("http://localhost:5001")
-      })
-    }));
-
-    // 8. Verify Python Process Spawn
+    // 6. Verify Python Process Spawn
     expect(mocks.spawn).toHaveBeenCalledWith(
       "python3",
       expect.arrayContaining(["--prompt", "Test Task"]),
       expect.any(Object)
     );
 
-    // 9. Simulate Python Output (JSON Logs)
+    // 7. Simulate Python Output (JSON Logs)
     const logEvent = { type: "log", message: "Processing round 1" };
     mockChildProcess.stdout.emit("data", Buffer.from(JSON.stringify(logEvent) + "\n"));
     
     // Verify it was emitted to Socket.io
     expect(mocks.socketIoEmit).toHaveBeenCalledWith("log", logEvent);
 
-    // 10. Simulate Final Result
+    // 8. Simulate Final Result
     const finalReport = "Final Analysis Report";
     const resultEvent = { type: "final_result", report: finalReport };
     mockChildProcess.stdout.emit("data", Buffer.from(JSON.stringify(resultEvent) + "\n"));
     
-    // 11. Simulate Process Exit
+    // 9. Simulate Process Exit
     mockChildProcess.emit("close", 0);
 
-    // 12. Await Result
+    // 10. Await Result
     const result = await executionPromise;
     expect(result).toBe(finalReport);
 
-    // 13. Verify Server Cleanup
+    // 11. Verify Server Cleanup
     expect(mocks.serverClose).toHaveBeenCalled();
   });
 
