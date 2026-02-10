@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Market Tournament Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #1e1e1e; color: #d4d4d4; }
+        .log-entry { font-family: 'Consolas', 'Courier New', monospace; font-size: 13px; }
+        .bar-container { background: #3e3e42; height: 8px; border-radius: 4px; overflow: hidden; width: 100px; }
+        .bar { height: 100%; background: #4ec9b0; transition: width 0.3s ease; }
+    </style>
+</head>
+<body class="p-6 h-screen flex flex-col font-sans">
+    <header class="mb-6 flex justify-between items-center border-b border-gray-700 pb-4">
+        <h1 class="text-2xl font-bold text-blue-400">Logical Induction Market</h1>
+        <div id="status" class="text-green-500 font-semibold italic text-sm">Connecting...</div>
+    </header>
+
+    <main class="flex flex-1 gap-6 overflow-hidden">
+        <!-- Market State Panel -->
+        <section class="flex-[2] bg-[#252526] p-5 rounded-lg border border-gray-800 flex flex-col overflow-hidden">
+            <h2 class="text-orange-300 text-lg font-semibold mb-4 border-b border-gray-700 pb-2 uppercase tracking-wider">Market State</h2>
+            <div id="round-info" class="text-sm mb-4 text-gray-400">Waiting for data...</div>
+            <div id="tables" class="overflow-y-auto pr-2"></div>
+        </section>
+
+        <!-- Live Logs Panel -->
+        <section class="flex-1 bg-[#252526] p-5 rounded-lg border border-gray-800 flex flex-col overflow-hidden">
+            <h2 class="text-orange-300 text-lg font-semibold mb-4 border-b border-gray-700 pb-2 uppercase tracking-wider">Live Logs</h2>
+            <div id="logs" class="flex-1 overflow-y-auto whitespace-pre-wrap"></div>
+        </section>
+    </main>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script>
+        const socket = io();
+        const statusEl = document.getElementById('status');
+        const logsEl = document.getElementById('logs');
+        const roundInfoEl = document.getElementById('round-info');
+        const tablesEl = document.getElementById('tables');
+
+        socket.on('connect', () => {
+            statusEl.textContent = 'Connected to Tournament Runner';
+            statusEl.classList.replace('text-red-400', 'text-green-500');
+        });
+
+        socket.on('disconnect', () => {
+            statusEl.textContent = 'Disconnected';
+            statusEl.classList.replace('text-green-500', 'text-red-400');
+        });
+
+        socket.on('log', (data) => {
+            if (data.type === 'log') {
+                const line = document.createElement('div');
+                line.className = 'log-entry mb-1 border-l-2 border-blue-500 pl-2 text-gray-300';
+                line.textContent = "[" + new Date().toLocaleTimeString() + "] " + data.message;
+                logsEl.appendChild(line);
+                logsEl.scrollTop = logsEl.scrollHeight;
+            } else if (data.type === 'state') {
+                renderState(data);
+            } else if (data.type === 'agent_init') {
+                const line = document.createElement('div');
+                line.className = 'log-entry mb-1 border-l-2 border-purple-500 pl-2 text-purple-300';
+                line.textContent = "Agent " + data.agent_id + " initialized (Session: " + data.session_id + ")";
+                logsEl.appendChild(line);
+            }
+        });
+
+        function renderState(state) {
+            roundInfoEl.innerHTML = `
+                <span class="bg-gray-800 px-2 py-1 rounded">Round: <b class="text-blue-300">${state.round}</b></span>
+                <span class="bg-gray-800 px-2 py-1 rounded ml-2">Whale Wealth: <b class="text-green-400">${state.whale_wealth.toFixed(2)}</b></span>
+            `;
+            
+            let html = '<h3 class="text-md font-bold text-blue-300 mb-2">Assets</h3><table class="w-full text-left mb-6 text-sm"><thead><tr class="text-gray-500 border-b border-gray-800"><th class="pb-2">ID</th><th class="pb-2 text-right">Price</th><th class="pb-2 text-center w-32">Confidence</th></tr></thead><tbody class="divide-y divide-gray-800">';
+            state.assets.forEach(asset => {
+                const width = Math.min(100, asset.price * 100);
+                html += `<tr>
+                    <td class="py-2 font-mono">${asset.id}</td>
+                    <td class="py-2 text-right font-semibold">${asset.price.toFixed(3)}</td>
+                    <td class="py-2 flex justify-center"><div class="bar-container self-center"><div class="bar" style="width: ${width}%"></div></div></td>
+                </tr>`;
+            });
+            html += '</tbody></table>';
+
+            html += '<h3 class="text-md font-bold text-blue-300 mb-2">Agents</h3><table class="w-full text-left text-sm"><thead><tr class="text-gray-500 border-b border-gray-800"><th class="pb-2">Agent ID</th><th class="pb-2 text-right">Wealth</th></tr></thead><tbody class="divide-y divide-gray-800">';
+            state.agents.sort((a, b) => b.wealth - a.wealth).forEach(agent => {
+                html += `<tr><td class="py-2 font-mono">${agent.id}</td><td class="py-2 text-right text-green-400 font-bold">${agent.wealth.toFixed(2)}</td></tr>`;
+            });
+            html += '</tbody></table>';
+
+            tablesEl.innerHTML = html;
+        }
+    </script>
+</body>
+</html>
