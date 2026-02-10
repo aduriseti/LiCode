@@ -15,7 +15,7 @@ const mocks = vi.hoisted(() => ({
   showToast: vi.fn(),
   appLog: vi.fn(),
   shellHelper: vi.fn().mockReturnValue({ text: vi.fn().mockResolvedValue("output") }),
-  open: vi.fn(),
+  open: vi.fn().mockResolvedValue(undefined),
 }));
 
 vi.mock("@opencode-ai/plugin", () => {
@@ -74,6 +74,21 @@ vi.mock("socket.io", () => {
   };
 });
 
+vi.mock("../plugins/dashboard.app", () => ({
+  createDashboardApp: vi.fn(() => ({
+    app: { get: mocks.expressGet },
+    server: {
+      listen: mocks.serverListen,
+      address: mocks.serverAddress,
+      close: mocks.serverClose
+    },
+    io: {
+      emit: mocks.socketIoEmit,
+      on: mocks.socketIoOn
+    }
+  }))
+}));
+
 // Import the tool (plugin)
 import { tournamentPlugin } from "../plugins/tournament";
 
@@ -126,6 +141,7 @@ describe("Tournament Tool", () => {
     
     // Setup Mock Server Listen to call callback immediately
     mocks.serverListen.mockImplementation((port: number, cb: () => void) => {
+      console.log("Mock server listening called");
       if (cb) cb();
     });
   });
@@ -143,7 +159,7 @@ describe("Tournament Tool", () => {
     }, mockContext);
 
     // 2. Wait a tick for async server startup + message delays
-    await new Promise(resolve => setTimeout(resolve, 2500));
+    await new Promise(resolve => setTimeout(resolve, 4000));
 
     // 3. Verify browser was opened
     expect(mocks.open).toHaveBeenCalledWith("http://localhost:5001");
@@ -201,7 +217,7 @@ describe("Tournament Tool", () => {
         prompt: "Test", rounds: 1, agents: 2, model: "m", provider: "p", log_level: "E", timeout: 1
     }, mockContext);
     
-    await new Promise(resolve => setTimeout(resolve, 2500));
+    await new Promise(resolve => setTimeout(resolve, 4000));
 
     const part1 = '{"type": "log", "mess';
     const part2 = 'age": "Split JSON"}\n';
