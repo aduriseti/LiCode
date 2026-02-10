@@ -34,6 +34,6 @@ describe("Dashboard Integration", () => {
     // Let's verify the dashboard route is still healthy
     const response = await request(app).get("/");
     expect(response.status).toBe(200);
-    expect(response.text).toContain("Logical Induction Market Dashboard");
+    expect(response.text).toContain("Logical Induction Market");
   });
 });

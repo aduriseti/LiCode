@@ -90,6 +90,13 @@ class MarketRunner:
             shark = Shark(aid, model=model, provider=provider, api_url=self.api_url, log_path=log_path, timeout=agent_timeout)
             self.sharks[aid] = shark
 
+        # 3. Emit Initial State
+        print(json.dumps({
+            "type": "state",
+            **json.loads(self.orchestrator.state.to_json())
+        }))
+        sys.stdout.flush()
+
     # ... existing methods ...
     def _find_free_port(self) -> int:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -285,20 +292,12 @@ class MarketRunner:
                     if live:
                         live.update(self._render_dashboard())
                     elif json_logs:
-                        # Output state for dashboard
+                        # Output full state for dashboard
                         print(json.dumps({
-                            "type": "state", 
-                            "round": self.orchestrator.state.round_num,
-                            "whale_wealth": self.orchestrator.state.whale_wealth,
-                            "assets": [
-                                {"id": aid, "price": self.orchestrator.state.get_asset_price(aid)}
-                                for aid in self.orchestrator.state.assets
-                            ],
-                            "agents": [
-                                {"id": agent.agent_id, "wealth": agent.wealth}
-                                for agent in self.orchestrator.state.agents.values()
-                            ]
+                            "type": "state",
+                            **json.loads(self.orchestrator.state.to_json())
                         }))
+                        sys.stdout.flush()
                         
                     # 4. Check Convergence
                     if self.check_convergence():
