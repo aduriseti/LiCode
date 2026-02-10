@@ -6,6 +6,7 @@ import express, { type Express, type Request, type Response } from "express";
 import { Server, type Socket } from "socket.io";
 import http, { type Server as HttpServer } from "http";
 import path from "path";
+import open from "open";
 import { type LogEvent } from "./types";
 
 // Simple Dashboard HTML
@@ -142,6 +143,15 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
             const dashboardUrl: string = await portPromise;
             const msg: string = `🚀 Live tournament dashboard available at ${dashboardUrl}`;
 
+            await client.tui.showToast({
+                body: { message: `🚀 Opening live tournament dashboard at ${dashboardUrl}`, variant: "info" }
+            })
+
+            // Give user time to react to toast
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            // Auto-open browser using 'open' library
+            await open(dashboardUrl);
 
             // 5. Report URL via Session Prompt (Chat Backup)
             await client.session.promptAsync({
@@ -151,10 +161,6 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
                     noReply: true,
                 },
             });
-
-            await client.tui.showToast({
-                body: { message: msg, variant: "info" }
-            })
 
             // Yield to event loop
             await new Promise<void>((resolve) => setTimeout(resolve, 2000));
