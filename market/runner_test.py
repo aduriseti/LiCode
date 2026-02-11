@@ -16,6 +16,7 @@ class TestMarketRunner(unittest.IsolatedAsyncioTestCase):
         shark_instance = MockShark.return_value
         shark_instance.get_action = AsyncMock(return_value=AgentAction("agent_0"))
         shark_instance.initialize_session = AsyncMock()
+        shark_instance.close = AsyncMock()
         shark_instance.session.id = "ses_mock_123"
         
         runner = MarketRunner("Test", n_agents=2, budget=100.0, api_url="http://mock")

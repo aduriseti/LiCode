@@ -1,8 +1,11 @@
-import { tool, type ToolContext, type Plugin } from "@opencode-ai/plugin"
+import { type Plugin } from "@opencode-ai/plugin";
+import { tool, type ToolContext } from "@opencode-ai/plugin/tool";
 import { spawn, type ChildProcess } from "child_process";
-import { createDashboardApp } from "./dashboard.app";
-import { type LogEvent } from "./types";
+import { createDashboardApp } from "../lib/dashboard.app";
+import { type LogEvent } from "../lib/types";
 import open from "open";
+import { EventSource } from "eventsource";
+import { TerminalManager } from "../lib/terminal.manager";
 
 export const tournamentPlugin: Plugin = async ({ client, $ }) => {
   return {
@@ -22,6 +25,13 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
         async execute({ prompt, rounds, agents, model, provider, target_file, log_level, timeout }, ctx: ToolContext) {
             // 1. Start Dashboard Server
             const { server, io } = createDashboardApp();
+
+            // Track active sessions for streaming
+            const sessionToAgent = new Map<string, string>();
+            const activeStreams = new Map<string, EventSource>();
+            
+            // Terminal Manager
+            const terminalManager = new TerminalManager(io);
 
             const portPromise: Promise<string> = new Promise((resolve) => {
                 server.listen(0, () => {
@@ -97,23 +107,54 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
                         for (const line of lines) {
                             if (!line.trim()) continue;
                             try {
-                                const event: LogEvent = JSON.parse(line);
+                                const event: LogEvent | Record<string, unknown> = JSON.parse(line);
                                 
                                 if (event.type === 'final_result' && typeof event.report === 'string') {
                                     finalReport = event.report;
                                     io.emit('log', { type: 'log', message: 'Tournament Finished. Processing results...' });
+                                } else if (event.type === 'agent_init') {
+                                    const { api_url, session_id, agent_id, arena_dir } = event as LogEvent;
+                                    sessionToAgent.set(session_id!, agent_id!);
+                                    
+                                    // Register with Terminal Manager using the AGENT'S PRIVATE URL
+                                    terminalManager.registerAgent(agent_id!, api_url!, session_id!, arena_dir);
+                                    
+                                    if (api_url && !activeStreams.has(api_url)) {
+                                        const es = new EventSource(`${api_url}/event`); // OpenCode server events endpoint is /event
+                                        es.onmessage = (msg: MessageEvent) => {
+                                            try {
+                                                const evt = JSON.parse(msg.data);
+                                                if (evt.type === 'message.part.updated') {
+                                                    const part = evt.properties?.part;
+                                                    const delta = evt.properties?.delta;
+                                                    
+                                                    if (part && part.sessionID && delta) {
+                                                        const aid = sessionToAgent.get(part.sessionID);
+                                                        if (aid) {
+                                                            io.emit('log', {
+                                                                type: 'agent_stream',
+                                                                agent_id: aid,
+                                                                text: delta,
+                                                                timestamp: new Date().toLocaleTimeString()
+                                                            });
+                                                        }
+                                                    }
+                                                }
+                                            } catch (e) {}
+                                        };
+                                        activeStreams.set(api_url, es);
+                                    }
+                                    io.emit('log', event);
                                 } else {
-                                    // Forward everything else to dashboard
                                     io.emit('log', event);
                                 }
                             } catch (e: unknown) {
-                                // Log parsing errors for debugging
                                 const err = e as Error;
                                 client.app.log({
                                     body: {
                                         service: "tournament-tool",
                                         level: "debug",
-                                        message: `Failed to parse JSON from subprocess: ${err.message}. Line: ${line}`
+                                        message: `Failed to parse JSON: ${err.message}`
                                     }
                                 }).catch(() => {});
                             }
@@ -127,6 +168,8 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
                 });
 
                 child.on("close", async (code: number | null) => {
+                    activeStreams.forEach(es => es.close());
+                    terminalManager.close();
                     server.close();
                     if (code !== 0) {
                         resolve(`Market crashed (Exit Code ${code})`);

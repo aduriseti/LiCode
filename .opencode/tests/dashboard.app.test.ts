@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { createDashboardApp } from "../plugins/dashboard.app";
+import { createDashboardApp } from "../lib/dashboard.app";
 import request from "supertest";
 
 describe("Dashboard App", () => {
