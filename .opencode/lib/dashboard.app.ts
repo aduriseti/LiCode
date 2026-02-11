@@ -10,7 +10,7 @@ export function createDashboardApp() {
     const io: Server = new Server(server);
 
     // Read HTML from file to keep things clean and maintainable
-    const htmlPath = path.join(__dirname, "dashboard.html");
+    const htmlPath = path.join(__dirname, "../plugins/dashboard.html");
 
     app.get('/', (req: Request, res: Response) => {
         try {

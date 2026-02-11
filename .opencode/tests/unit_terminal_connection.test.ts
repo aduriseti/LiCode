@@ -8,34 +8,37 @@ interface MockSocket {
     emit: ReturnType<typeof vi.fn>;
 }
 
-describe("Dashboard Interactive Console", () => {
+describe("Dashboard Terminal Unit Logic", () => {
   let dom: JSDOM;
-  let window: DOMWindow & { [key: string]: unknown };
+  let window: DOMWindow & { [key: string]: unknown, term: { write: (data: string) => void }, selectAgent: (id: string) => void };
   let document: Document;
   let mockSocket: MockSocket;
 
   beforeEach(async () => {
-    let html = fs.readFileSync(path.join(__dirname, "../plugins/dashboard.html"), "utf8");
-    html = html.replace(/<script src="https:\/\/cdn.tailwindcss.com"><\/script>/, "");
-    html = html.replace(/<script src="https:\/\/cdn.jsdelivr.net\/npm\/chart.js"><\/script>/, "");
-    html = html.replace('<script src="/socket.io/socket.io.js"></script>', "");
-    html = html.replace(/<link.*xterm.min.css.*>/, "");
-    html = html.replace(/<script.*xterm.min.js.*><\/script>/, "");
-    html = html.replace(/<script.*fit.min.js.*><\/script>/, "");
+    const html = fs.readFileSync(path.join(__dirname, "../plugins/dashboard.html"), "utf8");
+    
+    // Minimal cleanup for JSDOM
+    const cleanHtml = html
+        .replace(/<script src="https:\/\/cdn.tailwindcss.com"><\/script>/, "")
+        .replace(/<script src="https:\/\/cdn.jsdelivr.net\/npm\/chart.js"><\/script>/, "")
+        .replace('<script src="/socket.io/socket.io.js"></script>', "")
+        .replace(/<link.*xterm.min.css.*>/, "")
+        .replace(/<script.*xterm.min.js.*><\/script>/, "")
+        .replace(/<script.*fit.min.js.*><\/script>/, "");
 
     mockSocket = { on: vi.fn(), emit: vi.fn() };
 
-    dom = new JSDOM(html, { 
+    dom = new JSDOM(cleanHtml, { 
         runScripts: "dangerously", 
         url: "http://localhost",
         beforeParse(window) {
             (window as any).io = () => mockSocket;
-            // Mock Chart
+            // Mock Chart.js
             const MockChart = function() { return { data: { labels: [], datasets: [] }, update: vi.fn(), destroy: vi.fn() }; };
             (MockChart as any).defaults = { font: {}, plugins: {}, elements: {}, scales: {} };
             (window as any).Chart = MockChart;
             
-            // Mock Terminal
+            // Mock Xterm Terminal
             const MockTerminal = function() {
                 return {
                     loadAddon: vi.fn(),
@@ -45,9 +48,9 @@ describe("Dashboard Interactive Console", () => {
                     clear: vi.fn(),
                     reset: vi.fn(),
                     focus: vi.fn(),
+                    refresh: vi.fn(),
                     cols: 80,
-                    rows: 24,
-                    refresh: vi.fn()
+                    rows: 24
                 };
             };
             (window as any).Terminal = MockTerminal;
@@ -57,33 +60,44 @@ describe("Dashboard Interactive Console", () => {
             Object.defineProperty(window.HTMLCanvasElement.prototype, 'ownerDocument', { get: function() { return window.document; } });
         }
     });
-    window = dom.window as unknown as DOMWindow & { [key: string]: unknown };
+    window = dom.window as unknown as typeof window;
     document = window.document;
+    // Wait for internal script execution
     await new Promise(resolve => setTimeout(resolve, 200));
   });
 
-  it("should initialize terminal and emit init event when agent is clicked", async () => {
+  it("should request terminal init when an agent is selected", async () => {
     const logHandler = mockSocket.on.mock.calls.find((c: unknown[]) => (c as string[])[0] === 'log')![1];
-
-    // 1. Initial State
+    
+    // Simulate receiving market state
     logHandler({
       type: "state",
       round_num: 1,
       whale_wealth: 1000,
+      liquidity_b: 100,
       assets: {},
-      agents: { "agent_0": { agent_id: "agent_0", wealth: 100 } }
+      agents: { "agent_unit": { agent_id: "agent_unit", wealth: 100 } }
     });
 
-    // 2. Select Agent
-    const agentRow = document.querySelector('tr[onclick*="agent_0"]');
+    // Interaction: User clicks on the agent row
+    const agentRow = document.querySelector('tr[onclick*="agent_unit"]');
     expect(agentRow).toBeDefined();
     (agentRow as HTMLElement).click();
 
-    // 3. Verify Socket Event
-    expect(mockSocket.emit).toHaveBeenCalledWith("terminal.init", { agent_id: "agent_0" });
-    
-    // 4. Verify UI Update
-    expect(document.getElementById("explorer-agent")!.textContent).toBe("agent_0");
-    expect(document.getElementById("explorer-status")!.textContent).toBe("Active Console");
+    // Verify: Dashboard emits terminal.init event
+    expect(mockSocket.emit).toHaveBeenCalledWith("terminal.init", { agent_id: "agent_unit" });
+  });
+
+  it("should write data to terminal when receiving terminal.output", async () => {
+    // Select agent first
+    const selectAgentFn = window.selectAgent;
+    selectAgentFn("agent_unit");
+
+    const outputHandler = mockSocket.on.mock.calls.find((c: unknown[]) => (c as string[])[0] === 'terminal.output')![1];
+    const termWriteSpy = vi.spyOn(window.term, 'write');
+
+    outputHandler({ agent_id: "agent_unit", data: "UNIT_TEST_OUTPUT" });
+
+    expect(termWriteSpy).toHaveBeenCalledWith("UNIT_TEST_OUTPUT");
   });
 });

@@ -56,7 +56,12 @@ def main():
             target_file=args.target_file,
             agent_timeout=args.timeout
         )
-        asyncio.run(runner.run_loop(args.rounds, stream_ui=not args.json_logs, json_logs=args.json_logs))
+        
+        async def run_tournament():
+            await runner.initialize(json_logs=args.json_logs)
+            await runner.run_loop(args.rounds, stream_ui=not args.json_logs, json_logs=args.json_logs)
+
+        asyncio.run(run_tournament())
         
         # Construct final output
         output = {

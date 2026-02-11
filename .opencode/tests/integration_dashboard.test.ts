@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { createDashboardApp } from "../plugins/dashboard.app";
+import { createDashboardApp } from "../lib/dashboard.app";
 import request from "supertest";
 import { Server } from "socket.io";
 import { createServer } from "http";
