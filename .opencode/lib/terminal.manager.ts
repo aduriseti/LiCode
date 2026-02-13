@@ -66,8 +66,17 @@ export class TerminalManager {
 
             console.log(`[TERMINAL][${agentId}] Process Spawned (PID: ${child.pid})`);
 
+            let dataCount = 0;
             child.stdout?.on("data", (data: Buffer) => {
-                socket.emit("terminal.output", { agent_id: agentId, data: data.toString() });
+                const chunk = data.toString();
+                if (dataCount < 100) {
+                    const cleanData = chunk.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
+                    if (cleanData.trim().length > 0) {
+                        console.log(`[TERMINAL-DATA][${agentId}] Chunk ${dataCount}: ${JSON.stringify(cleanData.substring(0, 100))}`);
+                        dataCount++;
+                    }
+                }
+                socket.emit("terminal.output", { agent_id: agentId, data: chunk });
             });
             child.stderr?.on("data", (data: Buffer) => {
                 socket.emit("terminal.output", { agent_id: agentId, data: data.toString() });
