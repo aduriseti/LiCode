@@ -1,11 +1,9 @@
 import { type Plugin } from "@opencode-ai/plugin";
 import { tool, type ToolContext } from "@opencode-ai/plugin/tool";
 import { spawn, type ChildProcess } from "child_process";
-import { createDashboardApp } from "../lib/dashboard.app";
 import { type LogEvent } from "../lib/types";
 import open from "open";
-import { EventSource } from "eventsource";
-import { TerminalManager } from "../lib/terminal.manager";
+import path from "path";
 
 export const tournamentPlugin: Plugin = async ({ client, $ }) => {
   return {
@@ -22,50 +20,68 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
             timeout: tool.schema.number().default(300.0).describe("Timeout for each agent's response in seconds. Increase for complex tasks.")
         },
         async execute({ prompt, rounds, agents, model, provider, log_level, timeout }, ctx: ToolContext) {
-            // 1. Start Dashboard Server
-            const { server, io, setupTerminalProxy } = createDashboardApp();
+            // 1. Start Dashboard Server (Detached)
+            const dashboardServerPath = path.join(__dirname, "../lib/dashboard-server.ts");
+            
+            // Spawn detached process
+            const dashboardProcess = spawn("bun", [dashboardServerPath], {
+                detached: true,
+                stdio: ["ignore", "pipe", "pipe"], // Capture stdout for port
+                env: { ...process.env } // Pass environment variables
+            });
 
-            // Track active sessions for streaming
-            const sessionToAgent = new Map<string, string>();
-            const activeStreams = new Map<string, EventSource>();
+            let dashboardUrl = "";
             
-            // Terminal Manager
-            const terminalManager = new TerminalManager(io, { verbose: true });
-            setupTerminalProxy(terminalManager);
-            
-            // Cleanup handler for when dashboard closes
-            let dashboardClosed = false;
-            const cleanup = () => {
-                if (dashboardClosed) return;
-                dashboardClosed = true;
-                console.log("Dashboard closed, cleaning up resources...");
-                activeStreams.forEach(es => es.close());
-                terminalManager.close();
-                server.close();
-            };
-            
-            server.on('close', cleanup);
-            io.on('connection', (socket) => {
-                socket.on('disconnect', () => {
-                    // If all clients disconnect, cleanup after a delay
-                    setTimeout(() => {
-                        if (io.engine.clientsCount === 0) {
-                            cleanup();
+            // Wait for dashboard to print its URL
+            await new Promise<void>((resolve, reject) => {
+                let buffer = "";
+                let resolved = false;
+
+                const onData = (data: Buffer) => {
+                    buffer += data.toString();
+                    if (buffer.includes("\n")) {
+                        const lines = buffer.split("\n");
+                        for (const line of lines) {
+                            try {
+                                const info = JSON.parse(line);
+                                if (info.url) {
+                                    dashboardUrl = info.url;
+                                    resolved = true;
+                                    resolve();
+                                    return;
+                                }
+                            } catch (e) {}
                         }
-                    }, 5000);
+                    }
+                };
+
+                dashboardProcess.stdout?.on("data", onData);
+                
+                dashboardProcess.on("error", (err) => {
+                    if (!resolved) reject(new Error(`Failed to start dashboard: ${err.message}`));
                 });
+                
+                dashboardProcess.on("exit", (code) => {
+                    if (!resolved) reject(new Error(`Dashboard exited prematurely with code ${code}`));
+                });
+
+                // Timeout after 10s
+                setTimeout(() => {
+                    if (!resolved) {
+                        try { dashboardProcess.kill(); } catch(e){}
+                        reject(new Error("Timeout waiting for dashboard URL"));
+                    }
+                }, 10000);
             });
 
-            const portPromise: Promise<string> = new Promise((resolve) => {
-                server.listen(0, () => {
-                    const addr = server.address();
-                    const port = typeof addr === 'string' ? 0 : addr?.port;
-                    resolve(`http://localhost:${port}`);
-                });
-            });
+            // Detach and unref so plugin can exit independently
+            dashboardProcess.unref();
 
-            const dashboardUrl: string = await portPromise;
-            console.log(`[DASHBOARD] ${dashboardUrl}`);
+            const log = (level: "debug" | "info" | "warn" | "error", message: string) => {
+                client.app.log({ body: { service: "tournament-tool", level, message } }).catch(() => {});
+            };
+
+            log("info", `[DASHBOARD] ${dashboardUrl}`);
             const msg: string = `🚀 Live tournament dashboard available at ${dashboardUrl}`;
 
             await client.tui.showToast({
@@ -116,6 +132,17 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
                 let lineBuffer: string = "";
                 let finalReport: string = "No report generated.";
 
+                // Helper to send logs to dashboard
+                const sendToDashboard = (endpoint: string, data: any) => {
+                    fetch(`${dashboardUrl}${endpoint}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(data)
+                    }).catch(() => {
+                        // Ignore errors if dashboard is closed
+                    });
+                };
+
                 child.stdout?.on("data", (data: Buffer) => {
                     const chunk: string = data.toString();
                     lineBuffer += chunk;
@@ -131,46 +158,13 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
                                 
                                 if (event.type === 'final_result' && typeof event.report === 'string') {
                                     finalReport = event.report;
-                                    io.emit('log', { type: 'log', message: 'Tournament Finished. Processing results...' });
+                                    sendToDashboard('/api/log', { type: 'log', message: 'Tournament Finished. Processing results...' });
                                 } else if (event.type === 'agent_init') {
-                                    const { api_url, session_id, agent_id, arena_dir } = event as LogEvent;
-                                    sessionToAgent.set(session_id!, agent_id!);
-                                    
-                                    // Register with Terminal Manager using the AGENT'S PRIVATE URL
-                                    terminalManager.registerAgent(agent_id!, api_url!, session_id!, arena_dir);
-                                    
-                                    // Spawn terminal immediately - output is broadcast via io.emit
-                                    // and buffered so late-connecting dashboards get replay
-                                    terminalManager.spawnTerminal(agent_id!);
-                                    
-                                    if (api_url && !activeStreams.has(api_url)) {
-                                        const es = new EventSource(`${api_url}/event`); // OpenCode server events endpoint is /event
-                                        es.onmessage = (msg: MessageEvent) => {
-                                            try {
-                                                const evt = JSON.parse(msg.data);
-                                                if (evt.type === 'message.part.updated') {
-                                                    const part = evt.properties?.part;
-                                                    const delta = evt.properties?.delta;
-                                                    
-                                                    if (part && part.sessionID && delta) {
-                                                        const aid = sessionToAgent.get(part.sessionID);
-                                                        if (aid) {
-                                                            io.emit('log', {
-                                                                type: 'agent_stream',
-                                                                agent_id: aid,
-                                                                text: delta,
-                                                                timestamp: new Date().toLocaleTimeString()
-                                                            });
-                                                        }
-                                                    }
-                                                }
-                                            } catch (e) {}
-                                        };
-                                        activeStreams.set(api_url, es);
-                                    }
-                                    io.emit('log', event);
+                                    // Register agent with Dashboard Server
+                                    sendToDashboard('/api/agent', event);
+                                    sendToDashboard('/api/log', event);
                                 } else {
-                                    io.emit('log', event);
+                                    sendToDashboard('/api/log', event);
                                 }
                             } catch (e: unknown) {
                                 const err = e as Error;
@@ -188,13 +182,11 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
 
                 child.stderr?.on("data", (data: Buffer) => {
                     const msg: string = data.toString();
-                    io.emit('log', { type: 'log', message: `[STDERR] ${msg}` });
+                    sendToDashboard('/api/log', { type: 'log', message: `[STDERR] ${msg}` });
                 });
 
                 child.on("close", async (code: number | null) => {
-                    activeStreams.forEach(es => es.close());
-                    
-                    io.emit('log', { 
+                    sendToDashboard('/api/log', { 
                         type: 'log', 
                         message: 'Tournament finished. Dashboard and agent sessions remain active for exploration.' 
                     });
@@ -203,14 +195,13 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
                         ? `Market crashed (Exit Code ${code})\nDashboard remains active at ${dashboardUrl}`
                         : `${finalReport}\n\nDashboard remains active at ${dashboardUrl}`;
                     
-                    // Keep the promise pending so opencode stays alive.
-                    // Resolve only when the dashboard server closes
-                    // (all browser clients disconnect or explicit shutdown).
-                    server.on('close', () => resolve(resultMsg));
+                    // Resolve immediately so the invoking agent can apply results.
+                    // The dashboard server stays alive in the background for the user
+                    // to explore sessions; it self-closes when all clients disconnect.
+                    resolve(resultMsg);
                 });
 
                 child.on("error", (err: Error) => {
-                    server.close();
                     resolve(`Failed to start market process: ${err.message}`);
                 });
             });
