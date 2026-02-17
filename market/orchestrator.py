@@ -22,7 +22,7 @@ class AgentAction:
     patch: Optional[str] = None # Code patch for their own candidate
 
 class Orchestrator:
-    def __init__(self, prompt: str, n_agents: int, budget: float = 1000.0, state: Optional[MarketState] = None, base_dir: str = "/tmp/market", target_file: Optional[str] = None):
+    def __init__(self, prompt: str, n_agents: int, budget: float = 1000.0, state: Optional[MarketState] = None, base_dir: str = "/tmp/market"):
         self.base_dir = base_dir
         self.worktrees_dir = os.path.join(self.base_dir, "worktrees")
         self.verifiers_dir = os.path.join(self.base_dir, "verifiers")
