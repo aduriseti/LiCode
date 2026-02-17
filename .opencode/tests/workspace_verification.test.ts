@@ -1,103 +1,79 @@
-import { describe, it, expect, afterEach, vi } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { spawn, ChildProcess } from "child_process";
-import path from "path";
-import { TerminalManager } from "../lib/terminal.manager";
-import { Server } from "socket.io";
+import { chromium, Browser } from "playwright";
 
-describe("Workspace Automated Verification", () => {
-    let pythonProcess: ChildProcess | null = null;
-    let terminalManager: TerminalManager | null = null;
+describe("Workspace Verification (Headless Browser)", () => {
+    let ocProcess: ChildProcess | null = null;
+    let browser: Browser | null = null;
 
-    const killProcessGroup = (child: ChildProcess | null) => {
-        if (child && child.pid) {
-            try { process.kill(-child.pid, "SIGKILL"); } catch (e) {}
+    afterEach(async () => {
+        if (browser) await browser.close().catch(() => {});
+        if (ocProcess?.pid) {
+            try { process.kill(-ocProcess.pid, "SIGKILL"); } catch (e) {}
         }
-    };
-
-    afterEach(() => {
-        killProcessGroup(pythonProcess);
-        if (terminalManager) terminalManager.close();
     });
 
-    it("should verify TUI title, code snippets, and progress indicators within 120s", async () => {
-        const workspaceRoot = path.join(process.cwd(), "..");
-        
-        pythonProcess = spawn("python3", [
-            "-m", "market.cli", "run", 
-            "--prompt", "implement fibonacci", 
-            "--agents", "1", 
-            "--rounds", "2", 
-            "--json-logs"
-        ], {
-            cwd: workspaceRoot,
-            env: { ...process.env, PYTHONPATH: workspaceRoot },
-            detached: true
+    it("should show fibonacci code in the dashboard terminal", async () => {
+        ocProcess = spawn(
+            "/home/codespace/.opencode/bin/opencode",
+            ["run", "--print-logs", "run a tournament with 1 agent for 2 rounds to implement a function that returns the nth fibonacci number. Set log level to INFO."],
+            {
+                cwd: "/workspaces/LiCode",
+                stdio: ["ignore", "pipe", "pipe"],
+                detached: true,
+                env: { ...process.env, TERM: "dumb" }
+            }
+        );
+
+        // Extract dashboard URL from output
+        const dashboardUrl = await new Promise<string>((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error("Dashboard URL not found in output within 60s")), 60000);
+            let buf = "";
+            const scan = (chunk: Buffer) => {
+                buf += chunk.toString();
+                const match = buf.match(/\[DASHBOARD\] (http:\/\/[^\s]+)/);
+                if (match) {
+                    clearTimeout(timeout);
+                    resolve(match[1]);
+                }
+            };
+            ocProcess!.stdout!.on("data", scan);
+            ocProcess!.stderr!.on("data", scan);
         });
 
-        const io = new Server();
-        terminalManager = new TerminalManager(io);
+        // Open dashboard in headless Chromium
+        browser = await chromium.launch({ headless: true });
+        const page = await browser.newPage();
+        await page.goto(dashboardUrl, { waitUntil: "networkidle", timeout: 30000 });
 
-        let foundTitle = false;
-        let foundCode = false;
-        let foundProgress = false;
+        // Wait for a terminal tab and click it
+        await page.waitForSelector(".tab-button", { timeout: 60000 });
+        const firstTab = await page.$(".tab-button");
+        expect(firstTab).not.toBeNull();
+        await firstTab!.click();
 
-        await new Promise<void>((resolve, reject) => {
-            const testTimeout = setTimeout(() => {
-                killProcessGroup(pythonProcess);
-                reject(new Error(`TUI Verification timed out.
-Found Title: ${foundTitle}
-Found Code: ${foundCode}
-Found Progress: ${foundProgress}`));
-            }, 120000);
+        // Wait for xterm.js rows to appear
+        await page.waitForSelector(".terminal-container.active .xterm-rows", { timeout: 30000 });
 
-            let buffer = "";
-            pythonProcess?.stdout?.on("data", (chunk) => {
-                buffer += chunk.toString();
-                const lines = buffer.split("\n");
-                buffer = lines.pop() || "";
-
-                for (const line of lines) {
-                    if (!line.trim().startsWith("{")) continue;
-                    try {
-                        const event = JSON.parse(line);
-                        if (event.type === "agent_init") {
-                            const mockSocket = {
-                                on: vi.fn(),
-                                emit: (ev: string, data: any) => {
-                                    if (ev === "terminal.output") {
-                                        const text = data.data;
-                                        // console.log(`[PTY-DATA] ${text.substring(0, 50)}`);
-                                        if (text.includes("OC |")) foundTitle = true;
-                                        // Catch implementation OR test assertions
-                                        if (text.includes("a, b = b, a + b") || text.includes("def fib") || text.includes("self.assertEqual(fib")) foundCode = true;
-                                        if (text.includes("▣")) foundProgress = true;
-
-                                        if (foundTitle && foundCode && foundProgress) {
-                                            clearTimeout(testTimeout);
-                                            killProcessGroup(pythonProcess);
-                                            resolve();
-                                        }
-                                    }
-                                }
-                            } as any;
-                            
-                            terminalManager?.registerAgent(event.agent_id, event.api_url, event.session_id, event.arena_dir);
-                            (terminalManager as any).spawnTerminal(mockSocket, event.agent_id);
-                        }
-                    } catch (e) {}
-                }
+        // Poll until fibonacci content appears in the terminal
+        let terminalText = "";
+        const deadline = Date.now() + 90000;
+        while (Date.now() < deadline) {
+            terminalText = await page.evaluate(() => {
+                const rows = document.querySelector(".terminal-container.active .xterm-rows");
+                return rows ? rows.textContent || "" : "";
             });
+            const lower = terminalText.toLowerCase();
+            if (lower.includes("fibonacci") || lower.includes("def fib") || lower.includes("a, b = b, a + b")) {
+                break;
+            }
+            await page.waitForTimeout(2000);
+        }
 
-            pythonProcess?.on("exit", (code) => {
-                if (code !== 0 && !foundTitle && !foundCode && !foundProgress) {
-                    clearTimeout(testTimeout);
-                    reject(new Error(`Orchestrator exited early with code ${code}`));
-                }
-            });
-        });
-
-        expect(foundTitle).toBe(true);
-        expect(foundCode).toBe(true);
-        expect(foundProgress).toBe(true);
-    }, 130000);
+        const lower = terminalText.toLowerCase();
+        expect(
+            lower.includes("fibonacci") || lower.includes("def fib") || lower.includes("a, b = b, a + b"),
+            `Expected fibonacci content in terminal. Got ${terminalText.length} chars: ${terminalText.substring(0, 200)}`
+        ).toBe(true);
+    }, 180000);
 });

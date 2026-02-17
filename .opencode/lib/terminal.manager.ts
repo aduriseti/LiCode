@@ -1,6 +1,6 @@
 import { Server, Socket } from "socket.io";
-import * as fs from "fs";
-import { spawn, ChildProcess } from "child_process";
+import { ChildProcess, spawn } from "child_process";
+import * as path from "path";
 
 interface AgentMeta {
     api_url: string;
@@ -8,29 +8,41 @@ interface AgentMeta {
     arena_dir: string;
 }
 
+interface HelperProcess {
+    proc: ChildProcess;
+    port: number;
+}
+
 export class TerminalManager {
     private agentMetadata = new Map<string, AgentMeta>();
-    private agentTerminals = new Map<string, ChildProcess>();
+    private helpers = new Map<string, HelperProcess>();
     private spawningAgents = new Set<string>();
+    private verbose: boolean;
 
-    constructor(private io: Server) {
+    constructor(private io: Server, opts?: { verbose?: boolean }) {
+        this.verbose = opts?.verbose ?? false;
         this.io.on("connection", (socket: Socket) => {
             socket.on("terminal.init", ({ agent_id }: { agent_id: string }) => {
-                if (this.spawningAgents.has(agent_id)) return;
-                this.spawnTerminal(socket, agent_id);
-            });
-
-            socket.on("terminal.resize", () => {
-                // Resize not supported in standard spawn, but we ignore to prevent crashes
+                if (this.helpers.has(agent_id)) {
+                    socket.emit("terminal.ready", { agent_id });
+                }
             });
         });
+    }
+
+    public getHelperPort(agentId: string): number | undefined {
+        return this.helpers.get(agentId)?.port;
+    }
+
+    public getAgentIds(): string[] {
+        return Array.from(this.helpers.keys());
     }
 
     public registerAgent(agentId: string, apiUrl: string, sessionId: string, arenaDir?: string) {
         this.agentMetadata.set(agentId, { api_url: apiUrl, session_id: sessionId, arena_dir: arenaDir || "" });
     }
 
-    private spawnTerminal(socket: Socket, agentId: string, attempt: number = 1) {
+    public spawnTerminal(agentId: string, attempt: number = 1) {
         const meta = this.agentMetadata.get(agentId);
         if (!meta) {
             console.error(`Terminal init failed: No metadata for agent ${agentId}`);
@@ -39,72 +51,80 @@ export class TerminalManager {
 
         this.spawningAgents.add(agentId);
 
-        if (attempt === 1 && this.agentTerminals.has(agentId)) {
-            const existing = this.agentTerminals.get(agentId);
-            try { existing?.kill(); } catch(e) {}
-            this.agentTerminals.delete(agentId);
+        if (attempt === 1 && this.helpers.has(agentId)) {
+            const existing = this.helpers.get(agentId);
+            try { existing?.proc.kill(); } catch (e) {}
+            this.helpers.delete(agentId);
         }
 
-        console.log(`[TERMINAL] Spawning for ${agentId} -> ${meta.api_url} (Attempt ${attempt}/5)`);
+        if (this.verbose) console.log(`[TERMINAL] Spawning helper for ${agentId} (Attempt ${attempt}/5)`);
 
-        try {
-            const opencodeBin = "/home/codespace/.opencode/bin/opencode";
-            const targetUrl = meta.api_url.replace("localhost", "127.0.0.1");
-            const args = ["attach", targetUrl, "-s", meta.session_id, "--print-logs"];
-            const startTime = Date.now();
+        const helperPath = path.join(__dirname, "pty-helper.js");
+        const opencodeBin = "/home/codespace/.opencode/bin/opencode";
+        const targetUrl = meta.api_url.replace("localhost", "127.0.0.1");
+        const startTime = Date.now();
 
-            // FALLBACK TO STANDARD SPAWN TO BYPASS IOCTL ISSUES
-            const child = spawn(opencodeBin, args, {
-                cwd: meta.arena_dir || process.cwd(),
-                env: {
-                    ...process.env,
-                    TERM: "xterm-256color",
-                    FORCE_COLOR: "1",
-                    PYTHONUNBUFFERED: "1"
-                }
-            });
+        const child = spawn("node", [helperPath, opencodeBin, targetUrl, meta.session_id, meta.arena_dir || process.cwd()], {
+            stdio: ["ignore", "pipe", "pipe"],
+            detached: true,
+            env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor" }
+        });
 
-            console.log(`[TERMINAL][${agentId}] Process Spawned (PID: ${child.pid})`);
+        let gotPort = false;
+        let stdoutBuf = "";
 
-            let dataCount = 0;
-            child.stdout?.on("data", (data: Buffer) => {
-                const chunk = data.toString();
-                if (dataCount < 100) {
-                    const cleanData = chunk.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '');
-                    if (cleanData.trim().length > 0) {
-                        console.log(`[TERMINAL-DATA][${agentId}] Chunk ${dataCount}: ${JSON.stringify(cleanData.substring(0, 100))}`);
-                        dataCount++;
-                    }
-                }
-                socket.emit("terminal.output", { agent_id: agentId, data: chunk });
-            });
-            child.stderr?.on("data", (data: Buffer) => {
-                socket.emit("terminal.output", { agent_id: agentId, data: data.toString() });
-            });
+        child.stdout!.on("data", (chunk: Buffer) => {
+            if (gotPort) return;
+            stdoutBuf += chunk.toString();
+            const newlineIdx = stdoutBuf.indexOf("\n");
+            if (newlineIdx === -1) return;
 
-            child.on("exit", (code, signal) => {
+            try {
+                const info = JSON.parse(stdoutBuf.substring(0, newlineIdx));
+                gotPort = true;
                 this.spawningAgents.delete(agentId);
-                const duration = (Date.now() - startTime) / 1000;
-                console.log(`[TERMINAL-EXIT][${agentId}] PID: ${child.pid}, Code: ${code}, Signal: ${signal}, Duration: ${duration.toFixed(1)}s`);
-                this.agentTerminals.delete(agentId);
+                this.helpers.set(agentId, { proc: child, port: info.port });
 
-                if (duration < 3 && attempt < 5) {
-                    console.log(`[TERMINAL] ${agentId} failed quickly, retrying in 2s...`);
-                    setTimeout(() => this.spawnTerminal(socket, agentId, attempt + 1), 2000);
-                }
+                if (this.verbose) console.log(`[TERMINAL][${agentId}] Helper ready on port ${info.port}`);
+
+                // Tell all connected dashboard clients this terminal is available
+                this.io.emit("terminal.ready", { agent_id: agentId });
+            } catch (e) {
+                if (this.verbose) console.error(`[TERMINAL][${agentId}] Failed to parse helper output: ${stdoutBuf}`);
+            }
+        });
+
+        if (this.verbose) {
+            child.stderr!.on("data", (chunk: Buffer) => {
+                const clean = chunk.toString().replace(/[\u001b\u009b][\[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, "").trim();
+                if (clean) console.log(`[TERMINAL-HELPER-ERR][${agentId}] ${clean.substring(0, 200)}`);
             });
-
-            this.agentTerminals.set(agentId, child);
-        } catch (err: any) {
-            this.spawningAgents.delete(agentId);
-            console.error(`[PTY-ERROR][${agentId}] Failed to spawn: ${err.message}`);
         }
+
+        child.on("exit", (code, signal) => {
+            this.spawningAgents.delete(agentId);
+            const duration = (Date.now() - startTime) / 1000;
+
+            if (this.verbose) {
+                console.log(`[TERMINAL-EXIT][${agentId}] Helper exited: code=${code}, signal=${signal}, duration=${duration.toFixed(1)}s`);
+            }
+
+            this.helpers.delete(agentId);
+
+            if (duration < 3 && attempt < 5) {
+                if (this.verbose) console.log(`[TERMINAL] ${agentId} helper failed quickly, retrying in 2s...`);
+                setTimeout(() => this.spawnTerminal(agentId, attempt + 1), 2000);
+            }
+        });
+
+        // Unref so helper doesn't prevent parent from exiting
+        child.unref();
     }
 
     public close() {
-        this.agentTerminals.forEach(term => {
-            try { term.kill(); } catch(e) {}
+        this.helpers.forEach((helper) => {
+            try { helper.proc.kill(); } catch (e) {}
         });
-        this.agentTerminals.clear();
+        this.helpers.clear();
     }
 }

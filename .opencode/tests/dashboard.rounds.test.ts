@@ -60,6 +60,14 @@ describe("Dashboard Multi-Round Updates", () => {
             };
             (window as any).FitAddon = { FitAddon: MockFitAddon };
 
+            // Mock WebSocket
+            (window as any).WebSocket = function(this: any, url: string) {
+                this.url = url; this.send = vi.fn(); this.close = vi.fn();
+                this.readyState = 1; this.onopen = null; this.onmessage = null; this.onclose = null;
+            };
+            (window as any).WebSocket.OPEN = 1;
+
+            (window as any).requestAnimationFrame = (cb: () => void) => setTimeout(cb, 0);
             window.HTMLCanvasElement.prototype.getContext = vi.fn(() => ({ measureText: () => ({ width: 0 }) })) as any;
             Object.defineProperty(window.HTMLCanvasElement.prototype, 'ownerDocument', {
                 get: function() { return window.document; }

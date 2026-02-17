@@ -21,9 +21,32 @@
         .dense-panel { padding: 0.75rem; display: flex; flex-direction: column; min-height: 0; }
         .active-trader { background-color: #eff6ff !important; border-left: 3px solid #3b82f6 !important; }
         
+        /* Tabs Styling */
+        .tabs { display: flex; border-bottom: 1px solid #e5e7eb; background: #f9fafb; overflow-x: auto; flex-shrink: 0; }
+        .tab-button { padding: 0.5rem 1rem; border: none; background: transparent; cursor: pointer; font-size: 11px; font-family: monospace; white-space: nowrap; border-bottom: 2px solid transparent; transition: all 0.2s; }
+        .tab-button:hover { background: #e5e7eb; }
+        .tab-button.active { background: #000; color: #fff; border-bottom-color: #3b82f6; }
+        
         /* Terminal Styling */
-        #terminal-container { background: #000; padding: 10px; flex: 1; min-height: 0; width: 100%; height: 100%; }
-        .xterm-viewport { overflow-y: auto !important; }
+        .terminal-container { 
+            background: #fafafa; 
+            position: absolute; 
+            top: 0; 
+            left: 0; 
+            right: 0; 
+            bottom: 0; 
+            display: none; 
+            box-sizing: border-box; 
+            padding: 4px;
+        }
+        .terminal-container.active { display: block; }
+        /* Let xterm.js FitAddon calculate dimensions - don't force 100% */
+        .xterm { 
+            height: 100%;
+        }
+        .xterm-viewport { 
+            overflow-y: auto !important; 
+        }
     </style>
 </head>
 <body class="h-screen flex flex-col font-sans overflow-hidden text-[12px]">
@@ -76,13 +99,11 @@
         <div class="px-3 py-2 border-b border-gray-200 bg-gray-50/50 flex justify-between items-center flex-shrink-0">
             <div class="flex items-center gap-2">
                 <h2 class="text-[10px] font-black text-gray-600 uppercase tracking-widest">Session Explorer</h2>
-                <span id="explorer-agent" class="text-blue-600 font-mono font-bold text-[11px]"></span>
+                <div id="explorer-status" class="text-[9px] text-gray-400 italic font-mono uppercase tracking-tighter ml-2">Initializing...</div>
             </div>
-            <div id="explorer-status" class="text-[9px] text-gray-400 italic font-mono uppercase tracking-tighter">Awaiting Selection</div>
         </div>
-        <div class="flex-1 relative min-h-0 bg-black">
-            <div id="terminal-container"></div>
-        </div>
+        <div id="terminal-tabs" class="tabs"></div>
+        <div id="terminal-panes" class="flex-1 relative min-h-0 bg-gray-50"></div>
     </div>
 
     <script src="/socket.io/socket.io.js"></script>
@@ -96,28 +117,117 @@
         const roundInfoEl = document.getElementById('round-info');
         const tablesEl = document.getElementById('tables');
         const agentsEl = document.getElementById('agents-table');
-        const explorerAgent = document.getElementById('explorer-agent');
         const explorerStatus = document.getElementById('explorer-status');
+        const terminalTabs = document.getElementById('terminal-tabs');
+        const terminalPanes = document.getElementById('terminal-panes');
 
-        let hasAutoSelected = false;
+        // --- Terminal Management ---
+        const terminals = new Map(); // agent_id -> { term, fitAddon, container, ws }
+        const knownAgents = new Set();
 
-        // --- Terminal Setup ---
-        window.term = new Terminal({
-            theme: { background: '#000000', foreground: '#d4d4d4', cursor: '#3b82f6' },
-            fontSize: 11,
-            fontFamily: 'Consolas, monospace',
-            cursorBlink: true,
-            scrollback: 5000
-        });
-        const fitAddon = new FitAddon.FitAddon();
-        term.loadAddon(fitAddon);
-        term.open(document.getElementById('terminal-container'));
-        
-        term.onData(data => {
-            if (state.viewingAgent) {
-                socket.emit('terminal.input', { agent_id: state.viewingAgent, data });
-            }
-        });
+        const TERM_THEME = {
+            background: '#fafafa',
+            foreground: '#1f2937',
+            cursor: '#3b82f6',
+            cursorAccent: '#ffffff',
+            selectionBackground: '#bfdbfe',
+            black: '#000000',
+            red: '#dc2626',
+            green: '#16a34a',
+            yellow: '#ca8a04',
+            blue: '#2563eb',
+            magenta: '#c026d3',
+            cyan: '#0891b2',
+            white: '#6b7280',
+            brightBlack: '#4b5563',
+            brightRed: '#ef4444',
+            brightGreen: '#22c55e',
+            brightYellow: '#eab308',
+            brightBlue: '#3b82f6',
+            brightMagenta: '#d946ef',
+            brightCyan: '#06b6d4',
+            brightWhite: '#1f2937'
+        };
+
+        function createTerminalForAgent(agentId) {
+            if (terminals.has(agentId)) return;
+
+            const container = document.createElement('div');
+            container.className = 'terminal-container';
+            container.id = `terminal-${agentId}`;
+            terminalPanes.appendChild(container);
+
+            const term = new Terminal({
+                theme: TERM_THEME,
+                fontSize: 12,
+                fontFamily: 'Consolas, "Courier New", monospace',
+                cursorBlink: true,
+                scrollback: 5000,
+                allowProposedApi: true,
+                convertEol: true
+            });
+            const fitAddon = new FitAddon.FitAddon();
+            term.loadAddon(fitAddon);
+            term.open(container);
+
+            terminals.set(agentId, { term, fitAddon, container, ws: null, initialized: false });
+
+            const tabButton = document.createElement('button');
+            tabButton.className = 'tab-button';
+            tabButton.textContent = agentId;
+            tabButton.onclick = () => selectAgent(agentId);
+            terminalTabs.appendChild(tabButton);
+
+            term.write(`\x1b[34mWaiting for ${agentId} terminal...\x1b[0m\r\n`);
+            // Ask the server if a helper is already ready for this agent
+            socket.emit('terminal.init', { agent_id: agentId });
+        }
+
+        function connectTerminalToHelper(agentId) {
+            const terminal = terminals.get(agentId);
+            if (!terminal) return;
+            if (terminal.ws) return; // already connected
+
+            // Connect through the dashboard server's WebSocket proxy
+            const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${proto}//${window.location.host}/terminal/${encodeURIComponent(agentId)}`;
+            console.log(`[WS-CONNECT] ${agentId} -> ${wsUrl}`);
+            terminal.term.write(`\x1b[34mConnecting to ${agentId} session...\x1b[0m\r\n`);
+
+            const ws = new WebSocket(wsUrl);
+            terminal.ws = ws;
+
+            ws.onopen = () => {
+                console.log(`[WS-OPEN] ${agentId} connected`);
+                terminal.term.write(`\x1b[32mConnected.\x1b[0m\r\n`);
+                // Send initial size
+                terminal.fitAddon.fit();
+                ws.send(JSON.stringify({ type: 'resize', cols: terminal.term.cols, rows: terminal.term.rows }));
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const msg = JSON.parse(event.data);
+                    if (msg.type === 'data' || msg.type === 'buffer') {
+                        terminal.term.write(msg.data);
+                    } else if (msg.type === 'exit') {
+                        terminal.term.write(`\r\n\x1b[31m[Process exited: code=${msg.exitCode}, signal=${msg.signal}]\x1b[0m\r\n`);
+                    }
+                } catch (e) {}
+            };
+
+            ws.onclose = () => {
+                console.log(`[WS-CLOSE] ${agentId}`);
+                terminal.ws = null;
+            };
+
+            // Send keyboard input directly to helper
+            terminal.term.onData(data => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'input', data }));
+                }
+            });
+        }
 
         // Charts
         const createChart = (id, options) => {
@@ -164,13 +274,20 @@
                 updateState(data);
             } else if (data.type === 'agent_init') {
                 addLog(`[SYSTEM] Agent ${data.agent_id} attached`, 'text-blue-600 font-bold');
+                if (data.agent_id && !knownAgents.has(data.agent_id)) {
+                    knownAgents.add(data.agent_id);
+                    createTerminalForAgent(data.agent_id);
+                }
             }
         });
 
-        socket.on('terminal.output', ({ agent_id, data }) => {
-            if (state.viewingAgent === agent_id) {
-                term.write(data);
+        // When the server tells us a helper is ready, connect xterm to it via proxy
+        socket.on('terminal.ready', ({ agent_id }) => {
+            console.log(`[TERMINAL-READY] ${agent_id}`);
+            if (!terminals.has(agent_id)) {
+                createTerminalForAgent(agent_id);
             }
+            connectTerminalToHelper(agent_id);
         });
 
         function addLog(msg, classes = 'text-gray-500') {
@@ -182,25 +299,40 @@
         }
 
         function selectAgent(agentId) {
-            state.viewingAgent = agentId;
-            explorerAgent.textContent = agentId;
-            explorerStatus.textContent = 'Active Console';
+            console.log(`[SELECT-AGENT] Selecting ${agentId}`);
             
+            state.viewingAgent = agentId;
+            explorerStatus.textContent = `Active: ${agentId}`;
+            
+            // Update trader table highlighting
             document.querySelectorAll('#agents-table tr').forEach(row => row.classList.remove('active-trader', 'font-bold'));
             const selectedRow = Array.from(document.querySelectorAll('#agents-table td')).find(td => td.textContent === agentId)?.parentElement;
             if (selectedRow) selectedRow.classList.add('active-trader', 'font-bold');
 
-            // Reset Terminal for new agent
-            term.clear();
-            term.reset();
-            term.write(`\x1b[34mConnecting to ${agentId} OpenCode session...\x1b[0m\r\n`);
-            socket.emit('terminal.init', { agent_id: agentId });
+            // Switch tabs and panes
+            document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
+            document.querySelectorAll('.terminal-container').forEach(pane => pane.classList.remove('active'));
 
-            setTimeout(() => {
-                fitAddon.fit();
-                term.focus();
-                socket.emit('terminal.resize', { agent_id: agentId, cols: term.cols, rows: term.rows });
-            }, 100);
+            const terminal = terminals.get(agentId);
+            if (terminal) {
+                console.log(`[SELECT-AGENT] Terminal found for ${agentId}, making active`);
+                const tabButton = Array.from(document.querySelectorAll('.tab-button')).find(btn => btn.textContent === agentId);
+                if (tabButton) tabButton.classList.add('active');
+                terminal.container.classList.add('active');
+                
+                // Fit terminal after container is visible and has dimensions
+                requestAnimationFrame(() => {
+                    // Give browser time to render and calculate dimensions
+                    setTimeout(() => {
+                        terminal.fitAddon.fit();
+                        terminal.term.focus();
+                        console.log(`[FIT] ${agentId} sized to ${terminal.term.cols}x${terminal.term.rows}`);
+                        if (terminal.ws && terminal.ws.readyState === WebSocket.OPEN) {
+                            terminal.ws.send(JSON.stringify({ type: 'resize', cols: terminal.term.cols, rows: terminal.term.rows }));
+                        }
+                    }, 100);
+                });
+            }
         }
 
         function getOrCreateDataset(chart, label, colorIdx) {
@@ -224,13 +356,20 @@
             state.round = data.round_num;
             roundInfoEl.textContent = `ROUND ${state.round}`;
 
-            // Auto-select agent_0 on first arrival
-            if (!hasAutoSelected && data.agents && data.agents['agent_0']) {
-                hasAutoSelected = true;
-                setTimeout(() => {
-                    console.log("Auto-selecting agent_0 for diagnostic collection");
-                    selectAgent('agent_0');
-                }, 1000);
+            // Auto-create terminals for new agents
+            if (data.agents) {
+                Object.keys(data.agents).forEach(agentId => {
+                    if (!knownAgents.has(agentId)) {
+                        knownAgents.add(agentId);
+                        createTerminalForAgent(agentId);
+                    }
+                });
+
+                // Auto-select first agent
+                if (!state.viewingAgent && knownAgents.size > 0) {
+                    const firstAgent = Array.from(knownAgents)[0];
+                    setTimeout(() => selectAgent(firstAgent), 1500);
+                }
             }
 
             const label = `R${state.round}`;
@@ -260,7 +399,14 @@
 
             // Traders
             let agentHtml = '<table class="w-full text-left text-[10px]"><thead><tr class="text-gray-400 border-b border-gray-100 uppercase text-[8px] font-bold"><th class="pb-1">Trader</th><th class="pb-1 text-right pr-1">Wealth</th></tr></thead><tbody>';
+            const activeAgents = new Set(Object.keys(data.agents));
             const allTraders = Object.values(data.agents).map(a => ({...a, type: 'AGENT'}));
+            // Keep bankrupt agents visible with $0 wealth
+            knownAgents.forEach(agentId => {
+                if (!activeAgents.has(agentId)) {
+                    allTraders.push({ agent_id: agentId, wealth: 0, type: 'BANKRUPT' });
+                }
+            });
             allTraders.push({ agent_id: 'Whale', wealth: data.whale_wealth, type: 'WHALE' });
             allTraders.sort((a, b) => b.wealth - a.wealth);
 
@@ -286,11 +432,20 @@
             return 1 / (1 + Math.exp(Math.max(-700, Math.min(700, exp))));
         }
 
+        // Debounced resize handler for better performance
+        let resizeTimeout;
         window.addEventListener('resize', () => {
-            fitAddon.fit();
-            if (state.viewingAgent) {
-                socket.emit('terminal.resize', { agent_id: state.viewingAgent, cols: term.cols, rows: term.rows });
-            }
+            clearTimeout(resizeTimeout);
+            resizeTimeout = setTimeout(() => {
+                terminals.forEach((terminal, agentId) => {
+                    if (terminal.container.classList.contains('active')) {
+                        terminal.fitAddon.fit();
+                        if (terminal.ws && terminal.ws.readyState === WebSocket.OPEN) {
+                            terminal.ws.send(JSON.stringify({ type: 'resize', cols: terminal.term.cols, rows: terminal.term.rows }));
+                        }
+                    }
+                });
+            }, 100);
         });
     </script>
 </body>

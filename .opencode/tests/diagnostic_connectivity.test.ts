@@ -1,12 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { spawn, ChildProcess, execSync } from "child_process";
 import { TerminalManager } from "../lib/terminal.manager";
-import { Server, Socket } from "socket.io";
+import { Server } from "socket.io";
 import { createServer } from "http";
 import path from "path";
 import fs from "fs";
 import os from "os";
-import * as pty from "node-pty";
+import WebSocket from "ws";
+
+const ANSI_RE = /[\u001b\u009b][\[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[^[\]]/g;
 
 vi.mock("open", () => ({
     default: vi.fn().mockResolvedValue(undefined)
@@ -17,9 +18,17 @@ describe("Connectivity Diagnostic Suite", () => {
     let io: Server | null = null;
     let httpServer: ReturnType<typeof createServer> | null = null;
     let arenaDir: string = "";
+    let logFile: string = "";
+    let logFd: number = -1;
+
+    const logToFile = (msg: string) => {
+        if (logFd >= 0) fs.writeSync(logFd, msg + "\n");
+    };
 
     beforeEach(async () => {
         arenaDir = fs.mkdtempSync(path.join(os.tmpdir(), "diag-connectivity-"));
+        logFile = path.join(os.tmpdir(), `diag-pty-${Date.now()}.log`);
+        logFd = fs.openSync(logFile, "w");
         httpServer = createServer();
         io = new Server(httpServer);
         terminalManager = new TerminalManager(io);
@@ -31,11 +40,10 @@ describe("Connectivity Diagnostic Suite", () => {
         if (arenaDir && fs.existsSync(arenaDir)) {
             try { fs.rmSync(arenaDir, { recursive: true, force: true }); } catch(e) {}
         }
+        if (logFd >= 0) { fs.closeSync(logFd); logFd = -1; }
     });
 
-    it("should verify that 'opencode attach' does not emit connection errors", async () => {
-        // 1. Setup a dummy server that listens but doesn't handle OpenCode protocol
-        // This simulates a "partially working" network path
+    it("should spawn helper and verify connectivity diagnostics", async () => {
         const server = createServer((req, res) => {
             res.writeHead(404);
             res.end();
@@ -46,41 +54,39 @@ describe("Connectivity Diagnostic Suite", () => {
         const apiUrl = `http://127.0.0.1:${port}`;
         
         terminalManager?.registerAgent("agent_diag", apiUrl, "sess_diag", arenaDir);
-        const mockSocket = { on: vi.fn(), emit: vi.fn() } as unknown as Socket;
-        const tm = terminalManager as unknown as { 
-            spawnTerminal: (s: Socket, id: string) => void,
-            agentTerminals: Map<string, pty.IPty>
-        };
-        
-        console.log(`[DIAG] Testing connectivity to ${apiUrl}`);
-        tm.spawnTerminal(mockSocket, "agent_diag");
+        logToFile(`[DIAG] Testing connectivity to ${apiUrl}`);
 
-        // 2. Capture and Monitor Output
-        const ptyProc = tm.agentTerminals.get("agent_diag")!;
         let fullOutput = "";
-        ptyProc.onData((d) => { fullOutput += d; });
 
-        // Wait for exit or timeout
-        await new Promise(resolve => setTimeout(resolve, 5000));
+        terminalManager?.spawnTerminal("agent_diag");
 
-        // 3. ASSERT: Even if code is 0, we check for error strings
-        const failureModes = [
-            "Unable to connect",
-            "Connection refused",
-            "bootstrap failed",
-            "Error:"
-        ];
+        // Wait for helper to be ready, then connect via WebSocket
+        await new Promise<void>((resolve) => {
+            const check = setInterval(() => {
+                const wsPort = terminalManager!.getHelperPort("agent_diag");
+                if (!wsPort) return;
+                clearInterval(check);
+                const ws = new WebSocket(`ws://127.0.0.1:${wsPort}`);
+                ws.on("message", (raw) => {
+                    try {
+                        const msg = JSON.parse(raw.toString());
+                        if (msg.type === "data" || msg.type === "buffer") {
+                            fullOutput += msg.data;
+                        }
+                    } catch (e) {}
+                });
+                // Give it time to collect data
+                setTimeout(resolve, 4000);
+            }, 100);
+            setTimeout(() => { clearInterval(check); resolve(); }, 8000);
+        });
 
-        for (const mode of failureModes) {
-            if (fullOutput.includes(mode)) {
-                console.error(`[DIAG] FAILURE FOUND IN LOGS: ${mode}`);
-                // We expect this to happen in this specific test case because our server is dummy
-                // But in a "Real" environment test, this assertion would catch the bug.
-            }
-        }
+        const cleanOutput = fullOutput.replace(ANSI_RE, '');
+        logToFile(`[DIAG] Output length: ${fullOutput.length}`);
+        logToFile(`[DIAG] Clean output: ${cleanOutput.substring(0, 500)}`);
+        console.log(`[DIAG] PTY debug log: ${logFile}`);
 
         server.close();
-        // This test case just demonstrates we CAN capture it.
         expect(fullOutput).toBeDefined();
-    }, 10000);
+    }, 15000);
 });
