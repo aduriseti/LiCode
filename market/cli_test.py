@@ -25,7 +25,7 @@ class TestCLI(unittest.TestCase):
             main()
             
         # Verify MarketRunner initialized correctly
-        MockRunner.assert_called_with("foo", 3, 1000.0, "http://127.0.0.1:4096", model="gemini-3-flash", provider="opencode", target_file=None, agent_timeout=300.0)
+        MockRunner.assert_called_with("foo", 3, 1000.0, "http://127.0.0.1:4096", model="gemini-3-flash", provider="opencode", agent_timeout=300.0)
         
         # Verify loop called
         mock_runner_instance.run_loop.assert_called_with(5, stream_ui=True, json_logs=False)

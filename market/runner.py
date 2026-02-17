@@ -52,8 +52,8 @@ class MarketRunner:
     Handles the game loop, agent orchestration, convergence checks,
     and the local OpenCode API server.
     """
-    def __init__(self, prompt: str, n_agents: int, budget: float, api_url: str = "http://127.0.0.1", model: str = "gemini-3-flash", provider: str = "opencode", target_file: Optional[str] = None, agent_timeout: float = 300.0):
-        self.orchestrator = Orchestrator(prompt, n_agents, budget, base_dir=os.path.abspath("./.arenas"), target_file=target_file)
+    def __init__(self, prompt: str, n_agents: int, budget: float, api_url: str = "http://127.0.0.1", model: str = "gemini-3-flash", provider: str = "opencode", agent_timeout: float = 300.0):
+        self.orchestrator = Orchestrator(prompt, n_agents, budget, base_dir=os.path.abspath("./.arenas"))
         self.arena_dir = self.orchestrator.base_dir
         self.sessions_dir = os.path.join(self.arena_dir, "sessions")
         os.makedirs(self.sessions_dir, exist_ok=True)
