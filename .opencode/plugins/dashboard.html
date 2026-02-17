@@ -18,9 +18,30 @@
         ::-webkit-scrollbar { width: 4px; height: 4px; }
         ::-webkit-scrollbar-track { background: #f3f4f6; }
         ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 2px; }
-        .dense-panel { padding: 0.75rem; display: flex; flex-direction: column; min-height: 0; }
+        .dense-panel { padding: 0.75rem; display: flex; flex-direction: column; min-height: 0; height: 100%; }
         .active-trader { background-color: #eff6ff !important; border-left: 3px solid #3b82f6 !important; }
         
+        /* Resizer Styling */
+        .resizer-v {
+            width: 4px;
+            cursor: col-resize;
+            background-color: #f3f4f6;
+            flex-shrink: 0;
+            z-index: 20;
+            transition: background-color 0.2s;
+        }
+        .resizer-v:hover, .resizer-v.dragging { background-color: #3b82f6; }
+        
+        .resizer-h {
+            height: 4px;
+            cursor: row-resize;
+            background-color: #f3f4f6;
+            flex-shrink: 0;
+            z-index: 20;
+            transition: background-color 0.2s;
+        }
+        .resizer-h:hover, .resizer-h.dragging { background-color: #3b82f6; }
+
         /* Tabs Styling */
         .tabs { display: flex; border-bottom: 1px solid #e5e7eb; background: #f9fafb; overflow-x: auto; flex-shrink: 0; }
         .tab-button { padding: 0.5rem 1rem; border: none; background: transparent; cursor: pointer; font-size: 11px; font-family: monospace; white-space: nowrap; border-bottom: 2px solid transparent; transition: all 0.2s; }
@@ -59,10 +80,10 @@
         <div id="round-info" class="text-[11px] font-bold text-blue-600 tabular-nums"></div>
     </header>
 
-    <!-- Top Section: Charts & Data (50% Height) -->
-    <div class="flex h-[50%] overflow-hidden border-b border-gray-200">
-        <!-- Column 1: Charts (40%) -->
-        <div class="flex flex-col w-[40%] border-r border-gray-200 bg-white">
+    <!-- Top Section -->
+    <div id="top-pane" class="flex overflow-hidden border-b border-gray-200" style="height: 50%;">
+        <!-- Column 1: Charts -->
+        <div id="chart-pane" class="flex flex-col bg-white" style="width: 50%;">
             <div class="flex-1 dense-panel border-b border-gray-100">
                 <h2 class="text-[9px] font-black text-gray-400 uppercase tracking-tighter mb-1 text-center">Asset Confidence</h2>
                 <div class="flex-1 relative"><canvas id="priceChart"></canvas></div>
@@ -73,8 +94,10 @@
             </div>
         </div>
 
-        <!-- Column 2: Data Tables (30%) -->
-        <div class="flex flex-col w-[30%] border-r border-gray-200 bg-gray-50/30">
+        <div class="resizer-v" id="top-v-resizer"></div>
+
+        <!-- Column 2: Data Tables -->
+        <div id="table-pane" class="flex flex-col flex-1 bg-gray-50/30">
             <div class="flex-1 dense-panel border-b border-gray-100">
                 <h2 class="text-[9px] font-black text-gray-400 uppercase tracking-tighter mb-1 text-center">Assets</h2>
                 <div id="tables" class="flex-1 overflow-y-auto"></div>
@@ -84,26 +107,29 @@
                 <div id="agents-table" class="flex-1 overflow-y-auto"></div>
             </div>
         </div>
-
-        <!-- Column 3: System Logs (30%) -->
-        <div class="flex flex-col w-[30%] bg-white">
-            <div class="dense-panel h-full">
-                <h2 class="text-[9px] font-black text-gray-400 uppercase tracking-tighter mb-1 text-center">System Stream</h2>
-                <div id="logs" class="flex-1 overflow-y-auto font-mono text-[10px] leading-tight text-gray-500"></div>
-            </div>
-        </div>
     </div>
 
+    <div class="resizer-h" id="main-h-resizer"></div>
+
     <!-- Bottom Section: Session Explorer (PTY Console) -->
-    <div class="flex flex-col flex-1 bg-white min-h-0">
+    <div id="bottom-pane" class="flex flex-col flex-1 bg-white min-h-0">
         <div class="px-3 py-2 border-b border-gray-200 bg-gray-50/50 flex justify-between items-center flex-shrink-0">
             <div class="flex items-center gap-2">
                 <h2 class="text-[10px] font-black text-gray-600 uppercase tracking-widest">Session Explorer</h2>
                 <div id="explorer-status" class="text-[9px] text-gray-400 italic font-mono uppercase tracking-tighter ml-2">Initializing...</div>
             </div>
         </div>
-        <div id="terminal-tabs" class="tabs"></div>
-        <div id="terminal-panes" class="flex-1 relative min-h-0 bg-gray-50"></div>
+        <div id="terminal-tabs" class="tabs">
+            <button class="tab-button" onclick="selectTab('system')" id="tab-system">SYSTEM</button>
+        </div>
+        <div id="terminal-panes" class="flex-1 relative min-h-0 bg-gray-50">
+            <div id="terminal-system" class="terminal-container p-4 overflow-hidden h-full">
+                <div class="dense-panel h-full">
+                    <h2 class="text-[9px] font-black text-gray-400 uppercase tracking-tighter mb-1 text-center">System Stream</h2>
+                    <div id="logs" class="flex-1 overflow-y-auto font-mono text-[10px] leading-tight text-gray-500"></div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script src="/socket.io/socket.io.js"></script>
@@ -175,13 +201,51 @@
             const tabButton = document.createElement('button');
             tabButton.className = 'tab-button';
             tabButton.textContent = agentId;
-            tabButton.onclick = () => selectAgent(agentId);
+            tabButton.onclick = () => selectTab(agentId);
             terminalTabs.appendChild(tabButton);
 
             term.write(`\x1b[34mWaiting for ${agentId} terminal...\x1b[0m\r\n`);
             // Ask the server if a helper is already ready for this agent
             socket.emit('terminal.init', { agent_id: agentId });
         }
+
+        // --- Resizer Management ---
+        function initResizers() {
+            const hResizer = document.getElementById('main-h-resizer');
+            const topPane = document.getElementById('top-pane');
+            const vResizer = document.getElementById('top-v-resizer');
+            const chartPane = document.getElementById('chart-pane');
+
+            let isDraggingH = false;
+            let isDraggingV = false;
+
+            hResizer.addEventListener('mousedown', () => { isDraggingH = true; hResizer.classList.add('dragging'); document.body.style.cursor = 'row-resize'; });
+            vResizer.addEventListener('mousedown', () => { isDraggingV = true; vResizer.classList.add('dragging'); document.body.style.cursor = 'col-resize'; });
+
+            document.addEventListener('mousemove', (e) => {
+                if (isDraggingH) {
+                    const headerHeight = document.querySelector('header').offsetHeight;
+                    const percentage = ((e.clientY - headerHeight) / (window.innerHeight - headerHeight)) * 100;
+                    if (percentage > 20 && percentage < 80) topPane.style.height = `${percentage}%`;
+                }
+                if (isDraggingV) {
+                    const percentage = (e.clientX / window.innerWidth) * 100;
+                    if (percentage > 20 && percentage < 80) chartPane.style.width = `${percentage}%`;
+                }
+            });
+
+            document.addEventListener('mouseup', () => {
+                if (isDraggingH || isDraggingV) {
+                    isDraggingH = false; isDraggingV = false;
+                    hResizer.classList.remove('dragging'); vResizer.classList.remove('dragging');
+                    document.body.style.cursor = 'default';
+                    window.dispatchEvent(new Event('resize'));
+                }
+            });
+        }
+        initResizers();
+        // Start with System tab selected
+        selectTab('system');
 
         function connectTerminalToHelper(agentId) {
             const terminal = terminals.get(agentId);
@@ -298,35 +362,40 @@
             logsEl.scrollTop = logsEl.scrollHeight;
         }
 
-        function selectAgent(agentId) {
-            console.log(`[SELECT-AGENT] Selecting ${agentId}`);
+        function selectTab(tabId) {
+            console.log(`[SELECT-TAB] Selecting ${tabId}`);
             
-            state.viewingAgent = agentId;
-            explorerStatus.textContent = `Active: ${agentId}`;
+            const isAgent = terminals.has(tabId);
+            state.viewingAgent = isAgent ? tabId : null;
+            explorerStatus.textContent = `Active: ${tabId}`;
             
             // Update trader table highlighting
             document.querySelectorAll('#agents-table tr').forEach(row => row.classList.remove('active-trader', 'font-bold'));
-            const selectedRow = Array.from(document.querySelectorAll('#agents-table td')).find(td => td.textContent === agentId)?.parentElement;
-            if (selectedRow) selectedRow.classList.add('active-trader', 'font-bold');
+            if (isAgent) {
+                const selectedRow = Array.from(document.querySelectorAll('#agents-table td')).find(td => td.textContent === tabId)?.parentElement;
+                if (selectedRow) selectedRow.classList.add('active-trader', 'font-bold');
+            }
 
             // Switch tabs and panes
             document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
             document.querySelectorAll('.terminal-container').forEach(pane => pane.classList.remove('active'));
 
-            const terminal = terminals.get(agentId);
+            const tabButton = Array.from(document.querySelectorAll('.tab-button')).find(btn => btn.textContent === tabId || btn.id === `tab-${tabId}`);
+            if (tabButton) tabButton.classList.add('active');
+
+            const pane = document.getElementById(`terminal-${tabId}`);
+            if (pane) pane.classList.add('active');
+
+            const terminal = terminals.get(tabId);
             if (terminal) {
-                console.log(`[SELECT-AGENT] Terminal found for ${agentId}, making active`);
-                const tabButton = Array.from(document.querySelectorAll('.tab-button')).find(btn => btn.textContent === agentId);
-                if (tabButton) tabButton.classList.add('active');
-                terminal.container.classList.add('active');
-                
+                console.log(`[SELECT-TAB] Terminal found for ${tabId}, making active`);
                 // Fit terminal after container is visible and has dimensions
                 requestAnimationFrame(() => {
                     // Give browser time to render and calculate dimensions
                     setTimeout(() => {
                         terminal.fitAddon.fit();
                         terminal.term.focus();
-                        console.log(`[FIT] ${agentId} sized to ${terminal.term.cols}x${terminal.term.rows}`);
+                        console.log(`[FIT] ${tabId} sized to ${terminal.term.cols}x${terminal.term.rows}`);
                         if (terminal.ws && terminal.ws.readyState === WebSocket.OPEN) {
                             terminal.ws.send(JSON.stringify({ type: 'resize', cols: terminal.term.cols, rows: terminal.term.rows }));
                         }
@@ -368,7 +437,7 @@
                 // Auto-select first agent
                 if (!state.viewingAgent && knownAgents.size > 0) {
                     const firstAgent = Array.from(knownAgents)[0];
-                    setTimeout(() => selectAgent(firstAgent), 1500);
+                    setTimeout(() => selectTab(firstAgent), 1500);
                 }
             }
 
@@ -417,7 +486,7 @@
 
                 const isWhale = trader.type === 'WHALE';
                 const isSelected = state.viewingAgent === trader.agent_id;
-                agentHtml += `<tr class="border-b border-gray-50 ${isWhale ? 'bg-gray-50/50' : 'cursor-pointer hover:bg-blue-50'} ${isSelected ? 'active-trader font-bold' : ''}" onclick="${isWhale ? '' : `selectAgent('${trader.agent_id}')`}">
+                agentHtml += `<tr class="border-b border-gray-50 ${isWhale ? 'bg-gray-50/50' : 'cursor-pointer hover:bg-blue-50'} ${isSelected ? 'active-trader font-bold' : ''}" onclick="${isWhale ? '' : `selectTab('${trader.agent_id}')`}">
                     <td class="py-1 font-mono px-1 truncate max-w-[100px]">${trader.agent_id}</td>
                     <td class="py-1 text-right font-mono pr-1">$${trader.wealth.toFixed(0)}</td>
                 </tr>`;
