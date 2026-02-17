@@ -34,13 +34,7 @@ const mocks = vi.hoisted(() => ({
     mocks.capturedES.push(inst);
     return inst;
   }),
-  ptySpawn: vi.fn().mockImplementation(() => ({
-    onData: vi.fn(),
-    onExit: vi.fn(),
-    write: vi.fn(),
-    resize: vi.fn(),
-    kill: vi.fn()
-  }))
+  _unused: null
 }));
 
 vi.mock("@opencode-ai/plugin", () => {
@@ -65,10 +59,6 @@ vi.mock("child_process", () => ({
 
 vi.mock("open", () => ({
   default: mocks.open
-}));
-
-vi.mock("node-pty", () => ({
-  spawn: mocks.ptySpawn
 }));
 
 vi.mock("eventsource", () => {
@@ -98,19 +88,42 @@ vi.mock("http", () => ({
   }
 }));
 
+// Stores the latest mock server so tests can trigger server.close()
+let mockServer: any = null;
+
 vi.mock("../lib/dashboard.app", () => ({
-  createDashboardApp: vi.fn(() => ({
-    app: { get: mocks.expressGet },
-    server: {
+  createDashboardApp: vi.fn(() => {
+    const serverListeners = new Map<string, Function[]>();
+    const socketListeners: Array<{ disconnect: Function }> = [];
+    mockServer = {
       listen: mocks.serverListen,
       address: mocks.serverAddress,
-      close: mocks.serverClose
-    },
-    io: {
-      emit: mocks.socketIoEmit,
-      on: mocks.socketIoOn
-    }
-  }))
+      close: (...args: any[]) => {
+        mocks.serverClose(...args);
+        (serverListeners.get('close') || []).forEach(fn => fn());
+      },
+      on: (event: string, fn: Function) => {
+        if (!serverListeners.has(event)) serverListeners.set(event, []);
+        serverListeners.get(event)!.push(fn);
+      }
+    };
+    return {
+      app: { get: mocks.expressGet },
+      server: mockServer,
+      io: {
+        emit: mocks.socketIoEmit,
+        on: (event: string, fn: Function) => {
+          mocks.socketIoOn(event, fn);
+          if (event === 'connection') {
+            // Store the connection handler so we can simulate socket disconnect
+            socketListeners.push({ disconnect: fn });
+          }
+        },
+        engine: { clientsCount: 0 }
+      },
+      setupTerminalProxy: vi.fn()
+    };
+  })
 }));
 
 // Import the tool (plugin)
@@ -159,7 +172,26 @@ describe("Tournament Tool", () => {
         stdout: new EventEmitter(),
         stderr: new EventEmitter()
     }) as any;
-    mocks.spawn.mockReturnValue(mockChildProcess);
+
+    // spawn is called for both python (tournament) and node (pty-helper).
+    // Return different mock processes based on the command.
+    mocks.spawn.mockImplementation((cmd: string, args: string[]) => {
+        if (cmd === "node" && args[0]?.includes("pty-helper")) {
+            const helperProc = Object.assign(new EventEmitter(), {
+                stdout: new EventEmitter(),
+                stderr: new EventEmitter(),
+                kill: vi.fn(),
+                unref: vi.fn(),
+                pid: 9999
+            });
+            // Simulate helper becoming ready after a tick
+            setTimeout(() => {
+                helperProc.stdout.emit("data", Buffer.from('{"port":54321}\n'));
+            }, 10);
+            return helperProc;
+        }
+        return mockChildProcess;
+    });
 
     // Setup Mock Server Address
     mocks.serverAddress.mockReturnValue({ port: 8001 });
@@ -188,6 +220,8 @@ describe("Tournament Tool", () => {
     const resultEvent = { type: "final_result", report: "Done" };
     mockChildProcess.stdout.emit("data", Buffer.from(JSON.stringify(resultEvent) + "\n"));
     mockChildProcess.emit("close", 0);
+    // Promise stays pending until dashboard server closes
+    mockServer.close();
     await executionPromise;
   });
 
@@ -233,23 +267,13 @@ describe("Tournament Tool", () => {
     mockChildProcess.emit("close", 0);
   });
 
-  it("should handle interactive terminal sessions via socket.io and node-pty", async () => {
-    // 1. Setup
+  it("should spawn detached PTY helper for terminal sessions", async () => {
     const executionPromise = tournamentTool.execute({
       prompt: "Terminal Test", rounds: 1, agents: 1, model: "m", provider: "p", log_level: "E", timeout: 1
     }, mockContext);
 
     await new Promise(resolve => setTimeout(resolve, 4000));
 
-    // Get the socket connection handler
-    const connectionHandler = mocks.socketIoOn.mock.calls.find((c: unknown[]) => (c as string[])[0] === 'connection')![1];
-    const mockSocket = {
-        on: vi.fn(),
-        emit: vi.fn()
-    };
-    connectionHandler(mockSocket);
-
-    // 2. Initialize Agent Data
     const initEvent = {
       type: "agent_init",
       agent_id: "agent_0",
@@ -258,25 +282,26 @@ describe("Tournament Tool", () => {
     };
     mockChildProcess.stdout.emit("data", Buffer.from(JSON.stringify(initEvent) + "\n"));
 
-    // 3. Request Terminal
-    const terminalInitHandler = mockSocket.on.mock.calls.find((c: unknown[]) => (c as string[])[0] === 'terminal.init')![1];
-    terminalInitHandler({ agent_id: "agent_0" });
+    // Wait for helper to "start" and emit port
+    await new Promise(resolve => setTimeout(resolve, 200));
 
-    // Verify pty.spawn was called with direct binary execution
-    expect(mocks.ptySpawn).toHaveBeenCalledWith(
-        "/home/codespace/.opencode/bin/opencode", 
-        ["attach", "http://localhost:9999", "-s", "ses_123", "--print-logs"], 
-        expect.any(Object)
+    // Verify a helper process was spawned (node pty-helper.js ...)
+    const helperCall = mocks.spawn.mock.calls.find(
+      (c: string[]) => c[0] === "node" && c[1]?.[0]?.includes("pty-helper")
     );
+    expect(helperCall).toBeDefined();
+    expect(helperCall[1]).toEqual(expect.arrayContaining([
+      expect.stringContaining("pty-helper"),
+      "/home/codespace/.opencode/bin/opencode",
+      "http://127.0.0.1:9999",
+      "ses_123"
+    ]));
 
-    const ptyInstance = mocks.ptySpawn.mock.results[0].value;
-    const ptyDataHandler = ptyInstance.onData.mock.calls[0][0];
-
-    // 4. Verify Output Proxying
-    ptyDataHandler("Hello Terminal");
-    expect(mockSocket.emit).toHaveBeenCalledWith("terminal.output", { agent_id: "agent_0", data: "Hello Terminal" });
+    // Verify terminal.ready was emitted
+    expect(mocks.socketIoEmit).toHaveBeenCalledWith("terminal.ready", { agent_id: "agent_0" });
 
     mockChildProcess.emit("close", 0);
+    mockServer.close();
     await executionPromise;
   });
 
@@ -295,6 +320,31 @@ describe("Tournament Tool", () => {
     expect(mocks.socketIoEmit).toHaveBeenCalledWith("log", { type: "log", message: "Split JSON" });
 
     mockChildProcess.emit("close", 0);
+    mockServer.close();
     await executionPromise;
+  });
+
+  it("should keep dashboard alive after tournament ends until server closes", async () => {
+    const executionPromise = tournamentTool.execute({
+      prompt: "Linger Test", rounds: 1, agents: 1, model: "m", provider: "p", log_level: "E", timeout: 1
+    }, mockContext);
+
+    await new Promise(resolve => setTimeout(resolve, 4000));
+
+    // Tournament finishes
+    mockChildProcess.emit("close", 0);
+
+    // Promise should NOT have resolved yet (dashboard still alive)
+    let resolved = false;
+    executionPromise.then(() => { resolved = true; });
+    await new Promise(resolve => setTimeout(resolve, 200));
+    expect(resolved).toBe(false);
+
+    // Now close the dashboard server (simulates all clients disconnecting)
+    mockServer.close();
+    await executionPromise;
+    // Promise resolves only after server closes
+    resolved = true;
+    expect(resolved).toBe(true);
   });
 });

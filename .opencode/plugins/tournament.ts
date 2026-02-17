@@ -24,14 +24,38 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
         },
         async execute({ prompt, rounds, agents, model, provider, target_file, log_level, timeout }, ctx: ToolContext) {
             // 1. Start Dashboard Server
-            const { server, io } = createDashboardApp();
+            const { server, io, setupTerminalProxy } = createDashboardApp();
 
             // Track active sessions for streaming
             const sessionToAgent = new Map<string, string>();
             const activeStreams = new Map<string, EventSource>();
             
             // Terminal Manager
-            const terminalManager = new TerminalManager(io);
+            const terminalManager = new TerminalManager(io, { verbose: true });
+            setupTerminalProxy(terminalManager);
+            
+            // Cleanup handler for when dashboard closes
+            let dashboardClosed = false;
+            const cleanup = () => {
+                if (dashboardClosed) return;
+                dashboardClosed = true;
+                console.log("Dashboard closed, cleaning up resources...");
+                activeStreams.forEach(es => es.close());
+                terminalManager.close();
+                server.close();
+            };
+            
+            server.on('close', cleanup);
+            io.on('connection', (socket) => {
+                socket.on('disconnect', () => {
+                    // If all clients disconnect, cleanup after a delay
+                    setTimeout(() => {
+                        if (io.engine.clientsCount === 0) {
+                            cleanup();
+                        }
+                    }, 5000);
+                });
+            });
 
             const portPromise: Promise<string> = new Promise((resolve) => {
                 server.listen(0, () => {
@@ -42,6 +66,7 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
             });
 
             const dashboardUrl: string = await portPromise;
+            console.log(`[DASHBOARD] ${dashboardUrl}`);
             const msg: string = `🚀 Live tournament dashboard available at ${dashboardUrl}`;
 
             await client.tui.showToast({
@@ -119,6 +144,10 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
                                     // Register with Terminal Manager using the AGENT'S PRIVATE URL
                                     terminalManager.registerAgent(agent_id!, api_url!, session_id!, arena_dir);
                                     
+                                    // Spawn terminal immediately - output is broadcast via io.emit
+                                    // and buffered so late-connecting dashboards get replay
+                                    terminalManager.spawnTerminal(agent_id!);
+                                    
                                     if (api_url && !activeStreams.has(api_url)) {
                                         const es = new EventSource(`${api_url}/event`); // OpenCode server events endpoint is /event
                                         es.onmessage = (msg: MessageEvent) => {
@@ -169,13 +198,20 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
 
                 child.on("close", async (code: number | null) => {
                     activeStreams.forEach(es => es.close());
-                    terminalManager.close();
-                    server.close();
-                    if (code !== 0) {
-                        resolve(`Market crashed (Exit Code ${code})`);
-                        return;
-                    }
-                    resolve(finalReport);
+                    
+                    io.emit('log', { 
+                        type: 'log', 
+                        message: 'Tournament finished. Dashboard and agent sessions remain active for exploration.' 
+                    });
+
+                    const resultMsg = code !== 0
+                        ? `Market crashed (Exit Code ${code})\nDashboard remains active at ${dashboardUrl}`
+                        : `${finalReport}\n\nDashboard remains active at ${dashboardUrl}`;
+                    
+                    // Keep the promise pending so opencode stays alive.
+                    // Resolve only when the dashboard server closes
+                    // (all browser clients disconnect or explicit shutdown).
+                    server.on('close', () => resolve(resultMsg));
                 });
 
                 child.on("error", (err: Error) => {

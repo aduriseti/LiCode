@@ -4,27 +4,8 @@ import { Server } from "http";
 import { io as ClientIO, Socket as ClientSocket } from "socket.io-client";
 import { type ToolContext } from "@opencode-ai/plugin/tool";
 
-interface MockPtyInstance {
-    onData: ReturnType<typeof vi.fn>;
-    onExit: ReturnType<typeof vi.fn>;
-    write: ReturnType<typeof vi.fn>;
-    kill: ReturnType<typeof vi.fn>;
-    resize: ReturnType<typeof vi.fn>;
-}
-
 const mocks = vi.hoisted(() => ({
-  ptySpawn: vi.fn().mockImplementation(() => ({
-    onData: vi.fn(),
-    onExit: vi.fn(),
-    write: vi.fn(),
-    kill: vi.fn(),
-    resize: vi.fn()
-  })),
   spawn: vi.fn()
-}));
-
-vi.mock("node-pty", () => ({
-  spawn: mocks.ptySpawn
 }));
 
 vi.mock("child_process", () => ({
@@ -43,15 +24,30 @@ describe("Realistic Terminal Flow", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     
-    // Mock Python backend
     mockPythonProcess = Object.assign(new EventEmitter(), {
       stdout: new EventEmitter(),
       stderr: new EventEmitter()
     }) as unknown as EventEmitter & { stdout: EventEmitter, stderr: EventEmitter };
-    mocks.spawn.mockReturnValue(mockPythonProcess);
+
+    mocks.spawn.mockImplementation((cmd: string, args: string[]) => {
+      if (cmd === "node" && args[0]?.includes("pty-helper")) {
+        const helperProc = Object.assign(new EventEmitter(), {
+          stdout: new EventEmitter(),
+          stderr: new EventEmitter(),
+          kill: vi.fn(),
+          unref: vi.fn(),
+          pid: 9999
+        });
+        setTimeout(() => {
+          helperProc.stdout.emit("data", Buffer.from('{"port":54321}\n'));
+        }, 10);
+        return helperProc;
+      }
+      return mockPythonProcess;
+    });
   });
 
-  it("should connect the dashboard to a realistic SSE session and verify PTY attachment params", async () => {
+  it("should spawn helper process with correct args for terminal attachment", async () => {
     const express = (await import("express")).default;
     const app = express();
     sseServer = app.listen(0);
@@ -60,10 +56,7 @@ describe("Realistic Terminal Flow", () => {
 
     app.get("/events", (req, res) => {
       res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
       res.flushHeaders();
-      
       const data = JSON.stringify({
         type: 'message.part.updated',
         properties: { delta: "RealSSE", part: { sessionID: "ses_real_sse" } }
@@ -75,14 +68,13 @@ describe("Realistic Terminal Flow", () => {
     const mockClient = {
       tui: {
         showToast: vi.fn().mockImplementation(async (call: { body: { message: string } }) => {
-           const msg = call.body.message;
-           const match = msg.match(/http:\/\/(localhost|127\.0\.0\.1):\d+/);
+           const match = call.body.message.match(/http:\/\/(localhost|127\.0\.0\.1):\d+/);
            if (match) dashboardUrl = match[0];
         })
       },
       session: { promptAsync: vi.fn() },
       app: { log: vi.fn().mockResolvedValue({}) }
-    } as unknown as any; // Temporary until we have full SDK types
+    } as unknown as any;
 
     const { tournamentPlugin } = await import("../plugins/tournament");
     const hooks = await tournamentPlugin({
@@ -94,7 +86,6 @@ describe("Realistic Terminal Flow", () => {
       $: vi.fn() as unknown as any
     });
 
-    // DO NOT AWAIT
     const execPromise = hooks.tool.tournament.execute({
       prompt: "Test", rounds: 1, agents: 1, model: "m", provider: "p"
     }, { sessionID: "main_ses" } as ToolContext);
@@ -114,22 +105,20 @@ describe("Realistic Terminal Flow", () => {
     };
     mockPythonProcess.stdout.emit("data", Buffer.from(JSON.stringify(initEvent) + "\n"));
 
-    // Give plugin time to process agent_init
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    await new Promise(resolve => setTimeout(resolve, 500));
 
-    clientSocket.emit("terminal.init", { agent_id: "agent_real_sse" });
-
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    expect(mocks.ptySpawn).toHaveBeenCalledWith(
-      "/home/codespace/.opencode/bin/opencode",
-      ["attach", `http://127.0.0.1:${ssePort}`, "-s", "ses_real_sse", "--print-logs"],
-      expect.objectContaining({
-          cwd: "/mock/arena",
-          env: expect.objectContaining({
-              TERM: "xterm-256color"
-          })
-      })
+    // Verify helper process was spawned with correct arguments
+    const helperCall = mocks.spawn.mock.calls.find(
+      (c: string[]) => c[0] === "node" && c[1]?.[0]?.includes("pty-helper")
     );
+    expect(helperCall).toBeDefined();
+    expect(helperCall[1]).toEqual(expect.arrayContaining([
+      expect.stringContaining("pty-helper"),
+      "/home/codespace/.opencode/bin/opencode",
+      `http://127.0.0.1:${ssePort}`,
+      "ses_real_sse",
+      "/mock/arena"
+    ]));
 
     clientSocket.disconnect();
     sseServer.close();

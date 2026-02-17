@@ -53,6 +53,14 @@ describe("Dashboard Interactive Console", () => {
             (window as any).Terminal = MockTerminal;
             (window as any).FitAddon = { FitAddon: function() { return { fit: vi.fn() }; } };
 
+            // Mock WebSocket
+            (window as any).WebSocket = function(this: any, url: string) {
+                this.url = url; this.send = vi.fn(); this.close = vi.fn();
+                this.readyState = 1; this.onopen = null; this.onmessage = null; this.onclose = null;
+            };
+            (window as any).WebSocket.OPEN = 1;
+
+            (window as any).requestAnimationFrame = (cb: () => void) => setTimeout(cb, 0);
             window.HTMLCanvasElement.prototype.getContext = vi.fn(() => ({ measureText: () => ({ width: 0 }) })) as any;
             Object.defineProperty(window.HTMLCanvasElement.prototype, 'ownerDocument', { get: function() { return window.document; } });
         }
@@ -79,11 +87,45 @@ describe("Dashboard Interactive Console", () => {
     expect(agentRow).toBeDefined();
     (agentRow as HTMLElement).click();
 
-    // 3. Verify Socket Event
+    // 3. Verify Socket Event - terminal.init is emitted during createTerminalForAgent->initializeTerminal
     expect(mockSocket.emit).toHaveBeenCalledWith("terminal.init", { agent_id: "agent_0" });
     
     // 4. Verify UI Update
-    expect(document.getElementById("explorer-agent")!.textContent).toBe("agent_0");
-    expect(document.getElementById("explorer-status")!.textContent).toBe("Active Console");
+    expect(document.getElementById("explorer-status")!.textContent).toContain("agent_0");
+  });
+
+  it("should keep bankrupt agents visible in the traders table", async () => {
+    const logHandler = mockSocket.on.mock.calls.find((c: unknown[]) => (c as string[])[0] === 'log')![1];
+
+    // Round 1: agent_0 is alive with wealth
+    logHandler({
+      type: "state",
+      round_num: 1,
+      whale_wealth: 1000,
+      assets: {},
+      agents: { "agent_0": { agent_id: "agent_0", wealth: 100 } }
+    });
+
+    let agentRow = document.querySelector('tr[onclick*="agent_0"]');
+    expect(agentRow).not.toBeNull();
+
+    // Round 2: agent_0 went bankrupt (removed from agents dict by orchestrator)
+    logHandler({
+      type: "state",
+      round_num: 2,
+      whale_wealth: 1100,
+      assets: {},
+      agents: {}
+    });
+
+    // agent_0 should still appear in the traders table with $0
+    agentRow = document.querySelector('tr[onclick*="agent_0"]');
+    expect(agentRow).not.toBeNull();
+    expect(agentRow!.textContent).toContain("$0");
+
+    // Terminal tab should also still exist
+    const tabButtons = document.querySelectorAll('.tab-button');
+    const agentTab = Array.from(tabButtons).find(btn => btn.textContent === 'agent_0');
+    expect(agentTab).toBeDefined();
   });
 });

@@ -3,38 +3,19 @@ import { EventEmitter } from "events";
 import { io as ClientIO, Socket as ClientSocket } from "socket.io-client";
 import { type ToolContext } from "@opencode-ai/plugin/tool";
 
-interface MockPtyInstance {
-    onData: ReturnType<typeof vi.fn>;
-    onExit: ReturnType<typeof vi.fn>;
-    write: ReturnType<typeof vi.fn>;
-    kill: ReturnType<typeof vi.fn>;
-    resize: ReturnType<typeof vi.fn>;
-}
-
 const mocks = vi.hoisted(() => ({
-    spawn: vi.fn(),
-    ptySpawn: vi.fn().mockImplementation(() => ({
-        onData: vi.fn(),
-        onExit: vi.fn(),
-        write: vi.fn(),
-        kill: vi.fn(),
-        resize: vi.fn()
-    }))
+    spawn: vi.fn()
 }));
 
 vi.mock("child_process", () => ({
     spawn: mocks.spawn
 }));
 
-vi.mock("node-pty", () => ({
-    spawn: mocks.ptySpawn
-}));
-
 vi.mock("open", () => ({
     default: vi.fn().mockResolvedValue(undefined)
 }));
 
-describe("Minimal Terminal Flow (Real PTY)", () => {
+describe("Minimal Terminal Flow (Helper Process)", () => {
     let clientSocket: ClientSocket;
     let mockChild: EventEmitter & { stdout: EventEmitter, stderr: EventEmitter };
 
@@ -44,14 +25,30 @@ describe("Minimal Terminal Flow (Real PTY)", () => {
             stdout: new EventEmitter(),
             stderr: new EventEmitter()
         }) as unknown as EventEmitter & { stdout: EventEmitter, stderr: EventEmitter };
-        mocks.spawn.mockReturnValue(mockChild);
+
+        mocks.spawn.mockImplementation((cmd: string, args: string[]) => {
+            if (cmd === "node" && args[0]?.includes("pty-helper")) {
+                const helperProc = Object.assign(new EventEmitter(), {
+                    stdout: new EventEmitter(),
+                    stderr: new EventEmitter(),
+                    kill: vi.fn(),
+                    unref: vi.fn(),
+                    pid: 9999
+                });
+                setTimeout(() => {
+                    helperProc.stdout.emit("data", Buffer.from('{"port":54321}\n'));
+                }, 10);
+                return helperProc;
+            }
+            return mockChild;
+        });
     });
 
     afterEach(() => {
         if (clientSocket) clientSocket.disconnect();
     });
 
-    it("should spawn a terminal and proxy output correctly", async () => {
+    it("should spawn a helper process and emit terminal.ready with port", async () => {
         const { tournamentPlugin } = await import("../plugins/tournament");
         const mockClient = {
             tui: { showToast: vi.fn() },
@@ -76,7 +73,6 @@ describe("Minimal Terminal Flow (Real PTY)", () => {
             if (match) dashboardUrl = match[0];
         });
 
-        // DO NOT AWAIT
         const execPromise = tournamentTool.execute({
             prompt: "Test", rounds: 1, agents: 1, model: "m", provider: "p"
         }, { sessionID: "main" } as ToolContext);
@@ -87,6 +83,11 @@ describe("Minimal Terminal Flow (Real PTY)", () => {
         clientSocket = ClientIO(dashboardUrl, { transports: ["polling"] });
         await new Promise<void>(resolve => clientSocket.on("connect", resolve));
 
+        // Listen for terminal.ready event
+        const readyPromise = new Promise<{ agent_id: string }>((resolve) => {
+            clientSocket.on("terminal.ready", resolve);
+        });
+
         const initEvent = {
             type: "agent_init",
             agent_id: "agent_real_pty",
@@ -96,34 +97,19 @@ describe("Minimal Terminal Flow (Real PTY)", () => {
         };
         mockChild.stdout.emit("data", Buffer.from(JSON.stringify(initEvent) + "\n"));
 
-        // Give plugin time to process agent_init
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        const ready = await readyPromise;
+        expect(ready.agent_id).toBe("agent_real_pty");
 
-        clientSocket.emit("terminal.init", { agent_id: "agent_real_pty" });
-
-        // Wait for pty.spawn to be called
-        await vi.waitFor(() => {
-            if (mocks.ptySpawn.mock.calls.length === 0) throw new Error("pty.spawn not called yet");
-        });
-
-        const ptyInstance = mocks.ptySpawn.mock.results[0].value as MockPtyInstance;
-        const ptyDataHandler = ptyInstance.onData.mock.calls[0][0] as (data: string) => void;
-
-        const outputPromise = new Promise<string>((resolve) => {
-            clientSocket.on("terminal.output", ({ agent_id, data }: { agent_id: string, data: string }) => {
-                if (agent_id === "agent_real_pty") {
-                    resolve(data); 
-                }
-            });
-        });
-
-        // Simulate PTY data
-        ptyDataHandler("MINIMAL_FLOW_DATA");
-
-        const data = await outputPromise;
-        expect(data).toBe("MINIMAL_FLOW_DATA");
+        // Verify helper was spawned with correct args
+        const helperCall = mocks.spawn.mock.calls.find(
+            (c: string[]) => c[0] === "node" && c[1]?.[0]?.includes("pty-helper")
+        );
+        expect(helperCall).toBeDefined();
 
         mockChild.emit("close", 0);
+        // Disconnect the socket client so dashboard server shuts down
+        clientSocket.disconnect();
+        await new Promise(resolve => setTimeout(resolve, 6000));
         await execPromise;
-    }, 20000);
+    }, 30000);
 });

@@ -240,93 +240,93 @@ class MarketRunner:
         """
         Executes the main game loop until convergence or max_rounds (Async).
         """
+        if stream_ui and not json_logs:
+            # Setup custom handler for dashboard + file logging
+            log_file = os.path.join(self.arena_dir, "tournament.log")
+            handler = BufferedLogHandler(self.log_buffer, log_file=log_file)
+            handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S'))
+            logging.getLogger().addHandler(handler)
+
+        if stream_ui and not json_logs:
+            sys.stderr.write(f"Starting Tournament: {len(self.sharks)} Agents (Server: {self.api_url})\n")
+
+        # Use Rich Live Display if stream_ui is True
+        # Force terminal to ensure Rich renders control codes through the pipe
+        if stream_ui and not json_logs:
+            console = Console(stderr=True, force_terminal=True)
+            live = Live(self._render_dashboard(), refresh_per_second=4, console=console, transient=False)
+            live.start()
+        else:
+            live = None
+
         try:
-            if stream_ui and not json_logs:
-                # Setup custom handler for dashboard + file logging
-                log_file = os.path.join(self.arena_dir, "tournament.log")
-                handler = BufferedLogHandler(self.log_buffer, log_file=log_file)
-                handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S'))
-                logging.getLogger().addHandler(handler)
-
-            if stream_ui and not json_logs:
-                sys.stderr.write(f"Starting Tournament: {len(self.sharks)} Agents (Server: {self.api_url})\n")
-
-            # Use Rich Live Display if stream_ui is True
-            # Force terminal to ensure Rich renders control codes through the pipe
-            if stream_ui and not json_logs:
-                console = Console(stderr=True, force_terminal=True)
-                live = Live(self._render_dashboard(), refresh_per_second=4, console=console, transient=False)
-                live.start()
-            else:
-                live = None
-
-            try:
-                for i in range(max_rounds):
-                    # ... existing loop logic ...
-                    # 1. Collect Actions in Parallel
-                    if json_logs:
-                        print(json.dumps({"type": "log", "message": f"Round {i+1}: Collecting agent actions..."}))
-                    else:
-                        logging.info(f"Round {i+1}: Collecting agent actions...")
-                    
-                    tasks = []
-                    for aid, shark in self.sharks.items():
-                        if aid in self.orchestrator.state.agents:
-                            tasks.append(shark.get_action(self.orchestrator.state))
-                    
-                    actions = await asyncio.gather(*tasks)
-                    
-                    if json_logs:
-                        print(json.dumps({"type": "log", "message": f"Round {i+1}: All agents decided."}))
-                    else:
-                        logging.info(f"Round {i+1}: All agents decided.")
-                    
-                    # 2. Step Market
-                    self.orchestrator.process_round(list(actions))
-                    
-                    # 3. Update UI
-                    if live:
-                        live.update(self._render_dashboard())
-                    elif json_logs:
-                        # Output full state for dashboard
-                        print(json.dumps({
-                            "type": "state",
-                            **json.loads(self.orchestrator.state.to_json())
-                        }))
-                        sys.stdout.flush()
-                        
-                    # 4. Check Convergence
-                    if self.check_convergence():
-                        if live:
-                            # sys.stderr.write(f"Convergence Reached at Round {i+1}!\n")
-                            # Just let the live display persist
-                            pass
-                        elif json_logs:
-                            print(json.dumps({"type": "log", "message": f"Convergence reached at round {i+1}"}))
-                        else:
-                            logging.info(f"Convergence reached at round {i+1}")
-                        break
-            finally:
+            for i in range(max_rounds):
+                # ... existing loop logic ...
+                # 1. Collect Actions in Parallel
+                if json_logs:
+                    print(json.dumps({"type": "log", "message": f"Round {i+1}: Collecting agent actions..."}))
+                else:
+                    logging.info(f"Round {i+1}: Collecting agent actions...")
+                
+                tasks = []
+                for aid, shark in self.sharks.items():
+                    if aid in self.orchestrator.state.agents:
+                        tasks.append(shark.get_action(self.orchestrator.state))
+                
+                actions = await asyncio.gather(*tasks)
+                
+                if json_logs:
+                    print(json.dumps({"type": "log", "message": f"Round {i+1}: All agents decided."}))
+                else:
+                    logging.info(f"Round {i+1}: All agents decided.")
+                
+                # 2. Step Market
+                self.orchestrator.process_round(list(actions))
+                
+                # 3. Update UI
                 if live:
-                    live.stop()
-                
-                # Gracefully close all agents
-                close_tasks = [shark.close() for shark in self.sharks.values()]
-                if close_tasks:
-                    await asyncio.gather(*close_tasks, return_exceptions=True)
-                
-            if json_logs:
-                 # Construct final output
-                output = {
-                    "type": "final_result",
-                    "state": json.loads(self.orchestrator.state.to_json()),
-                    "report": self.orchestrator.get_final_report()
-                }
-                print(json.dumps(output))
-            else:
-                logging.info(f"Tournament finished. Final report generated in {self.arena_dir}")
+                    live.update(self._render_dashboard())
+                elif json_logs:
+                    # Output full state for dashboard
+                    print(json.dumps({
+                        "type": "state",
+                        **json.loads(self.orchestrator.state.to_json())
+                    }))
+                    sys.stdout.flush()
+                    
+                # 4. Check Convergence
+                if self.check_convergence():
+                    if live:
+                        # sys.stderr.write(f"Convergence Reached at Round {i+1}!\n")
+                        # Just let the live display persist
+                        pass
+                    elif json_logs:
+                        print(json.dumps({"type": "log", "message": f"Convergence reached at round {i+1}"}))
+                    else:
+                        logging.info(f"Convergence reached at round {i+1}")
+                    break
         finally:
-            self._stop_servers()
+            if live:
+                live.stop()
+            
+            # DON'T close agents or servers - keep them alive for dashboard exploration
+            # close_tasks = [shark.close() for shark in self.sharks.values()]
+            # if close_tasks:
+            #     await asyncio.gather(*close_tasks, return_exceptions=True)
+            
+        if json_logs:
+             # Construct final output
+            output = {
+                "type": "final_result",
+                "state": json.loads(self.orchestrator.state.to_json()),
+                "report": self.orchestrator.get_final_report()
+            }
+            print(json.dumps(output))
+        else:
+            logging.info(f"Tournament finished. Agent servers remain active for dashboard exploration.")
+        
+        # DON'T stop servers - let them persist for dashboard
+        # self._stop_servers()
 
     def _stop_servers(self):
         """Terminates all agent server processes."""
