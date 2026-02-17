@@ -13,14 +13,18 @@ interface HelperProcess {
     port: number;
 }
 
+export type LogFn = (level: "debug" | "info" | "warn" | "error", message: string) => void;
+
 export class TerminalManager {
     private agentMetadata = new Map<string, AgentMeta>();
     private helpers = new Map<string, HelperProcess>();
     private spawningAgents = new Set<string>();
     private verbose: boolean;
+    private log: LogFn;
 
-    constructor(private io: Server, opts?: { verbose?: boolean }) {
+    constructor(private io: Server, opts?: { verbose?: boolean; log?: LogFn }) {
         this.verbose = opts?.verbose ?? false;
+        this.log = opts?.log ?? (() => {});
         this.io.on("connection", (socket: Socket) => {
             socket.on("terminal.init", ({ agent_id }: { agent_id: string }) => {
                 if (this.helpers.has(agent_id)) {
@@ -45,7 +49,7 @@ export class TerminalManager {
     public spawnTerminal(agentId: string, attempt: number = 1) {
         const meta = this.agentMetadata.get(agentId);
         if (!meta) {
-            console.error(`Terminal init failed: No metadata for agent ${agentId}`);
+            this.log("error", `Terminal init failed: No metadata for agent ${agentId}`);
             return;
         }
 
@@ -57,7 +61,7 @@ export class TerminalManager {
             this.helpers.delete(agentId);
         }
 
-        if (this.verbose) console.log(`[TERMINAL] Spawning helper for ${agentId} (Attempt ${attempt}/5)`);
+        if (this.verbose) this.log("info", `[TERMINAL] Spawning helper for ${agentId} (Attempt ${attempt}/5)`);
 
         const helperPath = path.join(__dirname, "pty-helper.js");
         const opencodeBin = "/home/codespace/.opencode/bin/opencode";
@@ -85,19 +89,19 @@ export class TerminalManager {
                 this.spawningAgents.delete(agentId);
                 this.helpers.set(agentId, { proc: child, port: info.port });
 
-                if (this.verbose) console.log(`[TERMINAL][${agentId}] Helper ready on port ${info.port}`);
+                if (this.verbose) this.log("info", `[TERMINAL][${agentId}] Helper ready on port ${info.port}`);
 
                 // Tell all connected dashboard clients this terminal is available
                 this.io.emit("terminal.ready", { agent_id: agentId });
             } catch (e) {
-                if (this.verbose) console.error(`[TERMINAL][${agentId}] Failed to parse helper output: ${stdoutBuf}`);
+                if (this.verbose) this.log("error", `[TERMINAL][${agentId}] Failed to parse helper output: ${stdoutBuf}`);
             }
         });
 
         if (this.verbose) {
             child.stderr!.on("data", (chunk: Buffer) => {
                 const clean = chunk.toString().replace(/[\u001b\u009b][\[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, "").trim();
-                if (clean) console.log(`[TERMINAL-HELPER-ERR][${agentId}] ${clean.substring(0, 200)}`);
+                if (clean) this.log("warn", `[TERMINAL-HELPER-ERR][${agentId}] ${clean.substring(0, 200)}`);
             });
         }
 
@@ -106,13 +110,13 @@ export class TerminalManager {
             const duration = (Date.now() - startTime) / 1000;
 
             if (this.verbose) {
-                console.log(`[TERMINAL-EXIT][${agentId}] Helper exited: code=${code}, signal=${signal}, duration=${duration.toFixed(1)}s`);
+                this.log("info", `[TERMINAL-EXIT][${agentId}] Helper exited: code=${code}, signal=${signal}, duration=${duration.toFixed(1)}s`);
             }
 
             this.helpers.delete(agentId);
 
             if (duration < 3 && attempt < 5) {
-                if (this.verbose) console.log(`[TERMINAL] ${agentId} helper failed quickly, retrying in 2s...`);
+                if (this.verbose) this.log("info", `[TERMINAL] ${agentId} helper failed quickly, retrying in 2s...`);
                 setTimeout(() => this.spawnTerminal(agentId, attempt + 1), 2000);
             }
         });

@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { spawn, ChildProcess } from "child_process";
-import { chromium, Browser } from "playwright";
+import { spawn, execSync, ChildProcess } from "child_process";
+import { chromium, Browser, Page } from "playwright";
 
 describe("Workspace Verification (Headless Browser)", () => {
     let ocProcess: ChildProcess | null = null;
@@ -11,7 +11,20 @@ describe("Workspace Verification (Headless Browser)", () => {
         if (ocProcess?.pid) {
             try { process.kill(-ocProcess.pid, "SIGKILL"); } catch (e) {}
         }
+        // Kill any orphaned opencode serve processes spawned by the tournament
+        try { execSync("pkill -f 'opencode serve' 2>/dev/null || true"); } catch (e) {}
     });
+
+    async function launchBrowser(): Promise<Browser> {
+        return chromium.launch({
+            headless: true,
+            args: [
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--no-sandbox",
+            ],
+        });
+    }
 
     it("should show fibonacci code in the dashboard terminal", async () => {
         ocProcess = spawn(
@@ -25,7 +38,8 @@ describe("Workspace Verification (Headless Browser)", () => {
             }
         );
 
-        // Extract dashboard URL from output
+        // Extract dashboard URL from --print-logs output
+        // client.app.log messages appear as: INFO ... service=tournament-tool [DASHBOARD] http://...
         const dashboardUrl = await new Promise<string>((resolve, reject) => {
             const timeout = setTimeout(() => reject(new Error("Dashboard URL not found in output within 60s")), 60000);
             let buf = "";
@@ -41,18 +55,17 @@ describe("Workspace Verification (Headless Browser)", () => {
             ocProcess!.stderr!.on("data", scan);
         });
 
-        // Open dashboard in headless Chromium
-        browser = await chromium.launch({ headless: true });
+        browser = await launchBrowser();
         const page = await browser.newPage();
-        await page.goto(dashboardUrl, { waitUntil: "networkidle", timeout: 30000 });
+        page.on("crash", () => { throw new Error("Dashboard page crashed in Chromium"); });
+        await page.goto(dashboardUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
 
-        // Wait for a terminal tab and click it
-        await page.waitForSelector(".tab-button", { timeout: 60000 });
-        const firstTab = await page.$(".tab-button");
-        expect(firstTab).not.toBeNull();
-        await firstTab!.click();
+        // Wait for an agent terminal tab (not the SYSTEM tab) to appear
+        const agentTab = await page.waitForSelector(".tab-button:not(#tab-system)", { timeout: 90000 });
+        expect(agentTab).not.toBeNull();
+        await agentTab!.click();
 
-        // Wait for xterm.js rows to appear
+        // Wait for xterm.js rows to render in the active terminal
         await page.waitForSelector(".terminal-container.active .xterm-rows", { timeout: 30000 });
 
         // Poll until fibonacci content appears in the terminal
