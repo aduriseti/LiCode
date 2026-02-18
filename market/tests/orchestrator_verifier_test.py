@@ -7,18 +7,19 @@ from unittest.mock import MagicMock, patch
 from market.orchestrator import Orchestrator
 from market.core.state import MarketState, AgentPortfolio
 
-class TestOrchestratorVerifier(unittest.TestCase):
-    def setUp(self):
+class TestOrchestratorVerifier(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
         self.test_dir = tempfile.mkdtemp()
         self.orchestrator = Orchestrator(
             prompt="test prompt",
             n_agents=1,
             base_dir=self.test_dir
         )
+        await self.orchestrator.initialize()
         # Setup one agent for bond logic
         self.orchestrator.state.agents["agent_0"] = AgentPortfolio(agent_id="agent_0", wealth=100.0)
 
-    def tearDown(self):
+    async def asyncTearDown(self):
         shutil.rmtree(self.test_dir)
 
     def test_create_verifier_with_code_legacy(self):

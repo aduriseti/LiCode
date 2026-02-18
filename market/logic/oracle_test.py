@@ -4,7 +4,7 @@ import tempfile
 import shutil
 from market.logic.oracle import Oracle
 
-class TestOracle(unittest.TestCase):
+class TestOracle(unittest.IsolatedAsyncioTestCase):
     
     def setUp(self):
         # Create dummy files
@@ -42,21 +42,21 @@ class TestOracle(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp_dir)
 
-    def test_pass(self):
-        res = Oracle.run_test(self.good_cand, self.valid_verifier_dir)
+    async def test_pass(self):
+        res = await Oracle.run_test(self.good_cand, self.valid_verifier_dir)
         self.assertEqual(res, "PASS")
         
-    def test_fail(self):
-        res = Oracle.run_test(self.bad_cand, self.valid_verifier_dir)
+    async def test_fail(self):
+        res = await Oracle.run_test(self.bad_cand, self.valid_verifier_dir)
         self.assertEqual(res, "FAIL")
         
-    def test_timeout(self):
+    async def test_timeout(self):
         # We need the TEST to call the function
-        res = Oracle.run_test(self.loop_cand, self.valid_verifier_dir, timeout=1)
+        res = await Oracle.run_test(self.loop_cand, self.valid_verifier_dir, timeout=1)
         self.assertEqual(res, "TIMEOUT")
         
-    def test_missing_file(self):
-        res = Oracle.run_test("ghost.py", self.valid_verifier_dir)
+    async def test_missing_file(self):
+        res = await Oracle.run_test("ghost.py", self.valid_verifier_dir)
         self.assertEqual(res, "ERROR")
 
 if __name__ == '__main__':

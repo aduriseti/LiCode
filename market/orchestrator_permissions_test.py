@@ -5,12 +5,13 @@ import stat
 import tempfile
 from market.orchestrator import Orchestrator, AgentAction
 
-class PermissionsTest(unittest.TestCase):
-    def setUp(self):
+class PermissionsTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
         self.test_dir = tempfile.mkdtemp()
         self.orch = Orchestrator("Test Perms", n_agents=1, base_dir=self.test_dir)
+        await self.orch.initialize()
 
-    def tearDown(self):
+    async def asyncTearDown(self):
         shutil.rmtree(self.test_dir)
 
     def test_candidate_dir_permissions(self):
@@ -31,12 +32,12 @@ class PermissionsTest(unittest.TestCase):
             mode_file = os.stat(sol_path).st_mode
             self.assertEqual(mode_file & 0o777, 0o644)
 
-    def test_verifier_dir_permissions(self):
+    async def test_verifier_dir_permissions(self):
         # Create a verifier proposal
         action = AgentAction("agent_0", proposals=[
             {"type": "VERIFIER", "code": "print('ok')"}
         ])
-        self.orch.process_round([action])
+        await self.orch.process_round([action])
         
         # Find the verifier dir
         v_base = os.path.join(self.test_dir, "verifiers")

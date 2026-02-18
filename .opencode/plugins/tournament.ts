@@ -17,7 +17,7 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
             agents: tool.schema.number().default(3),
             model: tool.schema.string().default("gemini-3-flash").describe("The LLM model ID. Defaults to 'gemini-3-flash'."),
             provider: tool.schema.string().default("opencode").describe("The LLM provider ID. MUST be 'opencode' to use credits."),
-            log_level: tool.schema.string().default("ERROR").describe("Logging level (DEBUG, INFO, WARNING, ERROR). Defaults to ERROR."),
+            log_level: tool.schema.string().default("INFO").describe("Logging level (DEBUG, INFO, WARNING, ERROR). Defaults to INFO."),
             timeout: tool.schema.number().default(300.0).describe("Timeout for each agent's response in seconds. Increase for complex tasks.")
         },
         async execute({ prompt, rounds, agents, model, provider, log_level, timeout }, ctx: ToolContext) {
