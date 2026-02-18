@@ -9,9 +9,9 @@ from market.runner import MarketRunner
 
 def main():
     parser = argparse.ArgumentParser(description="Logical Induction Market CLI")
-    parser.add_argument("--log-level", type=str, default=os.environ.get("LOG_LEVEL", "ERROR"), 
+    parser.add_argument("--log-level", type=str, default=os.environ.get("LOG_LEVEL", "INFO"), 
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-                        help="Set logging level (default: ERROR or $LOG_LEVEL)")
+                        help="Set logging level (default: INFO or $LOG_LEVEL)")
     
     subparsers = parser.add_subparsers(dest="command", required=True)
     

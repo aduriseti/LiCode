@@ -13,7 +13,7 @@ class Oracle:
     """
     
     @staticmethod
-    def run_test(candidate_path: str, verifier_dir: str, timeout: int = 5) -> ResultType:
+    async def run_test(candidate_path: str, verifier_dir: str, timeout: int = 5) -> ResultType:
         """
         Runs a verifier package against a candidate.
         
@@ -25,6 +25,7 @@ class Oracle:
         Returns:
             PASS (exit 0), FAIL (exit != 0), TIMEOUT, or ERROR
         """
+        import asyncio
         if not os.path.exists(candidate_path):
             return "ERROR"
         if not os.path.isdir(verifier_dir):
@@ -60,21 +61,31 @@ class Oracle:
             # The verifier's run.sh is expected to handle execution and exit codes
             cmd = ["./run.sh"]
             
-            result = subprocess.run(
-                cmd,
+            import logging
+            logging.info(f"Oracle: Starting test {os.path.basename(verifier_dir)} on {os.path.basename(candidate_path)}")
+            
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
                 cwd=temp_dir,
-                capture_output=True,
-                text=True,
-                timeout=timeout
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
             )
             
-            if result.returncode == 0:
-                return "PASS"
-            else:
-                return "FAIL"
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+                logging.info(f"Oracle: Finished test {os.path.basename(verifier_dir)} on {os.path.basename(candidate_path)}")
                 
-        except subprocess.TimeoutExpired:
-            return "TIMEOUT"
+                if process.returncode == 0:
+                    return "PASS"
+                else:
+                    return "FAIL"
+            except asyncio.TimeoutError:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                return "TIMEOUT"
+                
         except Exception as e:
             import logging
             logging.error(f"Oracle Execution Error: {e}")

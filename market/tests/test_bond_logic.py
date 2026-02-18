@@ -5,9 +5,9 @@ import shutil
 from market.core.state import MarketState, AgentPortfolio, MarketAsset, MarketBond
 from market.orchestrator import Orchestrator
 
-class TestBondLogic(unittest.TestCase):
+class TestBondLogic(unittest.IsolatedAsyncioTestCase):
 
-    def setUp(self):
+    async def asyncSetUp(self):
         self.test_dir = "/tmp/market_test_bond"
         if os.path.exists(self.test_dir):
             shutil.rmtree(self.test_dir)
@@ -19,10 +19,12 @@ class TestBondLogic(unittest.TestCase):
             whale_wealth=2000.0,
             prompt="test"
         )
+        # Use agent1 to match existing test logic
         self.state.agents["agent1"] = AgentPortfolio(agent_id="agent1", wealth=1000.0)
         self.orch = Orchestrator("test", 1, state=self.state, base_dir=self.test_dir)
+        await self.orch.initialize()
 
-    def tearDown(self):
+    async def asyncTearDown(self):
         if os.path.exists(self.test_dir):
             shutil.rmtree(self.test_dir)
 

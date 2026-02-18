@@ -63,11 +63,15 @@ class TestMarketRunner(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(is_converged)
 
     @patch('market.runner.Shark')
-    @patch('market.runner.socket.create_connection')
+    @patch('market.runner.asyncio.open_connection')
     @patch('market.runner.subprocess.Popen')
-    async def test_server_home_env(self, MockPopen, MockSocket, MockShark):
+    async def test_server_home_env(self, MockPopen, MockAsyncSocket, MockShark):
         # Verify that HOME is overridden for isolation
-        MockSocket.return_value.__enter__.return_value = MagicMock()
+        # Mock asyncio.open_connection to return (reader, writer)
+        mock_writer = MagicMock()
+        mock_writer.wait_closed = AsyncMock()
+        MockAsyncSocket.return_value = (MagicMock(), mock_writer)
+        
         MockPopen.return_value.poll.return_value = None
         
         # Setup Mock Shark

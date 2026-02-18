@@ -64,19 +64,30 @@ class MarketRunner:
         self.api_url = api_url # Store for UI
         
         self.log_buffer = deque(maxlen=20)
+        self.port_lock = asyncio.Lock()
 
     async def initialize(self, json_logs: bool = False):
         """Async initialization of agent servers and sessions."""
-        session_map = {}
-        
-        # Start a dedicated server for each agent
-        for aid in self.orchestrator.state.agents.keys():
-            # 1. Find port and start server
-            port = self._find_free_port()
+        if not json_logs:
+            logging.info(f"Initializing tournament for run_id: {self.run_id}")
+            
+        # 0. Initialize Orchestrator (clones workspaces in parallel)
+        await self.orchestrator.initialize()
+
+        async def setup_agent(aid):
+            if not json_logs:
+                logging.info(f"Starting setup for agent {aid}...")
+            
+            async with self.port_lock:
+                port = self._find_free_port()
+            
             agent_url = f"http://127.0.0.1:{port}"
-            server_proc = self._start_agent_server(aid, port)
+            server_proc = await self._start_agent_server(aid, port)
             self.agent_servers[aid] = server_proc
             
+            if not json_logs:
+                logging.info(f"Server for {aid} started on port {port}. Initializing Shark...")
+
             # 2. Initialize Shark
             log_path = os.path.join(self.sessions_dir, f"{aid}.log")
             shark = Shark(aid, model=self.model, provider=self.provider, api_url=agent_url, log_path=log_path, timeout=self.agent_timeout)
@@ -86,12 +97,9 @@ class MarketRunner:
             await shark.initialize_session()
             session_id = shark.session.id
             
-            session_map[aid] = {
-                "session_id": session_id,
-                "api_url": agent_url,
-                "log_path": os.path.relpath(shark.log_path, self.arena_dir) if shark.log_path else None
-            }
-            
+            if not json_logs:
+                logging.info(f"Session for {aid} initialized: {session_id}")
+
             # Emit init event for dashboard
             if json_logs:
                 print(json.dumps({
@@ -102,6 +110,21 @@ class MarketRunner:
                     "arena_dir": self.arena_dir
                 }))
                 sys.stdout.flush()
+
+            return aid, {
+                "session_id": session_id,
+                "api_url": agent_url,
+                "log_path": os.path.relpath(shark.log_path, self.arena_dir) if shark.log_path else None
+            }
+
+        # Run setups concurrently
+        tasks = [setup_agent(aid) for aid in self.orchestrator.state.agents.keys()]
+        results = await asyncio.gather(*tasks)
+        
+        session_map = dict(results)
+
+        if not json_logs:
+            logging.info("All agents initialized.")
 
         # Emit Initial State
         if json_logs:
@@ -120,7 +143,7 @@ class MarketRunner:
             s.bind(('', 0))
             return s.getsockname()[1]
 
-    def _start_agent_server(self, agent_id: str, port: int) -> subprocess.Popen:
+    async def _start_agent_server(self, agent_id: str, port: int) -> subprocess.Popen:
         """Starts a dedicated OpenCode server for a specific agent."""
         # Use the candidate worktree as the agent's workspace
         cand_id = agent_id.replace("agent", "cand")
@@ -163,10 +186,13 @@ class MarketRunner:
             if proc.poll() is not None:
                 raise RuntimeError(f"Server for {agent_id} failed to start.")
             try:
-                with socket.create_connection(("127.0.0.1", port), timeout=1):
-                    return proc
-            except (ConnectionRefusedError, socket.timeout):
-                time.sleep(0.5)
+                # Async check for connection
+                _, writer = await asyncio.open_connection("127.0.0.1", port)
+                writer.close()
+                await writer.wait_closed()
+                return proc
+            except (ConnectionRefusedError, OSError):
+                await asyncio.sleep(0.5)
         raise RuntimeError(f"Timed out waiting for server {agent_id} at port {port}")
 
     def _stop_servers(self):
@@ -210,13 +236,23 @@ class MarketRunner:
                 
                 actions = await asyncio.gather(*tasks)
                 
+                for action in actions:
+                    if action.beliefs:
+                        if json_logs:
+                            print(json.dumps({
+                                "type": "log", 
+                                "message": f"Agent {action.agent_id} Beliefs: {action.beliefs}"
+                            }))
+                        else:
+                            logging.info(f"Agent {action.agent_id} Beliefs: {action.beliefs}")
+                
                 if json_logs:
                     print(json.dumps({"type": "log", "message": f"Round {i+1}: All agents decided."}))
                 else:
                     logging.info(f"Round {i+1}: All agents decided.")
                 
                 # 2. Step Market
-                self.orchestrator.process_round(list(actions))
+                await self.orchestrator.process_round(list(actions))
                 
                 # 3. Update UI (Text Only)
                 if not json_logs:

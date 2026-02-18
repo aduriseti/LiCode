@@ -9,8 +9,8 @@ from market.runner import MarketRunner
 from market.core.state import MarketState, MarketAsset, AgentPortfolio
 from market.orchestrator import Orchestrator
 
-class TestDashboard(unittest.TestCase):
-    def setUp(self):
+class TestDashboard(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
         # Mock State
         self.state = MarketState(
             round_num=1,
@@ -28,13 +28,14 @@ class TestDashboard(unittest.TestCase):
         
         # Initialize Orchestrator with mocked state
         self.orchestrator = Orchestrator("Test", 1, 1000.0, state=self.state)
+        await self.orchestrator.initialize()
 
-    def test_dashboard_content(self):
+    async def test_dashboard_content(self):
         """Render the text dashboard to check for key content."""
         output = self.orchestrator.get_pretty_summary()
         
         # Check Header
-        self.assertIn("ROUND 1", output)
+        self.assertIn("Round 1", output)
         # Note: Whitespace matching might be fragile, so check distinct parts
         self.assertIn("Whale Wealth:", output)
         self.assertIn("1000.00", output)
@@ -47,9 +48,9 @@ class TestDashboard(unittest.TestCase):
         self.assertIn("agent_0", output)
         self.assertIn("1000.00", output)
         
-        # Check Formatting (Table borders)
-        self.assertIn("╔═", output)
-        self.assertIn("║ Asset", output)
+        # Check Formatting (Plain text)
+        self.assertIn("--- Round 1 Summary ---", output)
+        self.assertIn("Market Prices:", output)
 
 if __name__ == '__main__':
     unittest.main()

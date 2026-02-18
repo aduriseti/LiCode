@@ -31,9 +31,13 @@ class Orchestrator:
         os.makedirs(self.worktrees_dir, exist_ok=True)
         os.makedirs(self.verifiers_dir, exist_ok=True)
 
+        self.n_agents = n_agents
+        self.budget = budget
+        self.prompt = prompt
+
         if state:
             self.state = state
-            self.inference_tax = 1.0
+            self.inference_tax = (0.01 * budget) / n_agents if n_agents > 0 else 1.0
         else:
             self.state = MarketState(
                 round_num=0,
@@ -41,31 +45,42 @@ class Orchestrator:
                 whale_wealth=budget,
                 prompt=prompt
             )
-            self.inference_tax = 1.0 # Cost per round
+            self.inference_tax = (0.01 * budget) / n_agents if n_agents > 0 else 1.0 # Cost per round
             
         self.bond_lock_period = 1
         self.epsilon = 0.01
-            
-        # Initialize Agents
-        for i in range(n_agents):
+
+    async def initialize(self):
+        """Asynchronously initialize the orchestrator and clone workspaces in parallel."""
+        import asyncio
+        tasks = []
+        for i in range(self.n_agents):
             aid = f"agent_{i}"
-            self.state.agents[aid] = AgentPortfolio(
-                agent_id=aid, 
-                wealth=budget / n_agents
-            )
+            if aid not in self.state.agents:
+                self.state.agents[aid] = AgentPortfolio(
+                    agent_id=aid, 
+                    wealth=self.budget / self.n_agents
+                )
             # Initialize Candidate for each agent
             cid = f"cand_{i}"
             
             # Create worktree for candidate (Full Clone)
             cand_dir = os.path.join(self.worktrees_dir, cid)
-            self._clone_workspace(cand_dir)
+            
+            async def setup_cand(c_dir, c_id, a_id):
+                # Run blocking shutil in a thread to not block the event loop
+                await asyncio.to_thread(self._clone_workspace, c_dir)
+                self.state.assets[c_id] = MarketAsset(
+                    id=c_id, 
+                    type="CANDIDATE", 
+                    description=f"Solution by {a_id}",
+                    code_path=c_dir # Point to ROOT of worktree
+                )
 
-            self.state.assets[cid] = MarketAsset(
-                id=cid, 
-                type="CANDIDATE", 
-                description=f"Solution by {aid}",
-                code_path=cand_dir # Point to ROOT of worktree
-            )
+            tasks.append(setup_cand(cand_dir, cid, aid))
+        
+        if tasks:
+            await asyncio.gather(*tasks)
 
     def _clone_workspace(self, dest_dir: str):
         """Clones the current project workspace to the destination, ignoring metadata."""
@@ -88,10 +103,11 @@ class Orchestrator:
             for f in files:
                 os.chmod(os.path.join(root, f), 0o644)
 
-    def process_round(self, actions: List[AgentAction]):
+    async def process_round(self, actions: List[AgentAction]):
         """
         Executes one full market round.
         """
+        import asyncio
         self.state.round_num += 1
         logging.info(f"--- Round {self.state.round_num} ---")
         
@@ -116,7 +132,7 @@ class Orchestrator:
 
         # 2. Oracle Execution
         # Run all verifiers against all candidates
-        self._run_oracle()
+        await self._run_oracle()
         
         # 3. Mature Bonds (Unlock capital from previous rounds)
         self._mature_bonds()
@@ -171,13 +187,17 @@ class Orchestrator:
             
         full_path = os.path.join(worktree_root, rel_path)
         
+        # If worktree_root is a file (common in tests), rel_path should be empty or we just use worktree_root
+        if os.path.isfile(worktree_root):
+            full_path = worktree_root
+
         try:
-            # Ensure dir exists if new file in a subdirectory
+            # Ensure dir exists if new file
             dir_name = os.path.dirname(full_path)
-            if dir_name and dir_name != worktree_root:
+            if dir_name and not os.path.exists(dir_name):
                 os.makedirs(dir_name, exist_ok=True)
             
-            if os.path.exists(full_path):
+            if os.path.exists(full_path) and os.path.isfile(full_path):
                 with open(full_path, "r") as f:
                     content = f.read()
             else:
@@ -189,6 +209,7 @@ class Orchestrator:
                 new_content = proposal.get("code", "")
                 with open(full_path, "w") as f:
                     f.write(new_content)
+                logging.info(f"Updated {rel_path} via CANDIDATE (overwrite)")
                     
             elif p_type == "PATCH":
                 # Search and Replace
@@ -211,6 +232,7 @@ class Orchestrator:
                 new_content = content.replace(old_code, new_code)
                 with open(full_path, "w") as f:
                     f.write(new_content)
+                logging.info(f"Updated {rel_path} via PATCH")
                     
         except Exception as e:
             logging.error(f"Failed to update code {full_path}: {e}")
@@ -298,37 +320,47 @@ class Orchestrator:
 
         return vid
 
-    def _run_oracle(self):
-        """Executes all verifiers against all candidates."""
+    async def _run_oracle(self):
+        """Executes all verifiers against all candidates in parallel."""
+        import asyncio
         candidates = [a for a in self.state.assets.values() if a.type == "CANDIDATE"]
         verifiers = [a for a in self.state.assets.values() if a.type == "VERIFIER"]
         
+        tasks = []
+        task_info = []
+
         for v in verifiers:
             for c in candidates:
                 if not v.test_path or not c.code_path: continue
-                
-                # For directories, we need an entry point. 
-                # We'll use solution.py if it exists, or the directory itself if the Oracle handles it.
-                # Actually, our Oracle.run_test copies the file to 'solution.py' in a temp dir.
-                # If we pass a directory to Oracle.run_test, it will fail (copying dir to file).
                 
                 # Strategy: If candidate is a directory, we pass 'solution.py' inside it.
                 cand_file = c.code_path
                 if os.path.isdir(cand_file):
                     cand_file = os.path.join(cand_file, "solution.py")
                 
-                # Removed pre-population of solution.py. Agents must create it.
+                tasks.append(Oracle.run_test(cand_file, v.test_path))
+                task_info.append((v, c))
 
-                result = Oracle.run_test(cand_file, v.test_path)
-                fail_key = f"{v.id}:{c.id}"
-                if result == "FAIL":
-                    logging.info(f"Oracle: {c.id} FAILED {v.id}")
-                    self.state.test_failures[fail_key] = True
-                elif result == "PASS":
-                    # Remove failure if it was fixed
-                    if fail_key in self.state.test_failures:
-                        logging.info(f"Oracle: {c.id} FIXED {v.id} (Now passing)")
-                        self.state.test_failures.pop(fail_key, None)
+        if not tasks:
+            return
+
+        results = await asyncio.gather(*tasks)
+
+        for (v, c), result in zip(task_info, results):
+            fail_key = f"{v.id}:{c.id}"
+            if result == "FAIL":
+                logging.info(f"Oracle: {c.id} FAILED {v.id}")
+                self.state.test_failures[fail_key] = True
+            elif result == "PASS":
+                msg = f"Oracle: {c.id} PASSED {v.id}"
+                if fail_key in self.state.test_failures:
+                    msg += " (FIXED)"
+                    self.state.test_failures.pop(fail_key, None)
+                logging.info(msg)
+            elif result == "TIMEOUT":
+                logging.info(f"Oracle: {c.id} TIMEOUT on {v.id}")
+            elif result == "ERROR":
+                logging.info(f"Oracle: {c.id} ERROR on {v.id} (Check if solution.py exists)")
 
     def _mature_bonds(self):
         """Liquidates bonds that have reached their unlock round."""
@@ -440,38 +472,23 @@ class Orchestrator:
 
     def get_pretty_summary(self) -> str:
         lines = []
-        lines.append(f"╔══════════════════════════════════════════════════════╗")
-        lines.append(f"║ ROUND {self.state.round_num:<47}║")
-        lines.append(f"╠══════════════════════╤═══════════╤══════════════════╣")
-        lines.append(f"║ Asset                │ Price     │ Status           ║")
-        lines.append(f"╟──────────────────────┼───────────┼──────────────────╢")
+        lines.append(f"--- Round {self.state.round_num} Summary ---")
         
-        # Sort assets by type and ID
+        # Assets
+        lines.append("Market Prices:")
         sorted_ids = sorted(self.state.assets.keys(), key=lambda x: (self.state.assets[x].type, x))
-        
         for aid in sorted_ids:
-            asset = self.state.assets[aid]
             p = self.state.get_asset_price(aid)
-            bar_len = int(p * 15)
-            bar = "█" * bar_len + "░" * (15 - bar_len)
-            
-            # Shorten ID if too long
-            display_id = aid if len(aid) < 20 else aid[:17] + "..."
-            lines.append(f"║ {display_id:<20} │ {p:>.3f}     │ {bar} ║")
+            lines.append(f"  {aid}: {p:.3f}")
         
-        lines.append(f"╠══════════════════════╧═══════════╧══════════════════╣")
-        
-        # Agent Wealth
-        lines.append(f"║ Agent Wealth Leaderboard                               ║")
-        lines.append(f"╟──────────────────────┬───────────┴──────────────────╢")
-        
+        # Agents
+        lines.append("Agent Wealth:")
         sorted_agents = sorted(self.state.agents.values(), key=lambda a: a.wealth, reverse=True)
         for agent in sorted_agents:
-            lines.append(f"║ {agent.agent_id:<20} │ {agent.wealth:>10.2f}                       ║")
+            lines.append(f"  {agent.agent_id}: {agent.wealth:.2f}")
 
-        lines.append(f"╟──────────────────────┴───────────┬──────────────────╢")
-        lines.append(f"║ Whale Wealth: {self.state.whale_wealth:>26.2f} ║")
-        lines.append(f"╚══════════════════════════════════════════════════════╝")
+        lines.append(f"Whale Wealth: {self.state.whale_wealth:.2f}")
+        lines.append("-" * 30)
         return "\n".join(lines)
 
     def get_final_report(self) -> str:

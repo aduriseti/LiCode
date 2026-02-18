@@ -1,5 +1,8 @@
 opencode-ai
 tenacity
 rich
+pytest-asyncio
 chompjs
-json-repair
+json_repair
+pytest
+

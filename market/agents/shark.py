@@ -70,6 +70,7 @@ Your assigned candidate solution is "{cid}".
 
 **The Environment:**
 - You are operating in a cloned workspace of the user's project.
+- You have WRITE access ONLY to your assigned workspace ("{cid}"). You cannot modify other agents' code or the base system.
 - The market evaluates "Code Quality" based on which Candidate passes the most "Valid Verifiers" (tests).
 - **Verifiers** are test scripts proposed by agents. The market decides if a verifier is "Valid" (correctly tests the requirement) based on trading.
 
@@ -129,7 +130,7 @@ You must output a single JSON object. Do not include markdown formatting like ``
         Analyzes the market state and returns an action.
         """
         await self.initialize_session()
-        user_prompt = self._format_state_prompt(state)
+        user_prompt = await self._format_state_prompt(state)
         
         logging.info(f"Shark {self.agent_id} calling API...")
         
@@ -151,6 +152,8 @@ You must output a single JSON object. Do not include markdown formatting like ``
                 text = p.get("text") if isinstance(p, dict) else getattr(p, "text", None)
                 if text: extracted_parts.append(text)
             content = "".join(extracted_parts)
+
+        logging.info(f"Shark {self.agent_id} received {len(content)} chars from API.")
 
         if not content:
             msg = f"Shark {self.agent_id} got empty response. Response object: {response}"
@@ -199,7 +202,7 @@ You must output a single JSON object. Do not include markdown formatting like ``
         """Gracefully close the API client."""
         await self.client.close()
 
-    def _format_state_prompt(self, state: MarketState) -> str:
+    async def _format_state_prompt(self, state: MarketState) -> str:
         # Create a concise summary of the market
         lines = [f"You are Agent: {self.agent_id}", f"Round: {state.round_num}"]
         if state.prompt:
@@ -239,17 +242,31 @@ You must output a single JSON object. Do not include markdown formatting like ``
             lines.append("(None)")
 
         lines.append("\n=== Candidate Code Changes (Diffs) ===")
+        
+        import asyncio
+        diff_tasks = []
+        diff_info = []
+
         for aid, asset in state.assets.items():
             if asset.type == "CANDIDATE" and asset.code_path and os.path.exists(asset.code_path):
+                # Diff against project root (os.getcwd())
+                cmd = ["diff", "-urN", 
+                       "--exclude=.git", "--exclude=.arenas", "--exclude=__pycache__", "--exclude=node_modules", "--exclude=.opencode", "--exclude=.home",
+                       ".", asset.code_path]
+                
+                diff_tasks.append(asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                ))
+                diff_info.append(aid)
+
+        if diff_tasks:
+            processes = await asyncio.gather(*diff_tasks)
+            for aid, p in zip(diff_info, processes):
                 try:
-                    # Diff against project root (os.getcwd())
-                    cmd = ["diff", "-urN", 
-                           "--exclude=.git", "--exclude=.arenas", "--exclude=__pycache__", "--exclude=node_modules", "--exclude=.opencode", "--exclude=.home",
-                           ".", asset.code_path]
-                    
-                    # Capture output
-                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
-                    diff_out = res.stdout.strip()
+                    stdout, stderr = await asyncio.wait_for(p.communicate(), timeout=2)
+                    diff_out = stdout.decode().strip()
                     
                     if diff_out:
                         # Limit output size

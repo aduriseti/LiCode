@@ -4,17 +4,18 @@ import os
 import shutil
 from market.orchestrator import Orchestrator
 
-class PatchTest(unittest.TestCase):
-    def setUp(self):
+class PatchTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
         self.test_dir = tempfile.mkdtemp()
         self.orch = Orchestrator("Test Patch", n_agents=1, base_dir=self.test_dir)
+        await self.orch.initialize()
         self.cand_path = os.path.join(self.test_dir, "worktrees", "cand_0", "solution.py")
         
         # Setup initial file
         with open(self.cand_path, "w") as f:
             f.write("def foo():\n    return 1\n")
 
-    def tearDown(self):
+    async def asyncTearDown(self):
         shutil.rmtree(self.test_dir)
 
     def test_patch_success(self):
