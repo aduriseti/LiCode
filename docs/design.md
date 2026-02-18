@@ -215,26 +215,31 @@ $$b_{clipped}=\min(\max(b_{raw},\epsilon),1-\epsilon)$$
 where $\epsilon = 0.01$ (agents can't be >99% confident)
 
 **Step B: Compute Ideal Kelly Fractions**
-For each sentence $j$, calculate desired position:
-$$f_{j}^{*}=\frac{b_{clipped}-P_{t}}{P_{t}(1-P_{t})}$$
+For each sentence $j$, calculate the fraction of wealth to wager:
+- If $b_{clipped} > P_t$: $f_j^* = \frac{b_{clipped} - P_t}{1 - P_t}$ (Long)
+- If $b_{clipped} < P_t$: $f_j^* = \frac{b_{clipped} - P_t}{P_t}$ (Short)
 
 *Interpretation:*
-- If $b > P$: $f^* > 0$ (want to go long)
-- If $b < P$: $f^* < 0$ (want to go short)
-- Magnitude reflects edge size and current price
+- $f^* > 0$ indicates a long position; $f^* < 0$ indicates a short position.
+- Magnitude reflects the "edge" size relative to current risk.
 
 **Step C: Portfolio Normalization (No Leverage)**
-Ensure total exposure doesn't exceed wealth:
+Ensure total intended wager doesn't exceed wealth:
 $$L_{i}=\sum_{j} |f_{j}^{*}| + \sum_{k \in \text{NewProposals}} |f_{bond,k}|$$
 $$\kappa_{i}=\frac{1}{\max(1,L_{i})}$$
 
 If $L_i > 1$, scale down all positions (bets and bonds) proportionally.
 
 **Step D: Convert to LMSR Share Purchases**
-For each sentence (existing or newly proposed), determine shares to buy/sell:
-$$\Delta q_{i,j} = W_{i,t} \cdot \kappa_{i} \cdot f_{j}^{*}$$
+The orchestrator determines the number of shares $\Delta q$ that results in the desired cost $S = W \cdot \kappa \cdot f^*$. In LMSR, this is non-linear:
 
-*Note:* This is a heuristic approximation. See Appendix B for true Kelly-optimal approach using convex optimization.
+For YES shares ($f^* > 0$):
+$$\Delta q_{i,j} = b \cdot \ln\left(e^{S/b} + \frac{1-P_t}{P_t}(e^{S/b} - 1)\right)$$
+
+For NO shares ($f^* < 0$):
+$$\Delta q_{i,j} = -b \cdot \ln\left(e^{|S|/b} + \frac{P_t}{1-P_t}(e^{|S|/b} - 1)\right)$$
+
+*Note:* This ensures the agent's actual cost matches the Kelly-optimized budget $S$. See Appendix B for a true multi-asset Kelly approach.
 
 #### **4. LMSR Price Update**
 
@@ -254,9 +259,11 @@ $$\text{Cost} = C(q_{yes} + \Delta q, q_{no}) - C(q_{yes}, q_{no})$$
 
 Agent's wealth decreases by Cost; market updates: $q_{yes} \leftarrow q_{yes} + \Delta q$
 
-**Selling Shares (Shorting):**
-Buy negative shares (equivalent to buying NO shares):
-$$\text{Proceeds} = C(q_{yes}, q_{no}) - C(q_{yes} - \Delta q, q_{no})$$
+**Shorting:**
+When agent wants to short (equivalent to buying NO shares):
+$$\text{Cost} = C(q_{yes}, q_{no} + \Delta q) - C(q_{yes}, q_{no})$$
+
+Agent's wealth decreases by Cost; market updates: $q_{no} \leftarrow q_{no} + \Delta q$
 
 **Properties:**
 - ✅ **Automatically Zero-Sum:** All payments go to/from LMSR cost function
@@ -537,19 +544,21 @@ $$C_\varphi(q_{yes}, q_{no}) = b_t \cdot \ln\left(\exp(q_{yes}/b_t) + \exp(q_{no
 
 *Purpose:* Determines how much an agent must pay to change share quantities.
 
-**Buying $\Delta q$ YES Shares:**
-When agent $a_i$ wants to buy $\Delta q$ shares (positive for long, negative for short):
-
+**Buying Shares:**
+When agent $a_i$ wants to buy $\Delta q$ YES shares:
 $$\text{Cost}_{i,\varphi}(\Delta q) = C_\varphi(q_{yes,\varphi,t} + \Delta q, q_{no,\varphi,t}) - C_\varphi(q_{yes,\varphi,t}, q_{no,\varphi,t})$$
 
+When agent $a_i$ wants to buy $\Delta q$ NO shares (Shorting):
+$$\text{Cost}_{i,\varphi}(\Delta q) = C_\varphi(q_{yes,\varphi,t}, q_{no,\varphi,t} + \Delta q) - C_\varphi(q_{yes,\varphi,t}, q_{no,\varphi,t})$$
+
 **Market Update:**
-$$q_{yes,\varphi,t+1} = q_{yes,\varphi,t} + \Delta q$$
+Update the corresponding $q_{yes}$ or $q_{no}$ based on the trade.
 
 **Key Properties:**
-- **Proper Scoring:** Agents maximize expected wealth by reporting true beliefs
-- **Zero-Sum:** $\sum_i \text{Cost}_{i,\varphi} = 0$ (all payments net to zero via cost function)
-- **Always Liquid:** Can always trade at current $P_t(\varphi)$
-- **Bounded Loss per Round:** Whale's max loss ≤ $0.5 \cdot W_{whale,t}$ (by construction of $b_t$)
+- **Proper Scoring:** Agents maximize expected wealth by reporting true beliefs.
+- **Zero-Sum:** All payments are transacted with the Whale via the cost function.
+- **Always Liquid:** Can always trade at current $P_t(\varphi)$.
+- **Bounded Loss per Round:** Whale's max loss ≤ $0.5 \cdot W_{whale,t}$ (by construction of $b_t$).
 
 ### C. Agent Beliefs & Actions
 
@@ -609,12 +618,13 @@ where $\epsilon = 0.01$ (prevents extreme confidence)
 
 **Step 2 - Compute Ideal Kelly Fractions:**
 For each sentence $\varphi$:
-$$f_{\varphi}^* = \frac{b_{i,t}^{clip}(\varphi) - P_t(\varphi)}{P_t(\varphi)(1 - P_t(\varphi))}$$
+- If $b_{i,t}^{clip} > P_t$: $f_{\varphi}^* = \frac{b_{i,t}^{clip} - P_t}{1 - P_t}$ (Long)
+- If $b_{i,t}^{clip} < P_t$: $f_{\varphi}^* = \frac{b_{i,t}^{clip} - P_t}{P_t}$ (Short)
 
 *Interpretation:*
 - $f_{\varphi}^* > 0$: Want to long (buy YES shares)
 - $f_{\varphi}^* < 0$: Want to short (buy NO shares)
-- $|f_{\varphi}^*|$: Fraction of wealth to commit
+- $|f_{\varphi}^*|$: Fraction of wealth to wager
 
 **Step 3 - Normalize Portfolio (No Leverage):**
 $$L_i = \sum_{\varphi \in \Phi_t} |f_{\varphi}^*| + \sum_{k \in \text{NewProposals}} |f_{bond,k}|$$
@@ -624,10 +634,12 @@ $$\kappa_i = \frac{1}{\max(1, L_i)}$$
 *Purpose:* If total desired exposure (bets + bonds) exceeds 100% of wealth, scale down all positions proportionally.
 
 **Step 4 - Execute Trades:**
-For each sentence $\varphi$ (existing or newly proposed):
-$$\Delta q_{i, \varphi} = W_{i, t} \cdot \kappa_i \cdot f_{\varphi}^*$$
+For each sentence $\varphi$ (existing or newly proposed), calculate target cost $S_{i,\varphi} = W_{i, t} \cdot \kappa_i \cdot f_{\varphi}^*$.
+Determine share quantity $\Delta q_{i, \varphi}$ such that:
+$$C_\varphi(q_{yes} + \Delta q_{i, \varphi}, q_{no}) - C_\varphi(q_{yes}, q_{no}) = S_{i,\varphi}$$
+(See Section 2.C.4 for closed-form share calculation).
 
-Execute LMSR trade: buy $\Delta q_{i, \varphi}$ shares of $\varphi$
+Execute LMSR trade: update share count by $\Delta q_{i, \varphi}$ and deduct $S_{i,\varphi}$ from wealth.
 
 **Output:** Set of trades $\{(\varphi, \Delta q_{i,\varphi})\}_{\varphi \in \Phi_t}$
 
@@ -1274,22 +1286,16 @@ $$p_1 = \frac{\partial C}{\partial q_1} = \frac{e^{q_1/b}}{e^{q_0/b} + e^{q_1/b}
 #### Trading Mechanics
 
 **Buying $\Delta q$ YES shares:**
+1. **Calculate cost:** $\text{Cost} = C(q_{yes} + \Delta q, q_{no}) - C(q_{yes}, q_{no})$
+2. **Trader pays:** $\text{Cost}$ to the market maker
+3. **Update state:** $q_{yes} \leftarrow q_{yes} + \Delta q$
 
-1. **Calculate cost:**
-   $$\text{Cost} = C(q_0, q_1 + \Delta q) - C(q_0, q_1)$$
+**Shorting (Buying NO shares):**
+1. **Calculate cost:** $\text{Cost} = C(q_{yes}, q_{no} + \Delta q) - C(q_{yes}, q_{no})$
+2. **Trader pays:** $\text{Cost}$ to the market maker
+3. **Update state:** $q_{no} \leftarrow q_{no} + \Delta q$
 
-2. **Trader pays:** $\$\text{Cost}$ to the market maker
-
-3. **Update state:** $q_1 \leftarrow q_1 + \Delta q$
-
-4. **Price moves:** New price $p_1' > p_1$ (buying pushes price up)
-
-**Selling (Shorting):**
-
-To short (bet NO), simply buy negative YES shares:
-- Buying $\Delta q = -50$ is equivalent to buying 50 NO shares
-- Get $\$\text{Proceeds}$ from market maker
-- Price moves down
+**Note:** In both cases, the trader pays a positive cost up front to take a position. If the outcome they bet on occurs, each share pays out 1 unit. If it does not, the share pays 0. This ensures that the amount risked (the "wager") is exactly the cost paid.
 
 #### Final Settlement
 
