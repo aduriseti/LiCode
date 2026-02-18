@@ -67,12 +67,12 @@ class Oracle:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=temp_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL
             )
             
             try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+                await asyncio.wait_for(process.wait(), timeout=timeout)
                 logging.info(f"Oracle: Finished test {os.path.basename(verifier_dir)} on {os.path.basename(candidate_path)}")
                 
                 if process.returncode == 0:
@@ -82,6 +82,7 @@ class Oracle:
             except asyncio.TimeoutError:
                 try:
                     process.kill()
+                    await process.wait()
                 except ProcessLookupError:
                     pass
                 return "TIMEOUT"
@@ -89,6 +90,13 @@ class Oracle:
         except Exception as e:
             import logging
             logging.error(f"Oracle Execution Error: {e}")
+            # Ensure process is reaped if it was created
+            if 'process' in locals() and process.returncode is None:
+                try:
+                    process.kill()
+                    await process.wait()
+                except:
+                    pass
             return "ERROR"
         finally:
             # Cleanup

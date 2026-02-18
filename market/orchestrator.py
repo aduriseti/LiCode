@@ -5,6 +5,7 @@ import time
 import hashlib
 import shutil
 import subprocess
+import asyncio
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 
@@ -83,23 +84,24 @@ class Orchestrator:
             await asyncio.gather(*tasks)
 
     def _clone_workspace(self, dest_dir: str):
-        """Clones the current project workspace to the destination, ignoring metadata."""
+        """Clones the project workspace to the destination, respecting .gitignore."""
         src = os.getcwd()
+        os.makedirs(dest_dir, exist_ok=True)
         
-        def ignore_patterns(path, names):
-            ignored = set()
-            if ".git" in names: ignored.add(".git")
-            if ".arenas" in names: ignored.add(".arenas")
-            if "__pycache__" in names: ignored.add("__pycache__")
-            if "node_modules" in names: ignored.add("node_modules")
-            return ignored
-            
-        shutil.copytree(src, dest_dir, ignore=ignore_patterns, dirs_exist_ok=True)
-        # Ensure write permissions
-        os.chmod(dest_dir, 0o755)
+        # Performance optimized clone:
+        # 1. 'git ls-files' finds all tracked and untracked (non-ignored) files.
+        # 2. 'tar' stream copies them to the destination.
+        cmd = f"git ls-files -co --exclude-standard -z | tar -c --null -T - | tar -x -C {dest_dir}"
+        
+        try:
+            subprocess.run(cmd, shell=True, check=True, cwd=src, capture_output=True)
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Cloning failed: {e.stderr.decode()}")
+            raise
+
+        # Ensure write permissions (tar preserves permissions, but we want 755 on dirs and 644 on files)
         for root, dirs, files in os.walk(dest_dir):
-            for d in dirs:
-                os.chmod(os.path.join(root, d), 0o755)
+            os.chmod(root, 0o755)
             for f in files:
                 os.chmod(os.path.join(root, f), 0o644)
 

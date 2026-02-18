@@ -3,6 +3,7 @@ import logging
 import os
 import sys
 import subprocess
+import asyncio
 from typing import Dict, Any, Optional
 from opencode_ai import AsyncOpencode, APITimeoutError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log
@@ -243,40 +244,72 @@ You must output a single JSON object. Do not include markdown formatting like ``
 
         lines.append("\n=== Candidate Code Changes (Diffs) ===")
         
-        import asyncio
-        diff_tasks = []
-        diff_info = []
+        # 1. Get list of files to compare (respecting .gitignore)
+        try:
+            res = subprocess.run(
+                ["git", "ls-files", "-co", "--exclude-standard"],
+                capture_output=True, text=True, check=True
+            )
+            project_files = res.stdout.splitlines()
+        except Exception as e:
+            logging.warning(f"Failed to get project files via git ls-files: {e}")
+            project_files = []
 
-        for aid, asset in state.assets.items():
-            if asset.type == "CANDIDATE" and asset.code_path and os.path.exists(asset.code_path):
-                # Diff against project root (os.getcwd())
-                cmd = ["diff", "-urN", 
-                       "--exclude=.git", "--exclude=.arenas", "--exclude=__pycache__", "--exclude=node_modules", "--exclude=.opencode", "--exclude=.home",
-                       ".", asset.code_path]
-                
-                diff_tasks.append(asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                ))
-                diff_info.append(aid)
-
-        if diff_tasks:
-            processes = await asyncio.gather(*diff_tasks)
-            for aid, p in zip(diff_info, processes):
-                try:
-                    stdout, stderr = await asyncio.wait_for(p.communicate(), timeout=2)
-                    diff_out = stdout.decode().strip()
+        async def get_candidate_diff(aid, asset) -> str:
+            if not asset.code_path or not os.path.exists(asset.code_path):
+                return f"\n--- {aid} Diff ---\n(Workspace not available)\n------------------"
+            
+            file_diffs = []
+            tasks = []
+            import shlex
+            
+            # For each project file, run an individual diff if it exists in the candidate worktree
+            for f in project_files:
+                cand_file = os.path.join(asset.code_path, f)
+                if os.path.isfile(cand_file):
+                    # -c core.filemode=false: Natively ignore permission changes
+                    # --no-index: Compare files on disk
+                    # sed: Hide the absolute candidate path
+                    # head -n 100: Truncate each individual file diff
+                    f_q = shlex.quote(f)
+                    cand_file_q = shlex.quote(cand_file)
+                    cmd = f"git -c core.filemode=false diff --no-index --no-color --src-prefix=a/ --dst-prefix=b/ {f_q} {cand_file_q} | sed 's|{asset.code_path}||g' | head -n 100"
                     
-                    if diff_out:
-                        # Limit output size
-                        truncated = diff_out[:2000]
-                        if len(diff_out) > 2000: truncated += "\n... (truncated)"
-                        lines.append(f"\n--- {aid} Diff ---\n{truncated}\n------------------")
-                    else:
-                        lines.append(f"\n--- {aid} Diff ---\n(No changes from base)\n------------------")
-                except Exception as e:
-                    lines.append(f"\n[Error generating diff for {aid}: {e}]")
+                    async def run_diff(command, filename):
+                        process = await asyncio.create_subprocess_shell(
+                            command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+                        )
+                        try:
+                            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=5)
+                            return stdout.decode(errors='replace').strip(), filename
+                        except Exception as e:
+                            try: process.kill(); await process.wait()
+                            except: pass
+                            return f"[Error generating diff for {filename}: {e}]", filename
+
+                    tasks.append(run_diff(cmd, f))
+
+            if not tasks:
+                return f"\n--- {aid} Diff ---\n(Candidate exactly matches base project - no changes made yet)\n------------------"
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, tuple) and result[0]:
+                    file_diffs.append(result[0])
+            
+            full_diff = "\n".join(file_diffs).strip()
+            if full_diff:
+                return f"\n--- {aid} Diff ---\n{full_diff}\n------------------"
+            else:
+                return f"\n--- {aid} Diff ---\n(Candidate exactly matches base project - no changes made yet)\n------------------"
+
+        if state.assets:
+            diff_results = await asyncio.gather(*[
+                get_candidate_diff(aid, asset) 
+                for aid, asset in state.assets.items() 
+                if asset.type == "CANDIDATE"
+            ])
+            lines.extend(diff_results)
 
         lines.append("\n=== Verifier Code ===")
         for aid, asset in state.assets.items():
@@ -297,22 +330,6 @@ You must output a single JSON object. Do not include markdown formatting like ``
                          lines.append(f"\n--- {aid} Content ---\n{content}\n---------------------")
                 except Exception as e:
                     lines.append(f"\n[Error reading verifier {aid}: {e}]")
-            
-        # Show Current Code Context (Files List Only)
-        cid = f"cand_{self.agent_id.split('_')[-1]}"
-        if cid in state.assets:
-            asset = state.assets[cid]
-            if asset.code_path and os.path.exists(asset.code_path):
-                try:
-                    if os.path.isdir(asset.code_path):
-                        # List all files (excluding hidden/system files)
-                        files = sorted([f for f in os.listdir(asset.code_path) 
-                                      if not f.startswith('.') and not f.startswith('__')])
-                        lines.append(f"\n=== Your Workspace Files ===\n" + "\n".join(files) + "\n(Content omitted - see diffs above)\n")
-                    else:
-                         lines.append(f"\n=== Your Workspace File ===\n{os.path.basename(asset.code_path)}\n(Content omitted - see diffs above)\n")
-                except Exception as e:
-                    lines.append(f"\n[Error reading source: {e}]")
             
         lines.append("\nYour Holdings:")
         if self.agent_id in state.agents:
