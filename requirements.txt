@@ -5,4 +5,5 @@ pytest-asyncio
 chompjs
 json_repair
 pytest
+pytest-timeout
 

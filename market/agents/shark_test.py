@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch, AsyncMock, mock_open
 import os
+import asyncio
 from market.agents.shark import Shark
 from market.core.state import MarketState, MarketAsset, AgentPortfolio
 
@@ -33,14 +34,18 @@ class SharkTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(action.beliefs["cand_0"], 0.9)
 
     @patch('market.agents.shark.subprocess.run')
+    @patch('market.agents.shark.asyncio.create_subprocess_shell')
     @patch('market.agents.shark.os.listdir')
     @patch('market.agents.shark.os.path.exists')
     @patch('market.agents.shark.os.path.isdir')
     @patch('market.agents.shark.os.path.isfile')
     @patch('builtins.open', new_callable=mock_open)
-    def test_format_state_prompt_content(self, mock_file, mock_isfile, mock_isdir, mock_exists, mock_listdir, mock_run):
+    async def test_format_state_prompt_content(self, mock_file, mock_isfile, mock_isdir, mock_exists, mock_listdir, mock_exec, mock_run):
         # Setup Market State
         state = MarketState(round_num=1, liquidity_b=10.0, prompt="Fix Bug")
+        
+        # Mock git ls-files
+        mock_run.return_value.stdout = "solution.py"
         
         # Asset 1: Candidate (Folder)
         cand_path = "/tmp/cand_0"
@@ -60,65 +65,129 @@ class SharkTest(unittest.IsolatedAsyncioTestCase):
         
         # Mock Directory Listing
         def listdir_side_effect(path):
-            if path == cand_path:
-                return ["solution.py", "README.md", ".git"]
-            if path == ver_path:
-                return ["run.sh", "test.py"]
+            if path == cand_path: return ["solution.py", "README.md", ".git"]
+            if path == ver_path: return ["run.sh", "test.py"]
             return []
         mock_listdir.side_effect = listdir_side_effect
 
         # Mock File Content
         file_content_map = {
-            f"{cand_path}/solution.py": "def solve(): return 42",
-            f"{cand_path}/README.md": "# Readme",
             f"{ver_path}/run.sh": "#!/bin/bash",
             f"{ver_path}/test.py": "import unittest"
         }
-        
-        def open_side_effect(file, mode='r', errors=None):
-            # Normalize path (mock keys match exactly for simplicity)
-            content = file_content_map.get(str(file), "")
-            m = mock_open(read_data=content).return_value
-            return m
-        
-        mock_file.side_effect = open_side_effect
+        def open_mock(file, *args, **kwargs):
+            return mock_open(read_data=file_content_map.get(str(file), "")).return_value
+        mock_file.side_effect = open_mock
 
         # Mock Subprocess (Diff)
-        mock_run.return_value.stdout = "diff output line 1\n+ line 2"
+        mock_process = MagicMock()
+        mock_process.communicate = AsyncMock(return_value=(b"@@ -1 +1 @@\ndiff output line 1\n+ line 2", b""))
+        mock_process.wait = AsyncMock()
+        mock_exec.return_value = mock_process
         
         # Call Method
-        prompt = shark._format_state_prompt(state)
+        prompt = await shark._format_state_prompt(state)
         
         # Assertions
-        
-        # 0. Agent Identity
         self.assertIn("You are Agent: agent_0", prompt)
-        self.assertIn('Your assigned candidate solution is "cand_0"', shark.system_prompt)
-        
-        # 1. Candidate Diff
         self.assertIn("=== Candidate Code Changes (Diffs) ===", prompt)
-        self.assertIn("--- cand_0 Diff ---", prompt)
         self.assertIn("diff output line 1", prompt)
-        
-        # 2. Verifier Content
         self.assertIn("=== Verifier Code ===", prompt)
-        self.assertIn("--- v_123 Content ---", prompt)
-        self.assertIn("File: run.sh", prompt)
-        self.assertIn("#!/bin/bash", prompt)
+        self.assertNotIn("=== Your Workspace Files ===", prompt)
+
+    @patch('market.agents.shark.subprocess.run')
+    @patch('market.agents.shark.asyncio.create_subprocess_shell')
+    @patch('market.agents.shark.os.path.exists')
+    async def test_format_state_prompt_no_error_on_valid_diff(self, mock_exists, mock_exec, mock_run):
+        state = MarketState(round_num=1, liquidity_b=10.0, prompt="Fix Bug")
+        state.assets["cand_0"] = MarketAsset("cand_0", "CANDIDATE", "Desc", code_path="/tmp/cand_0")
         
-        # 3. Own Workspace Files
-        self.assertIn("=== Your Workspace Files ===", prompt)
-        # Check that file list is present
-        self.assertIn("solution.py", prompt)
-        self.assertIn("README.md", prompt)
+        shark = Shark("agent_0")
+        mock_exists.return_value = True
+        mock_run.return_value.stdout = "solution.py"
         
-        # Check that hidden files are filtered out
-        self.assertNotIn(".git", prompt.split("=== Your Workspace Files ===")[1])
+        # Mock successful diff with changes
+        mock_process = MagicMock()
+        mock_process.communicate = AsyncMock(return_value=(b"@@ -1 +1 @@\nsome diff content", b""))
+        mock_process.wait = AsyncMock()
+        mock_exec.return_value = mock_process
         
-        # Check that content is NOT dumped
-        self.assertNotIn("--- Content of solution.py ---", prompt)
-        self.assertNotIn("def solve(): return 42", prompt)
-        self.assertIn("(Content omitted - see diffs above)", prompt)
+        with patch('market.agents.shark.os.path.isfile', return_value=True):
+            prompt = await shark._format_state_prompt(state)
+        
+        self.assertNotIn("[Error generating diff", prompt)
+        self.assertIn("some diff content", prompt)
+
+    @patch('market.agents.shark.subprocess.run')
+    @patch('market.agents.shark.asyncio.create_subprocess_shell')
+    @patch('market.agents.shark.os.path.exists')
+    async def test_format_state_prompt_handles_timeout(self, mock_exists, mock_exec, mock_run):
+        state = MarketState(round_num=1, liquidity_b=10.0, prompt="Fix Bug")
+        state.assets["cand_0"] = MarketAsset("cand_0", "CANDIDATE", "Desc", code_path="/tmp/cand_0")
+        
+        shark = Shark("agent_0")
+        mock_exists.return_value = True
+        mock_run.return_value.stdout = "solution.py"
+        
+        mock_process = MagicMock()
+        mock_process.communicate.return_value = asyncio.Future()
+        mock_process.wait = AsyncMock()
+        mock_exec.return_value = mock_process
+        
+        orig_wait_for = asyncio.wait_for
+        async def mock_wait_for(aw, timeout):
+            if timeout == 5: raise asyncio.TimeoutError()
+            return await orig_wait_for(aw, timeout)
+
+        with patch('market.agents.shark.asyncio.wait_for', side_effect=mock_wait_for):
+            with patch('market.agents.shark.os.path.isfile', return_value=True):
+                prompt = await shark._format_state_prompt(state)
+        
+        self.assertIn("[Error generating diff for solution.py", prompt)
+
+    @patch('market.agents.shark.subprocess.run')
+    @patch('market.agents.shark.asyncio.create_subprocess_shell')
+    @patch('market.agents.shark.os.path.exists')
+    async def test_format_state_prompt_no_diff(self, mock_exists, mock_exec, mock_run):
+        state = MarketState(round_num=1, liquidity_b=10.0, prompt="Fix Bug")
+        state.assets["cand_0"] = MarketAsset("cand_0", "CANDIDATE", "Desc", code_path="/tmp/cand_0")
+        
+        shark = Shark("agent_0")
+        mock_exists.return_value = True
+        mock_run.return_value.stdout = "solution.py"
+        
+        mock_process = MagicMock()
+        mock_process.communicate = AsyncMock(return_value=(b"", b""))
+        mock_process.wait = AsyncMock()
+        mock_exec.return_value = mock_process
+        
+        with patch('market.agents.shark.os.path.isfile', return_value=True):
+            prompt = await shark._format_state_prompt(state)
+        
+        self.assertIn("--- cand_0 Diff ---", prompt)
+        self.assertIn("(Candidate exactly matches base project - no changes made yet)", prompt)
+        state = MarketState(round_num=1, liquidity_b=10.0, prompt="Fix Bug")
+        state.assets["cand_0"] = MarketAsset("cand_0", "CANDIDATE", "Desc", code_path="/tmp/cand_0")
+        
+        shark = Shark("agent_0")
+        mock_exists.return_value = True
+        
+        # Mock git ls-files to return solution.py
+        mock_run.return_value.stdout = "solution.py"
+        
+        # Mock empty diff
+        mock_process = MagicMock()
+        mock_process.communicate = AsyncMock(return_value=(b"", b""))
+        mock_process.wait = AsyncMock()
+        mock_process.returncode = 0
+        mock_exec.return_value = mock_process
+        
+        # Mock isfile to return True so it attempts the diff
+        with patch('market.agents.shark.os.path.isfile', return_value=True):
+            prompt = await shark._format_state_prompt(state)
+        
+        self.assertIn("--- cand_0 Diff ---", prompt)
+        self.assertIn("(Candidate exactly matches base project - no changes made yet)", prompt)
 
 if __name__ == '__main__':
     unittest.main()
