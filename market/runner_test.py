@@ -70,9 +70,10 @@ class TestMarketRunner(unittest.IsolatedAsyncioTestCase):
         MockSocket.return_value.__enter__.return_value = MagicMock()
         MockPopen.return_value.poll.return_value = None
         
+        # Setup Mock Shark
         shark_instance = MockShark.return_value
         shark_instance.initialize_session = AsyncMock()
-        shark_instance.session.id = "ses_mock_123"
+        shark_instance.session.id = "ses_mock"
         
         runner = MarketRunner("Test", n_agents=1, budget=100.0, api_url="http://127.0.0.1")
         await runner.initialize()
@@ -81,15 +82,15 @@ class TestMarketRunner(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(MockPopen.called)
         args, kwargs = MockPopen.call_args
         
-        # Verify env has HOME set to agent home (not arena root)
+        # Expected paths
+        cand_dir = os.path.join(runner.arena_dir, "worktrees", "cand_0")
+        home_dir = os.path.join(cand_dir, ".home")
+        
+        # Verify env has HOME set to arena dir
         env = kwargs.get('env')
         self.assertIsNotNone(env)
-        expected_home = os.path.join(runner.arena_dir, "homes", "agent_0")
-        self.assertEqual(env["HOME"], expected_home)
-        
-        # CWD should be the agent's worktree
-        expected_cwd = os.path.join(runner.arena_dir, "worktrees", "agent_0")
-        self.assertEqual(kwargs.get('cwd'), expected_cwd)
+        self.assertEqual(env["HOME"], home_dir)
+        self.assertEqual(kwargs.get('cwd'), cand_dir)
 
 if __name__ == '__main__':
     unittest.main()

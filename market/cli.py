@@ -62,10 +62,21 @@ def main():
         asyncio.run(run_tournament())
         
         # Construct final output
+        report = runner.orchestrator.get_final_report()
         output = {
             "state": json.loads(runner.orchestrator.state.to_json()),
-            "report": runner.orchestrator.get_final_report()
+            "report": report
         }
+
+        # Dump report to disk for inspection
+        try:
+            report_path = os.path.join(runner.arena_dir, "TOURNAMENT_REPORT.md")
+            with open(report_path, "w") as f:
+                f.write(report)
+            logging.info(f"Report written to {report_path}")
+        except Exception as e:
+            logging.warning(f"Failed to write report to disk: {e}")
+
         if not args.json_logs:
             print(json.dumps(output))
 
