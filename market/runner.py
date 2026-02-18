@@ -12,14 +12,6 @@ import glob
 from typing import List, Dict, Optional
 from collections import deque
 
-from rich.live import Live
-from rich.table import Table
-from rich.layout import Layout
-from rich.panel import Panel
-from rich.console import Console
-from rich import box
-from rich.logging import RichHandler
-
 from .core.state import MarketState
 from .orchestrator import Orchestrator
 from .agents.shark import Shark
@@ -53,7 +45,8 @@ class MarketRunner:
     and the local OpenCode API server.
     """
     def __init__(self, prompt: str, n_agents: int, budget: float, api_url: str = "http://127.0.0.1", model: str = "gemini-3-flash", provider: str = "opencode", agent_timeout: float = 300.0):
-        self.orchestrator = Orchestrator(prompt, n_agents, budget, base_dir=os.path.abspath("./.arenas"))
+        self.run_id = f"run_{int(time.time())}"
+        self.orchestrator = Orchestrator(prompt, n_agents, budget, base_dir=os.path.abspath(os.path.join("./.arenas", self.run_id)))
         self.arena_dir = self.orchestrator.base_dir
         self.sessions_dir = os.path.join(self.arena_dir, "sessions")
         os.makedirs(self.sessions_dir, exist_ok=True)
@@ -64,6 +57,7 @@ class MarketRunner:
         self.sharks: Dict[str, Shark] = {}
         self.agent_servers: Dict[str, subprocess.Popen] = {}
         self.price_history: List[Dict[str, float]] = [] 
+        self.api_url = api_url
         self.model = model
         self.provider = provider
         self.agent_timeout = agent_timeout
@@ -127,21 +121,29 @@ class MarketRunner:
 
     def _start_agent_server(self, agent_id: str, port: int) -> subprocess.Popen:
         """Starts a dedicated OpenCode server for a specific agent."""
-        agent_dir = os.path.join(self.arena_dir, "worktrees", agent_id)
-        os.makedirs(agent_dir, exist_ok=True)
+        # Use the candidate worktree as the agent's workspace
+        cand_id = agent_id.replace("agent", "cand")
+        agent_dir = os.path.join(self.arena_dir, "worktrees", cand_id)
+        
+        # Ensure the directory exists (should be created by Orchestrator)
+        if not os.path.exists(agent_dir):
+            os.makedirs(agent_dir, exist_ok=True)
         
         real_home = os.environ.get("HOME", "/home/codespace")
         real_auth = os.path.join(real_home, ".local/share/opencode/auth.json")
         
-        # Sandbox HOME
-        agent_home = os.path.join(self.arena_dir, "homes", agent_id)
+        # Sandbox HOME inside the candidate worktree
+        agent_home = os.path.join(agent_dir, ".home")
         arena_auth_dir = os.path.join(agent_home, ".local/share/opencode")
         os.makedirs(arena_auth_dir, exist_ok=True)
         
         if os.path.exists(real_auth):
             arena_auth_path = os.path.join(arena_auth_dir, "auth.json")
             if not os.path.exists(arena_auth_path):
-                os.symlink(real_auth, arena_auth_path)
+                try:
+                    os.symlink(real_auth, arena_auth_path)
+                except FileExistsError:
+                    pass
         
         env = os.environ.copy()
         env["HOME"] = agent_home
@@ -177,65 +179,6 @@ class MarketRunner:
                 proc.kill()
         self.agent_servers.clear()
 
-    def _render_dashboard(self) -> Layout:
-        """Generates the Rich layout for the dashboard."""
-        layout = Layout()
-        layout.split_column(
-            Layout(name="header", size=3),
-            Layout(name="main", ratio=2),
-            Layout(name="logs", ratio=1),
-            Layout(name="footer", size=3)
-        )
-        
-        layout["header"].update(Panel(f"Round {self.orchestrator.state.round_num} | Agents: {len(self.sharks)} | Whale Wealth: {self.orchestrator.state.whale_wealth:.2f}", title="Logical Induction Market"))
-        
-        # Split main into Assets and Agents
-        layout["main"].split_row(
-            Layout(name="assets"),
-            Layout(name="agents")
-        )
-        
-        # Assets Table
-        asset_table = Table(title="Market Assets", box=box.SIMPLE)
-        asset_table.add_column("ID")
-        asset_table.add_column("Type")
-        asset_table.add_column("Price")
-        asset_table.add_column("Status")
-        
-        sorted_ids = sorted(self.orchestrator.state.assets.keys(), key=lambda x: (self.orchestrator.state.assets[x].type, x))
-        for aid in sorted_ids:
-            asset = self.orchestrator.state.assets[aid]
-            p = self.orchestrator.state.get_asset_price(aid)
-            bar_len = int(p * 10)
-            bar = "█" * bar_len + "░" * (10 - bar_len)
-            asset_table.add_row(
-                aid, 
-                asset.type, 
-                f"{p:.3f}", 
-                bar
-            )
-        layout["assets"].update(Panel(asset_table))
-        
-        # Agents Table
-        agent_table = Table(title="Agent Wealth", box=box.SIMPLE)
-        agent_table.add_column("Agent")
-        agent_table.add_column("Wealth")
-        
-        sorted_agents = sorted(self.orchestrator.state.agents.values(), key=lambda a: a.wealth, reverse=True)
-        for agent in sorted_agents:
-            agent_table.add_row(agent.agent_id, f"{agent.wealth:.2f}")
-            
-        layout["agents"].update(Panel(agent_table))
-        
-        # Logs Panel
-        log_text = "\n".join(self.log_buffer)
-        layout["logs"].update(Panel(log_text, title="Event Log", box=box.SIMPLE))
-        
-        attach_cmd = f"opencode attach {self.api_url}"
-        layout["footer"].update(Panel(f"Server: {self.api_url} | Attach: [bold cyan]{attach_cmd}[/]", style="dim"))
-        
-        return layout
-
     async def run_loop(self, max_rounds: int, stream_ui: bool = True, json_logs: bool = False):
         """
         Executes the main game loop until convergence or max_rounds (Async).
@@ -249,15 +192,6 @@ class MarketRunner:
 
         if stream_ui and not json_logs:
             sys.stderr.write(f"Starting Tournament: {len(self.sharks)} Agents (Server: {self.api_url})\n")
-
-        # Use Rich Live Display if stream_ui is True
-        # Force terminal to ensure Rich renders control codes through the pipe
-        if stream_ui and not json_logs:
-            console = Console(stderr=True, force_terminal=True)
-            live = Live(self._render_dashboard(), refresh_per_second=4, console=console, transient=False)
-            live.start()
-        else:
-            live = None
 
         try:
             for i in range(max_rounds):
@@ -283,9 +217,9 @@ class MarketRunner:
                 # 2. Step Market
                 self.orchestrator.process_round(list(actions))
                 
-                # 3. Update UI
-                if live:
-                    live.update(self._render_dashboard())
+                # 3. Update UI (Text Only)
+                if not json_logs:
+                    print(self.orchestrator.get_pretty_summary())
                 elif json_logs:
                     # Output full state for dashboard
                     print(json.dumps({
@@ -296,18 +230,13 @@ class MarketRunner:
                     
                 # 4. Check Convergence
                 if self.check_convergence():
-                    if live:
-                        # sys.stderr.write(f"Convergence Reached at Round {i+1}!\n")
-                        # Just let the live display persist
-                        pass
-                    elif json_logs:
+                    if json_logs:
                         print(json.dumps({"type": "log", "message": f"Convergence reached at round {i+1}"}))
                     else:
                         logging.info(f"Convergence reached at round {i+1}")
                     break
         finally:
-            if live:
-                live.stop()
+            pass
             
             # DON'T close agents or servers - keep them alive for dashboard exploration
             # close_tasks = [shark.close() for shark in self.sharks.values()]
@@ -327,17 +256,6 @@ class MarketRunner:
         
         # DON'T stop servers - let them persist for dashboard
         # self._stop_servers()
-
-    def _stop_servers(self):
-        """Terminates all agent server processes."""
-        for aid, proc in self.agent_servers.items():
-            logging.info(f"Stopping server for {aid}...")
-            proc.terminate()
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        self.agent_servers.clear()
 
     def check_convergence(self) -> bool:
         state = self.orchestrator.state

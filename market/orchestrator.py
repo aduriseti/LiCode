@@ -505,7 +505,7 @@ class Orchestrator:
                 # We want paths relative to project root
                 cmd = [
                     "diff", "-urN",
-                    "--exclude=.git", "--exclude=.arenas", "--exclude=__pycache__", "--exclude=node_modules",
+                    "--exclude=.git", "--exclude=.arenas", "--exclude=__pycache__", "--exclude=node_modules", "--exclude=.home",
                     ".", # Original (Current Dir)
                     winner.code_path # New
                 ]
@@ -560,14 +560,11 @@ class Orchestrator:
         lines.append("\n---\n")
         lines.append("> **Action Required:** Please apply the changes to your project.")
         lines.append("> ")
-        lines.append("> **Option 1: Apply Diff (Recommended)**")
-        lines.append("> Use the `patch` command or `edit` tool to apply the diff above.")
+        lines.append("> **Apply Diff (Recommended)**")
+        lines.append("> Use the `patch` command or your editor to apply the diff above.")
         lines.append("> ")
-        lines.append("> **Option 2: Manual Inspection**")
-        lines.append(f"> Review the full worktree at: `{winner.code_path}`")
-        lines.append("> ")
-        lines.append("> **2. Save Validated Tests (Recommended):**")
-        lines.append("> Check the project structure. If a test directory exists (e.g., `tests/`, `spec/`), save the verified tests there (e.g., `tests/test_tournament.py`). Otherwise, create a new `tests/` directory.")
+        lines.append("> **Save Validated Tests:**")
+        lines.append("> If new tests were validated, save them to your `tests/` directory (e.g., `tests/test_tournament.py`) to prevent regression.")
         
         return "\n".join(lines)
 

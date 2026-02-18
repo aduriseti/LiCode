@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sys
+import subprocess
 from typing import Dict, Any, Optional
 from opencode_ai import AsyncOpencode, APITimeoutError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log
@@ -44,6 +45,7 @@ class Shark:
             if self.log_path:
                 with open(self.log_path, "a") as f:
                     f.write(f"=== Session Created: {self.session.id} ===\n")
+                    f.write(f"=== SYSTEM PROMPT ===\n{self.system_prompt}\n=====================\n")
 
     def _log_interaction(self, prompt: str, response: Any, error: Optional[str] = None):
         # Log to file
@@ -61,59 +63,58 @@ class Shark:
             logging.error(f"Failed to write session log for {self.agent_id}: {e}")
 
     def _build_system_prompt(self) -> str:
-        return f"""You are Agent {self.agent_id}, a strategic software engineer in a Logical Induction Market.
-Goal: Produce the best code solution and profit by predicting which solutions/tests are correct.
+        cid = f"cand_{self.agent_id.split('_')[-1]}"
+        return f"""You are Agent {self.agent_id}, a strategic software engineer participating in a Logical Induction Market Tournament.
+Your Goal: Win the tournament by producing the code that BEST satisfies the User's Problem Statement and profiting from accurate predictions.
+Your assigned candidate solution is "{cid}".
 
-**Assets & Mechanics:**
-- **Candidates (cand_X):** Full project workspaces cloned from the base repo. You each own one.
-- **Verifiers (v_HASH):** Test scripts. Price = Market confidence it is VALID (bug-free and correct).
+**The Environment:**
+- You are operating in a cloned workspace of the user's project.
+- The market evaluates "Code Quality" based on which Candidate passes the most "Valid Verifiers" (tests).
+- **Verifiers** are test scripts proposed by agents. The market decides if a verifier is "Valid" (correctly tests the requirement) based on trading.
 
-**Your Turn:**
-1. Analyze the 'Market Assets' and 'Your Current Code'.
-2. Your candidate `cand_X` is a DIRECTORY containing the entire project.
-3. You must create/edit specific files (e.g., `solution.py`) within your workspace.
-4. Output a JSON object with:
-   - "beliefs": Your predicted probability (0.01 to 0.99) for assets.
-   - "proposals": List of actions to perform (PATCH code or create VERIFIER).
+**Your Capabilities:**
+1. **Explore:** You can read any file in your workspace (provided in the context).
+2. **Modify:** You can PATCH any file or CREATE new files to implement the solution.
+3. **Verify:** You can propose new VERIFIERS (tests) to prove your code works or to expose bugs in others.
 
-**IMPORTANT: Output ONLY the JSON block. Do NOT use tools. Do NOT provide a todo list. Do NOT provide any other text besides the JSON block (and optionally a <thought> tag).**
+**Strategy:**
+- **Implement:** Write code that solves the user's problem. Do not limit yourself to one file unless restricted by the problem.
+- **Test:** Write robust tests (Verifiers) that pass on your code but fail on broken code.
+- **Bet:** High confidence (0.9+) means you believe a candidate is good or a test is valid. Low confidence means the opposite.
 
-**Proposal Types:**
-Type 1: "PATCH" (Fix your code)
-- `file_path`: Relative path to the file you want to edit (e.g., "solution.py"). Defaults to "solution.py" if omitted.
-- `old_code`: Exact unique string to find in the file.
-- `new_code`: The replacement string.
-- OR use `type: "CANDIDATE"` with `code` to overwrite the entire file.
+**Output Format:**
+You must output a single JSON object. Do not include markdown formatting like ```json ... ``` outside of the block if possible, but the parser is robust.
 
-Type 2: "VERIFIER" (Create test)
-- `files`: Dictionary mapping filenames to content. MUST include `run.sh`.
-- `run.sh`: Executable script acting as the entry point. Exits 0 on pass, non-zero on fail.
-
-**Example Output:**
-<thought>My code handles positive numbers but fails on 0. I will fix it and add a test case.</thought>
-```json
 {{
   "beliefs": {{
-    "cand_{self.agent_id.split('_')[-1]}": 0.95,
-    "v_existing_test": 0.1
+    "cand_X": 0.0-1.0, // Probability that Candidate X is the BEST solution
+    "v_HASH": 0.0-1.0  // Probability that Verifier HASH is a VALID test
   }},
   "proposals": [
+    // Action 1: Modify Code
     {{
       "type": "PATCH",
-      "file_path": "solution.py",
-      "old_code": "return n * n",
-      "new_code": "return n * n if n != 0 else 0"
+      "file_path": "path/to/file.py", // Relative to root
+      "old_code": "exact string to replace",
+      "new_code": "new string"
     }},
+    // OR Full Rewrite
+    {{
+      "type": "CANDIDATE",
+      "file_path": "path/to/new_or_existing_file.py",
+      "code": "full content of file"
+    }},
+    // Action 2: Create Test (Verifier)
     {{
       "type": "VERIFIER",
       "files": {{
-        "run.sh": "#!/bin/bash\\npython3 test.py",
-        "test.py": "import solution\\nimport unittest\\n\\nclass TestSolution(unittest.TestCase):\\n    def test_zero(self):\\n        self.assertEqual(solution.solve(0), 0)\\n\\nif __name__ == '__main__':\\n    unittest.main()"
+        "run.sh": "#!/bin/bash\\npython3 test_feature.py", // Entry point (exit 0 = pass)
+        "test_feature.py": "import ..."
       }}
     }}
   ]
 }}
-```
 """
 
     @retry(
@@ -200,7 +201,7 @@ Type 2: "VERIFIER" (Create test)
 
     def _format_state_prompt(self, state: MarketState) -> str:
         # Create a concise summary of the market
-        lines = [f"Round: {state.round_num}"]
+        lines = [f"You are Agent: {self.agent_id}", f"Round: {state.round_num}"]
         if state.prompt:
             lines.append(f"\nPROBLEM STATEMENT:\n{state.prompt}\n")
 
@@ -236,29 +237,63 @@ Type 2: "VERIFIER" (Create test)
             lines.extend(verifiers)
         else:
             lines.append("(None)")
+
+        lines.append("\n=== Candidate Code Changes (Diffs) ===")
+        for aid, asset in state.assets.items():
+            if asset.type == "CANDIDATE" and asset.code_path and os.path.exists(asset.code_path):
+                try:
+                    # Diff against project root (os.getcwd())
+                    cmd = ["diff", "-urN", 
+                           "--exclude=.git", "--exclude=.arenas", "--exclude=__pycache__", "--exclude=node_modules", "--exclude=.opencode", "--exclude=.home",
+                           ".", asset.code_path]
+                    
+                    # Capture output
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=2)
+                    diff_out = res.stdout.strip()
+                    
+                    if diff_out:
+                        # Limit output size
+                        truncated = diff_out[:2000]
+                        if len(diff_out) > 2000: truncated += "\n... (truncated)"
+                        lines.append(f"\n--- {aid} Diff ---\n{truncated}\n------------------")
+                    else:
+                        lines.append(f"\n--- {aid} Diff ---\n(No changes from base)\n------------------")
+                except Exception as e:
+                    lines.append(f"\n[Error generating diff for {aid}: {e}]")
+
+        lines.append("\n=== Verifier Code ===")
+        for aid, asset in state.assets.items():
+             if asset.type == "VERIFIER" and asset.test_path:
+                try:
+                    # List files in verifier dir
+                    files = [f for f in os.listdir(asset.test_path) if f.endswith(('.py', '.sh'))]
+                    content = ""
+                    for fname in sorted(files)[:2]: # Show first 2 relevant files
+                        fpath = os.path.join(asset.test_path, fname)
+                        if os.path.isfile(fpath):
+                             with open(fpath, "r", errors='replace') as f:
+                                c = f.read(1000)
+                                if f.read(1): c += "\n...(truncated)"
+                             content += f"File: {fname}\n{c}\n"
+                    
+                    if content:
+                         lines.append(f"\n--- {aid} Content ---\n{content}\n---------------------")
+                except Exception as e:
+                    lines.append(f"\n[Error reading verifier {aid}: {e}]")
             
-        # Show Current Code Context
+        # Show Current Code Context (Files List Only)
         cid = f"cand_{self.agent_id.split('_')[-1]}"
         if cid in state.assets:
             asset = state.assets[cid]
             if asset.code_path and os.path.exists(asset.code_path):
                 try:
-                    # If directory, look for solution.py or list files
-                    target_path = asset.code_path
-                    if os.path.isdir(target_path):
-                        sol_path = os.path.join(target_path, "solution.py")
-                        if os.path.exists(sol_path):
-                            target_path = sol_path
-                        else:
-                            # If no solution.py, maybe list the dir?
-                            # For now, just say empty or new file
-                            target_path = None
-                            lines.append(f"\n--- Your Source Code (Directory: {asset.code_path}) ---\n(No solution.py found. Create one!)\n-----------------------------------")
-
-                    if target_path:
-                        with open(target_path, "r") as f:
-                            code = f.read()
-                        lines.append(f"\n--- Your Source Code ({target_path}) ---\n{code}\n-----------------------------------")
+                    if os.path.isdir(asset.code_path):
+                        # List all files (excluding hidden/system files)
+                        files = sorted([f for f in os.listdir(asset.code_path) 
+                                      if not f.startswith('.') and not f.startswith('__')])
+                        lines.append(f"\n=== Your Workspace Files ===\n" + "\n".join(files) + "\n(Content omitted - see diffs above)\n")
+                    else:
+                         lines.append(f"\n=== Your Workspace File ===\n{os.path.basename(asset.code_path)}\n(Content omitted - see diffs above)\n")
                 except Exception as e:
                     lines.append(f"\n[Error reading source: {e}]")
             
