@@ -10,7 +10,10 @@ const { app, server, io, setupTerminalProxy } = createDashboardApp();
 app.use(express.json());
 
 // State
-const terminalManager = new TerminalManager(io, { verbose: true, log: (level, msg) => console.log(`[${level.toUpperCase()}] ${msg}`) });
+const terminalManager = new TerminalManager(io, { 
+    verbose: true, 
+    log: (level, msg) => console.log(`[${level.toUpperCase()}] ${msg}`) 
+});
 setupTerminalProxy(terminalManager);
 
 const activeStreams = new Map<string, EventSource>();
@@ -27,11 +30,13 @@ const cleanup = () => {
     activeStreams.forEach(es => es.close());
     terminalManager.close();
 
-    // Kill agent opencode serve processes by port
-    for (const port of agentServerPorts) {
-        exec(`lsof -ti :${port} | xargs kill 2>/dev/null`, (err) => {
-            if (err) console.log(`[DEBUG] Failed to kill server on port ${port}: ${err.message}`);
-            else console.log(`[INFO] Killed agent server on port ${port}`);
+    // Bulk cleanup: Kill all agent opencode serve processes in a single pass
+    if (agentServerPorts.size > 0) {
+        const ports = Array.from(agentServerPorts).join(',');
+        // Using -9 to ensure they die immediately as they are isolated agents
+        exec(`lsof -ti :${ports} | xargs kill -9 2>/dev/null`, (err) => {
+            if (err) console.log(`[DEBUG] Failed to kill servers on ports ${ports}: ${err.message}`);
+            else console.log(`[INFO] Killed agent servers on ports ${ports}`);
         });
     }
     agentServerPorts.clear();
@@ -41,6 +46,10 @@ const cleanup = () => {
         process.exit(0);
     });
 };
+
+// Graceful signal handling
+process.on('SIGINT', cleanup);
+process.on('SIGTERM', cleanup);
 
 // Auto-shutdown when clients disconnect
 io.on('connection', (socket) => {
@@ -57,8 +66,15 @@ io.on('connection', (socket) => {
 
 // POST /api/log - Receive logs from plugin/tournament
 app.post('/api/log', (req, res) => {
-    const event = req.body;
-    io.emit('log', event);
+    const data = req.body;
+    // Support batched logs
+    if (data.type === 'batch' && Array.isArray(data.events)) {
+        for (const event of data.events) {
+            io.emit('log', event);
+        }
+    } else {
+        io.emit('log', data);
+    }
     res.sendStatus(200);
 });
 
@@ -80,49 +96,55 @@ app.post('/api/agent', (req, res) => {
     } catch (e) {}
 
     sessionToAgent.set(session_id, agent_id);
-    terminalManager.registerAgent(agent_id, api_url, session_id, arena_dir);
-    terminalManager.spawnTerminal(agent_id);
 
-    // Setup EventSource for agent streams
-    if (api_url && !activeStreams.has(api_url)) {
-        try {
-            const es = new EventSource(`${api_url}/event`);
-            es.onmessage = (msg: MessageEvent) => {
+    // Phase 4: Parallelize registration and stream setup
+    Promise.all([
+        (async () => {
+            terminalManager.registerAgent(agent_id, api_url, session_id, arena_dir);
+            terminalManager.spawnTerminal(agent_id);
+        })(),
+        (async () => {
+            if (api_url && !activeStreams.has(api_url)) {
                 try {
-                    const evt = JSON.parse(msg.data);
-                    if (evt.type === 'message.part.updated') {
-                        const part = evt.properties?.part;
-                        const delta = evt.properties?.delta;
-                        
-                        if (part && part.sessionID && delta) {
-                            const aid = sessionToAgent.get(part.sessionID);
-                            if (aid) {
-                                io.emit('log', {
-                                    type: 'agent_stream',
-                                    agent_id: aid,
-                                    text: delta,
-                                    timestamp: new Date().toLocaleTimeString()
-                                });
+                    const es = new EventSource(`${api_url}/event`);
+                    es.onmessage = (msg: MessageEvent) => {
+                        try {
+                            const evt = JSON.parse(msg.data);
+                            if (evt.type === 'message.part.updated') {
+                                const part = evt.properties?.part;
+                                const delta = evt.properties?.delta;
+                                
+                                if (part && part.sessionID && delta) {
+                                    const aid = sessionToAgent.get(part.sessionID);
+                                    if (aid) {
+                                        io.emit('log', {
+                                            type: 'agent_stream',
+                                            agent_id: aid,
+                                            text: delta,
+                                            timestamp: new Date().toLocaleTimeString()
+                                        });
+                                    }
+                                }
                             }
-                        }
-                    }
-                } catch (e) {}
-            };
-            es.onerror = () => {
-                 // specific error handling if needed
-            };
-            activeStreams.set(api_url, es);
-        } catch(err) {
-            console.error(`[ERROR] Failed to connect EventSource for ${agent_id}:`, err);
-        }
-    }
+                        } catch (e) {}
+                    };
+                    activeStreams.set(api_url, es);
+                } catch(err) {
+                    console.error(`[ERROR] Failed to connect EventSource for ${agent_id}:`, err);
+                }
+            }
+        })()
+    ]).catch(err => {
+        console.error(`[ERROR] Concurrent agent setup failed for ${agent_id}:`, err);
+    });
 
     res.sendStatus(200);
 });
 
-// Start Server
-const port = 0; // Random port
-server.listen(port, () => {
+// Start Server - Phase 4: Support injected port
+const injectedPort = process.env.DASHBOARD_PORT ? parseInt(process.env.DASHBOARD_PORT) : 0;
+
+server.listen(injectedPort, () => {
     const addr = server.address();
     const assignedPort = typeof addr === 'string' ? 0 : addr?.port;
     console.log(JSON.stringify({ port: assignedPort, url: `http://localhost:${assignedPort}` }));

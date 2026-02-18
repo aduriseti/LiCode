@@ -40,6 +40,29 @@ vi.mock("open", () => ({
   default: mocks.open
 }));
 
+vi.mock("net", async () => {
+  const { EventEmitter } = await import("events");
+  class MockSocket extends EventEmitter {
+    connect(port: number, host: string, cb?: () => void) {
+        if (cb) cb();
+        process.nextTick(() => this.emit('connect'));
+        return this;
+    }
+    setTimeout = vi.fn().mockReturnThis();
+    destroy = vi.fn().mockReturnThis();
+  }
+
+  return {
+    createServer: vi.fn(() => ({
+      listen: vi.fn((port, cb) => cb && cb()),
+      address: vi.fn(() => ({ port: 8001 })),
+      close: vi.fn((cb) => cb && cb()),
+      on: vi.fn()
+    })),
+    Socket: MockSocket
+  };
+});
+
 // Import the tool (plugin)
 import { tournamentPlugin } from "../plugins/tournament";
 
@@ -99,9 +122,6 @@ describe("Tournament Tool", () => {
     mocks.spawn.mockImplementation((cmd: string, args: string[]) => {
         // Dashboard Server
         if (cmd === "bun" && args && args[0] && args[0].includes("dashboard-server.ts")) {
-            setTimeout(() => {
-                mockDashboardProcess.stdout.emit("data", Buffer.from('{"url":"http://localhost:8001"}\n'));
-            }, 10);
             return mockDashboardProcess;
         }
         // Python Tournament
@@ -118,22 +138,27 @@ describe("Tournament Tool", () => {
       prompt: "Test Task", rounds: 2, agents: 3, model: "m", provider: "p", log_level: "I", timeout: 10
     }, mockContext);
 
-    // Wait for dashboard startup + built-in delays (1s toast + 2s yield)
-    await new Promise(resolve => setTimeout(resolve, 4000));
+    // Startup is now immediate after readiness check
+    await new Promise(resolve => setTimeout(resolve, 100));
 
-    expect(mocks.spawn).toHaveBeenCalledWith("bun", expect.arrayContaining([expect.stringContaining("dashboard-server.ts")]), expect.anything());
+    expect(mocks.spawn).toHaveBeenCalledWith("bun", expect.arrayContaining([expect.stringContaining("dashboard-server.ts")]), expect.objectContaining({
+        env: expect.objectContaining({ DASHBOARD_PORT: expect.any(String) })
+    }));
     expect(mockDashboardProcess.unref).toHaveBeenCalled();
-    expect(mocks.open).toHaveBeenCalledWith("http://localhost:8001");
+    expect(mocks.open).toHaveBeenCalledWith(expect.stringContaining("http://localhost:"));
     expect(mocks.promptAsync).toHaveBeenCalled();
 
     // Emit log from tournament
     const logEvent = { type: "log", message: "Processing round 1" };
     mockTournamentProcess.stdout.emit("data", Buffer.from(JSON.stringify(logEvent) + "\n"));
     
-    // Verify fetch call to dashboard
-    expect(global.fetch).toHaveBeenCalledWith("http://localhost:8001/api/log", expect.objectContaining({
+    // Wait for batch flush timer (100ms)
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    // Verify fetch call to dashboard uses batch endpoint
+    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("/api/log"), expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify(logEvent)
+        body: JSON.stringify({ type: 'batch', events: [logEvent] })
     }));
 
     // Finish
@@ -146,7 +171,7 @@ describe("Tournament Tool", () => {
       prompt: "Agent Test", rounds: 1, agents: 1, model: "m", provider: "p", log_level: "E", timeout: 1
     }, mockContext);
 
-    await new Promise(resolve => setTimeout(resolve, 4000));
+    await new Promise(resolve => setTimeout(resolve, 100));
 
     const initEvent = {
       type: "agent_init",
@@ -156,7 +181,7 @@ describe("Tournament Tool", () => {
     };
     mockTournamentProcess.stdout.emit("data", Buffer.from(JSON.stringify(initEvent) + "\n"));
 
-    expect(global.fetch).toHaveBeenCalledWith("http://localhost:8001/api/agent", expect.objectContaining({
+    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("/api/agent"), expect.objectContaining({
         method: 'POST',
         body: JSON.stringify(initEvent)
     }));
@@ -169,7 +194,7 @@ describe("Tournament Tool", () => {
         prompt: "Test", rounds: 1, agents: 2, model: "m", provider: "p", log_level: "E", timeout: 1
     }, mockContext);
     
-    await new Promise(resolve => setTimeout(resolve, 4000));
+    await new Promise(resolve => setTimeout(resolve, 100));
 
     const part1 = '{"type": "log", "mess';
     const part2 = 'age": "Split JSON"}\n';
@@ -177,8 +202,11 @@ describe("Tournament Tool", () => {
     mockTournamentProcess.stdout.emit("data", Buffer.from(part1));
     mockTournamentProcess.stdout.emit("data", Buffer.from(part2));
     
-    expect(global.fetch).toHaveBeenCalledWith("http://localhost:8001/api/log", expect.objectContaining({
-        body: JSON.stringify({ type: "log", message: "Split JSON" })
+    // Wait for batch flush
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    expect(global.fetch).toHaveBeenCalledWith(expect.stringContaining("/api/log"), expect.objectContaining({
+        body: JSON.stringify({ type: "batch", events: [{ type: "log", message: "Split JSON" }] })
     }));
 
     mockTournamentProcess.emit("close", 0);
@@ -190,7 +218,7 @@ describe("Tournament Tool", () => {
       prompt: "Linger Test", rounds: 1, agents: 1, model: "m", provider: "p", log_level: "E", timeout: 1
     }, mockContext);
 
-    await new Promise(resolve => setTimeout(resolve, 4000));
+    await new Promise(resolve => setTimeout(resolve, 100));
 
     // Tournament finishes
     mockTournamentProcess.emit("close", 0);
@@ -199,14 +227,12 @@ describe("Tournament Tool", () => {
     expect(result).toContain("Dashboard remains active");
   });
 
-  // RESTORED TESTS
-
   it("should return the final report in the resolved string", async () => {
     const executionPromise = tournamentTool.execute({
       prompt: "Report Test", rounds: 1, agents: 1, model: "m", provider: "p", log_level: "E", timeout: 1
     }, mockContext);
 
-    await new Promise(resolve => setTimeout(resolve, 4000));
+    await new Promise(resolve => setTimeout(resolve, 100));
 
     const report = "## Tournament Complete\n**Winner:** cand_0";
     mockTournamentProcess.stdout.emit("data", Buffer.from(JSON.stringify({ type: "final_result", report }) + "\n"));
@@ -223,7 +249,7 @@ describe("Tournament Tool", () => {
       prompt: "Server Alive Test", rounds: 1, agents: 1, model: "m", provider: "p", log_level: "E", timeout: 1
     }, mockContext);
 
-    await new Promise(resolve => setTimeout(resolve, 4000));
+    await new Promise(resolve => setTimeout(resolve, 100));
 
     mockTournamentProcess.emit("close", 0);
     await executionPromise;
@@ -237,7 +263,7 @@ describe("Tournament Tool", () => {
       prompt: "Crash Test", rounds: 1, agents: 1, model: "m", provider: "p", log_level: "E", timeout: 1
     }, mockContext);
 
-    await new Promise(resolve => setTimeout(resolve, 4000));
+    await new Promise(resolve => setTimeout(resolve, 100));
 
     mockTournamentProcess.emit("close", 1);
 
