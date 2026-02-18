@@ -29,7 +29,7 @@ const cleanup = () => {
 
     // Kill agent opencode serve processes by port
     for (const port of agentServerPorts) {
-        exec(`lsof -ti :${port} | xargs kill 2>/dev/null`, (err) => {
+        exec(`lsof -ti :${port} | xargs -r kill`, (err) => {
             if (err) console.log(`[DEBUG] Failed to kill server on port ${port}: ${err.message}`);
             else console.log(`[INFO] Killed agent server on port ${port}`);
         });
