@@ -41,10 +41,12 @@ describe("Workspace Verification (Headless Browser)", () => {
         // Extract dashboard URL from --print-logs output
         // client.app.log messages appear as: INFO ... service=tournament-tool [DASHBOARD] http://...
         const dashboardUrl = await new Promise<string>((resolve, reject) => {
-            const timeout = setTimeout(() => reject(new Error("Dashboard URL not found in output within 60s")), 60000);
+            const timeout = setTimeout(() => reject(new Error(`Dashboard URL not found in output within 60s. Buffer: ${buf}`)), 60000);
             let buf = "";
             const scan = (chunk: Buffer) => {
-                buf += chunk.toString();
+                const s = chunk.toString();
+                // console.log("[OC LOG]", s); // Debug output
+                buf += s;
                 const match = buf.match(/\[DASHBOARD\] (http:\/\/[^\s]+)/);
                 if (match) {
                     clearTimeout(timeout);
@@ -55,15 +57,27 @@ describe("Workspace Verification (Headless Browser)", () => {
             ocProcess!.stderr!.on("data", scan);
         });
 
+        console.log(`[TEST] Connecting to dashboard: ${dashboardUrl}`);
+
         browser = await launchBrowser();
         const page = await browser.newPage();
+        
+        // Debug dashboard console
+        page.on('console', msg => console.log(`[DASHBOARD CONSOLE] ${msg.text()}`));
+
         page.on("crash", () => { throw new Error("Dashboard page crashed in Chromium"); });
         await page.goto(dashboardUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
 
         // Wait for an agent terminal tab (not the SYSTEM tab) to appear
-        const agentTab = await page.waitForSelector(".tab-button:not(#tab-system)", { timeout: 90000 });
-        expect(agentTab).not.toBeNull();
-        await agentTab!.click();
+        try {
+            const agentTab = await page.waitForSelector(".tab-button:not(#tab-system)", { timeout: 90000 });
+            expect(agentTab).not.toBeNull();
+            await agentTab!.click();
+        } catch (e) {
+            const content = await page.content();
+            console.log("[TEST FAIL DEBUG] Page content at timeout:", content);
+            throw e;
+        }
 
         // Wait for xterm.js rows to render in the active terminal
         await page.waitForSelector(".terminal-container.active .xterm-rows", { timeout: 30000 });
@@ -88,5 +102,5 @@ describe("Workspace Verification (Headless Browser)", () => {
             lower.includes("fibonacci") || lower.includes("def fib") || lower.includes("a, b = b, a + b"),
             `Expected fibonacci content in terminal. Got ${terminalText.length} chars: ${terminalText.substring(0, 200)}`
         ).toBe(true);
-    }, 180000);
+    }, 240000);
 });

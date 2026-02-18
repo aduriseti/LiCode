@@ -108,6 +108,25 @@ describe("Dashboard Server Logic", () => {
         expect(res.sendStatus).toHaveBeenCalledWith(200);
     });
 
+    it("should handle batched log requests", async () => {
+        await import("../lib/dashboard-server");
+        const handler = getHandler("/api/log");
+        
+        const events = [
+            { type: 'log', message: 'one' },
+            { type: 'log', message: 'two' }
+        ];
+        const req = { body: { type: 'batch', events } };
+        const res = { sendStatus: vi.fn() };
+
+        handler(req, res);
+
+        expect(mocks.io.emit).toHaveBeenCalledTimes(2);
+        expect(mocks.io.emit).toHaveBeenNthCalledWith(1, "log", events[0]);
+        expect(mocks.io.emit).toHaveBeenNthCalledWith(2, "log", events[1]);
+        expect(res.sendStatus).toHaveBeenCalledWith(200);
+    });
+
     it("should register agents via /api/agent and setup streaming", async () => {
         await import("../lib/dashboard-server");
         const handler = getHandler("/api/agent");
@@ -143,6 +162,9 @@ describe("Dashboard Server Logic", () => {
             }
         };
         
+        // Wait for parallel setup
+        await new Promise(resolve => setTimeout(resolve, 50));
+
         if (mockES.onmessage) {
             (mockES.onmessage as any)({ data: JSON.stringify(sseEvent) });
         }
@@ -156,18 +178,17 @@ describe("Dashboard Server Logic", () => {
         expect(res.sendStatus).toHaveBeenCalledWith(200);
     });
 
-    it("should trigger cleanup when all clients disconnect", async () => {
+    it("should trigger cleanup when all clients disconnect using bulk kill", async () => {
         vi.useFakeTimers();
         await import("../lib/dashboard-server");
 
-        // Register a fake agent to populate agentServerPorts
+        // Register two fake agents
         const handler = getHandler("/api/agent");
         if (handler) {
-            const mockES = { close: vi.fn() };
-            // Ensure EventSource constructor returns our mock
-            mocks.EventSource.mockImplementation(function() { return mockES; });
+            mocks.EventSource.mockImplementation(function() { return { close: vi.fn() }; });
             
             handler({ body: { api_url: "http://localhost:5000", agent_id: "a1", session_id: "s1" } }, { sendStatus: vi.fn() });
+            handler({ body: { api_url: "http://localhost:5001", agent_id: "a2", session_id: "s2" } }, { sendStatus: vi.fn() });
         }
 
         const connectionCall = mocks.io.on.mock.calls.find((c: any[]) => c[0] === 'connection');
@@ -183,7 +204,8 @@ describe("Dashboard Server Logic", () => {
         disconnectHandler();
         vi.advanceTimersByTime(5000);
 
-        expect(mocks.exec).toHaveBeenCalledWith(expect.stringContaining("lsof -ti :5000"), expect.any(Function));
+        // Bulk cleanup should use comma-separated ports
+        expect(mocks.exec).toHaveBeenCalledWith(expect.stringContaining("lsof -ti :5000,5001"), expect.any(Function));
         expect(mocks.terminalManager.close).toHaveBeenCalled();
         expect(mocks.server.close).toHaveBeenCalled();
         expect(mocks.processExit).toHaveBeenCalledWith(0);
