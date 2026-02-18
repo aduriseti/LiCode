@@ -64,7 +64,7 @@ export class TerminalManager {
         if (this.verbose) this.log("info", `[TERMINAL] Spawning helper for ${agentId} (Attempt ${attempt}/5)`);
 
         const helperPath = path.join(__dirname, "pty-helper.js");
-        const opencodeBin = "/home/codespace/.opencode/bin/opencode";
+        const opencodeBin = process.env.OPENCODE_BIN || "opencode";
         const targetUrl = meta.api_url.replace("localhost", "127.0.0.1");
         const startTime = Date.now();
 
