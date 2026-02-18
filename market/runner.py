@@ -130,7 +130,7 @@ class MarketRunner:
         agent_dir = os.path.join(self.arena_dir, "worktrees", agent_id)
         os.makedirs(agent_dir, exist_ok=True)
         
-        real_home = os.environ.get("HOME", "/home/codespace")
+        real_home = os.path.expanduser('~')
         real_auth = os.path.join(real_home, ".local/share/opencode/auth.json")
         
         # Sandbox HOME
