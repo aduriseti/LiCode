@@ -8,9 +8,13 @@ class TestMarketRunner(unittest.IsolatedAsyncioTestCase):
     
     @patch('market.runner.Shark')
     @patch('market.runner.socket.create_connection')
-    async def test_run_loop_basics(self, MockSocket, MockShark):
+    @patch('market.runner.subprocess.Popen')
+    async def test_run_loop_basics(self, MockPopen, MockSocket, MockShark):
         # Mock server ready
         MockSocket.return_value.__enter__.return_value = MagicMock()
+        MockPopen.return_value.poll.return_value = None
+        MockPopen.return_value.__enter__.return_value.poll.return_value = None
+        MockPopen.return_value.__enter__.return_value.communicate.return_value = (b"", b"")
         
         # Setup Mock Shark behavior
         shark_instance = MockShark.return_value
@@ -31,9 +35,10 @@ class TestMarketRunner(unittest.IsolatedAsyncioTestCase):
         MockSocket.return_value.__enter__.return_value = MagicMock()
         runner = MarketRunner("Test", n_agents=2, budget=100.0, api_url="http://mock")
         
-        # Manually drain agent wealth to trigger bankruptcy condition
-        runner.orchestrator.state.agents["agent_0"].wealth = 10.0
-        runner.orchestrator.state.agents["agent_1"].wealth = 10.0
+        # Manually initialize agents (simulating runner.initialize() without its side effects)
+        from market.core.state import AgentPortfolio
+        runner.orchestrator.state.agents["agent_0"] = AgentPortfolio(agent_id="agent_0", wealth=10.0)
+        runner.orchestrator.state.agents["agent_1"] = AgentPortfolio(agent_id="agent_1", wealth=10.0)
         
         is_converged = runner.check_convergence()
         self.assertTrue(is_converged)
@@ -41,6 +46,13 @@ class TestMarketRunner(unittest.IsolatedAsyncioTestCase):
     @patch('market.runner.Shark')
     def test_convergence_stability(self, MockShark):
         runner = MarketRunner("Test", n_agents=2, budget=1000.0, api_url="http://mock")
+        
+        # Manually initialize agents and assets
+        from market.core.state import AgentPortfolio, MarketAsset
+        runner.orchestrator.state.agents["agent_0"] = AgentPortfolio(agent_id="agent_0", wealth=500.0)
+        runner.orchestrator.state.agents["agent_1"] = AgentPortfolio(agent_id="agent_1", wealth=500.0)
+        runner.orchestrator.state.assets["cand_0"] = MarketAsset(id="cand_0", type="CANDIDATE", description="Test")
+        runner.orchestrator.state.assets["cand_1"] = MarketAsset(id="cand_1", type="CANDIDATE", description="Test")
         
         # Inject fake price history (stable)
         # Price history is list of dicts {cid: price}
@@ -73,6 +85,8 @@ class TestMarketRunner(unittest.IsolatedAsyncioTestCase):
         MockAsyncSocket.return_value = (MagicMock(), mock_writer)
         
         MockPopen.return_value.poll.return_value = None
+        MockPopen.return_value.__enter__.return_value.poll.return_value = None
+        MockPopen.return_value.__enter__.return_value.communicate.return_value = (b"", b"")
         
         # Setup Mock Shark
         shark_instance = MockShark.return_value

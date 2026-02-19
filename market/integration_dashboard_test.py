@@ -24,15 +24,22 @@ class IntegrationDashboardTest(unittest.IsolatedAsyncioTestCase):
 
     @patch('market.runner.Shark')
     @patch('market.runner.socket.create_connection')
+    @patch('market.runner.asyncio.open_connection')
     @patch('market.runner.subprocess.Popen')
-    async def test_integration_flow_with_json_logs(self, MockPopen, MockSocket, MockShark):
+    async def test_integration_flow_with_json_logs(self, MockPopen, MockAsyncSocket, MockSocket, MockShark):
         """
         Tests the integration between MarketRunner and the Dashboard's expected input (JSON logs).
         Mocks LLM (Shark) and OpenCode server.
         """
         # 1. Setup Mock Server
+        mock_writer = MagicMock()
+        mock_writer.wait_closed = AsyncMock()
+        MockAsyncSocket.return_value = (MagicMock(), mock_writer)
+        
         MockSocket.return_value.__enter__.return_value = MagicMock()
         MockPopen.return_value.poll.return_value = None
+        MockPopen.return_value.__enter__.return_value.poll.return_value = None
+        MockPopen.return_value.__enter__.return_value.communicate.return_value = (b"", b"")
         
         # 2. Setup Mock Shark (The LLM)
         # Agent 0 will propose a verifier that fails Agent 1
@@ -110,14 +117,21 @@ class IntegrationDashboardTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(runner.orchestrator.state.assets), 3)
 
     @patch('market.runner.socket.create_connection')
+    @patch('market.runner.asyncio.open_connection')
     @patch('market.runner.subprocess.Popen')
     @patch('market.agents.shark.AsyncOpencode')
-    async def test_recovery_from_malformed_llm_json(self, MockClient, MockPopen, MockSocket):
+    async def test_recovery_from_malformed_llm_json(self, MockClient, MockPopen, MockAsyncSocket, MockSocket):
         """
         Integration test verifying that the runner survives an agent returning non-JSON initially.
         """
+        mock_writer = MagicMock()
+        mock_writer.wait_closed = AsyncMock()
+        MockAsyncSocket.return_value = (MagicMock(), mock_writer)
+        
         MockSocket.return_value.__enter__.return_value = MagicMock()
         MockPopen.return_value.poll.return_value = None
+        MockPopen.return_value.__enter__.return_value.poll.return_value = None
+        MockPopen.return_value.__enter__.return_value.communicate.return_value = (b"", b"")
         
         # Setup Mock Client
         mock_client_inst = MockClient.return_value

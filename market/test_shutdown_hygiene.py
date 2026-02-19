@@ -1,33 +1,33 @@
 import unittest
 import asyncio
-import os
-import shutil
-import tempfile
 from unittest.mock import MagicMock, patch, AsyncMock
 from market.runner import MarketRunner
 from market.orchestrator import AgentAction
 
 class TestShutdownHygiene(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        self.test_dir = tempfile.mkdtemp()
-        self.cwd = os.getcwd()
-        os.chdir(self.test_dir)
-
-    def tearDown(self):
-        os.chdir(self.cwd)
-        shutil.rmtree(self.test_dir)
+    """
+    Tests focused on graceful shutdown and resource cleanup.
+    Ensures that event loops are not closed before all async resources (like Shark clients) are finished.
+    """
 
     @patch('market.runner.Shark')
     @patch('market.runner.socket.create_connection')
+    @patch('market.runner.asyncio.open_connection')
     @patch('market.runner.subprocess.Popen')
-    async def test_graceful_shutdown_prevents_loop_error(self, MockPopen, MockSocket, MockShark):
+    async def test_graceful_shutdown_prevents_loop_error(self, MockPopen, MockAsyncSocket, MockSocket, MockShark):
         """
         Verifies that MarketRunner closes all Shark clients before exiting its async loop.
         This prevents the 'RuntimeError: Event loop is closed' observed during cleanup.
         """
         # 1. Setup mocks
+        mock_writer = MagicMock()
+        mock_writer.wait_closed = AsyncMock()
+        MockAsyncSocket.return_value = (MagicMock(), mock_writer)
+        
         MockSocket.return_value.__enter__.return_value = MagicMock()
         MockPopen.return_value.poll.return_value = None
+        MockPopen.return_value.__enter__.return_value.poll.return_value = None
+        MockPopen.return_value.__enter__.return_value.communicate.return_value = (b"", b"")
         
         shark_instance = MagicMock()
         shark_instance.get_action = AsyncMock(return_value=AgentAction("agent_0"))
@@ -62,14 +62,21 @@ class TestShutdownHygiene(unittest.IsolatedAsyncioTestCase):
 
     @patch('market.runner.Shark')
     @patch('market.runner.socket.create_connection')
+    @patch('market.runner.asyncio.open_connection')
     @patch('market.runner.subprocess.Popen')
-    async def test_shutdown_on_exception(self, MockPopen, MockSocket, MockShark):
+    async def test_shutdown_on_exception(self, MockPopen, MockAsyncSocket, MockSocket, MockShark):
         """
         Verifies that even if an exception occurs during the tournament, 
         shark clients are still closed.
         """
+        mock_writer = MagicMock()
+        mock_writer.wait_closed = AsyncMock()
+        MockAsyncSocket.return_value = (MagicMock(), mock_writer)
+        
         MockSocket.return_value.__enter__.return_value = MagicMock()
         MockPopen.return_value.poll.return_value = None
+        MockPopen.return_value.__enter__.return_value.poll.return_value = None
+        MockPopen.return_value.__enter__.return_value.communicate.return_value = (b"", b"")
         
         shark_instance = MagicMock()
         shark_instance.get_action = AsyncMock(side_effect=RuntimeError("API Failure"))
@@ -80,14 +87,13 @@ class TestShutdownHygiene(unittest.IsolatedAsyncioTestCase):
         shark_instance.close = AsyncMock()
         
         MockShark.return_value = shark_instance
-
+        
         runner = MarketRunner("Test", n_agents=1, budget=100.0, api_url="http://127.0.0.1")
         await runner.initialize(json_logs=True)
-
+        
         with self.assertRaises(RuntimeError):
             await runner.run_loop(max_rounds=1, stream_ui=False, json_logs=True)
-
-        # Verify close was still called in finally block
+            
         shark_instance.close.assert_called_once()
 
 if __name__ == '__main__':
