@@ -5,6 +5,7 @@ from typing import Dict, List, Tuple
 # Use relative imports if running as package, or assume PYTHONPATH set
 from ..core.lmsr import LMSRMarket
 from ..core.state import MarketState
+from ..core.strategy import Strategy
 
 class Whale:
     """
@@ -12,7 +13,7 @@ class Whale:
     
     Roles:
     1. Passive: Provides liquidity via LMSR (implicit in market mechanics).
-    2. Active: Corrects candidate prices based on test failures.
+    2. Active: Corrects candidate prices based on test failures using Kelly Strategy.
     """
     
     @staticmethod
@@ -67,6 +68,12 @@ class Whale:
         if not scores:
             return {}
             
+        # If all scores are 0, it means no failures have occurred yet.
+        # In this case, the Whale should NOT have an active opinion/belief,
+        # allowing the market to be driven by inductive agents initially.
+        if all(s == 0.0 for s in scores.values()):
+            return {}
+            
         max_s = max(scores.values())
         exps = {cid: math.exp(s - max_s) for cid, s in scores.items()}
         total_exp = sum(exps.values())
@@ -77,6 +84,7 @@ class Whale:
     def generate_trades(state: MarketState) -> List[Tuple[str, float]]:
         """
         Determines what trades the Whale should make to enforce logic.
+        Uses the Kelly Strategy for active trading.
         
         Returns:
             List of (asset_id, delta_q)
@@ -88,46 +96,13 @@ class Whale:
             logging.info(f"Whale Analysis - Scores: {scores}")
             logging.info(f"Whale Analysis - Target Beliefs: {beliefs}")
         
-        trades = []
-        
-        # For each candidate, Whale wants to move price to belief
-        # This is a Kelly bet or direct price targeting.
-        # For simplicity/stability, the Whale acts to move price *towards* belief.
-        # We can calculate the exact delta_q needed to move price to P_target.
-        
-        b = state.liquidity_b
-        
-        for cid, target_p in beliefs.items():
-            asset = state.assets[cid]
-            current_p = state.get_asset_price(cid)
+        if not beliefs:
+            return []
             
-            # If difference is negligible, skip
-            if abs(target_p - current_p) < 0.01:
-                continue
-                
-            logging.info(f"Whale correcting {cid}: {current_p:.3f} -> {target_p:.3f}")
-            
-            # Inverse LMSR Price Function:
-            # P = e^(q_yes/b) / (e^q_yes/b + e^q_no/b)
-            # P = 1 / (1 + e^((q_no - q_yes)/b))
-            # 1/P - 1 = e^((q_no - q_yes)/b)
-            # ln(1/P - 1) = (q_no - q_yes)/b
-            # q_yes_new - q_no = -b * ln(1/P - 1)
-            # We want to change q_yes by delta. q_no stays same.
-            
-            # Current state: diff_old = q_yes - q_no
-            # Target state: diff_new = b * ln(target_p / (1 - target_p))
-            
-            # Clip target_p to avoid infinity
-            tp = max(0.001, min(0.999, target_p))
-            
-            diff_new = b * math.log(tp / (1 - tp))
-            diff_old = asset.q_yes - asset.q_no
-            
-            # Delta needed
-            delta_q_net = diff_new - diff_old
-            
-            # Iterate: we are buying YES shares (or selling if negative)
-            trades.append((cid, delta_q_net))
-            
-        return trades
+        # The Whale trades using the same Kelly strategy as agents
+        # (Design 2.C.2 and 4.C)
+        return Strategy.beliefs_to_trades(
+            beliefs,
+            state.whale_wealth,
+            state
+        )

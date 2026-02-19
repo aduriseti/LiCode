@@ -102,5 +102,24 @@ class TestLMSRMarket(unittest.TestCase):
         b_poor = LMSRMarket.calculate_liquidity(whale_wealth_poor, 10, min_b)
         self.assertEqual(b_poor, min_b)
 
+    def test_calculate_delta_q_accuracy(self):
+        """Verify that calculate_delta_q produces the expected cost via cost_function."""
+        b = 100.0
+        q_yes = 0.0
+        q_no = 0.0
+        target_cost = 50.0
+        
+        # Calculate how many shares we can buy for 50 credits
+        dq = LMSRMarket.calculate_delta_q(q_yes, q_no, b, target_cost, is_yes_share=True)
+        
+        # Verify that the cost of buying dq shares is exactly target_cost
+        actual_cost = LMSRMarket.cost_function(q_yes + dq, q_no, b) - LMSRMarket.cost_function(q_yes, q_no, b)
+        self.assertAlmostEqual(actual_cost, target_cost, places=5)
+        
+        # Test for NO shares
+        dq_no = LMSRMarket.calculate_delta_q(q_yes, q_no, b, target_cost, is_yes_share=False)
+        actual_cost_no = LMSRMarket.cost_function(q_yes, q_no + dq_no, b) - LMSRMarket.cost_function(q_yes, q_no, b)
+        self.assertAlmostEqual(actual_cost_no, target_cost, places=5)
+
 if __name__ == '__main__':
     unittest.main()

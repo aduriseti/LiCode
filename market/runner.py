@@ -305,30 +305,41 @@ class MarketRunner:
             self.price_history.pop(0)
             
         converged = False
-        if len(self.price_history) >= 5:
+        
+        # 1. Price Stability (Condition 1: Threshold 0.01)
+        if len(self.price_history) >= 10:
             volatilities = []
             for cid in current_prices:
                 prices = [h.get(cid, 0.5) for h in self.price_history]
                 if len(prices) > 1:
                     volatilities.append(statistics.stdev(prices))
-            if volatilities and statistics.mean(volatilities) < 0.005:
+            if volatilities and statistics.mean(volatilities) < 0.01:
+                logging.info("Convergence: Price Stability reached")
                 converged = True
 
         wealths = [a.wealth for a in state.agents.values()]
-        if not wealths: converged = True 
-        
-        if not converged:
+        if not wealths: 
+            converged = True 
+        else:
+            # 2. Wealth Concentration (Condition 2: Gini > 0.8)
             total_agent_wealth = sum(wealths)
             if total_agent_wealth > 0:
-                max_wealth = max(wealths)
-                if max_wealth / total_agent_wealth > 0.8:
+                # Gini calculation: sum_i sum_j |wi - wj| / (2 * n * sum(w))
+                n = len(wealths)
+                sum_diffs = sum(abs(wi - wj) for wi in wealths for wj in wealths)
+                gini = sum_diffs / (2 * n * total_agent_wealth)
+                if gini > 0.8:
+                    logging.info(f"Convergence: Wealth Concentration reached (Gini: {gini:.2f})")
                     converged = True
                     
-            if total_agent_wealth < 50.0:
+            # 3. Agent Bankruptcy (Condition 3: < 0.1 * B)
+            if total_agent_wealth < 0.1 * self.orchestrator.budget:
+                logging.info(f"Convergence: Agent Bankruptcy reached (Total Wealth: {total_agent_wealth:.2f})")
                 converged = True
+
+        # 4. Whale Bankruptcy (Condition 4: < 0.05 * B)
+        if state.whale_wealth < 0.05 * self.orchestrator.budget:
+            logging.info(f"Convergence: Whale Bankruptcy reached (Whale Wealth: {state.whale_wealth:.2f})")
+            converged = True
         
-        if converged:
-            logging.info("Tournament converged!")
-            return True
-            
-        return False
+        return converged

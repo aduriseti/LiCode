@@ -39,16 +39,15 @@ class Strategy:
                 
             price = state.get_asset_price(aid)
             
-            # Clip belief
+            # 1. Clip belief (Design 4.D Step 1: epsilon = 0.01)
             p_belief = max(epsilon, min(1.0 - epsilon, belief))
             
-            # Kelly fraction: f* = (p - price) / (price * (1 - price))
-            # Note: This is a simplified Kelly for binary options.
-            # If p > price, we go long. If p < price, we go short.
-            # The denominator approaches 0 if price is extreme, so clamp it.
-            price_safe = max(0.01, min(0.99, price))
+            # 2. Clip price for denominator safety (Design 4.D Step 2)
+            p_safe = max(epsilon, min(1.0 - epsilon, price))
             
-            f_star = (p_belief - price) / (price_safe * (1.0 - price_safe))
+            # Kelly fraction: f* = (p_belief - price) / (price * (1 - price))
+            # If p_belief > price, we go long. If p_belief < price, we go short.
+            f_star = (p_belief - price) / (p_safe * (1.0 - p_safe))
             
             # Record absolute exposure for normalization
             desired_exposures[aid] = f_star
@@ -61,33 +60,29 @@ class Strategy:
             scale = 1.0 / total_exposure
             
         # 3. Calculate delta_q for each trade
-        # We want to spend `wealth * f_star * scale` on this trade?
-        # No, Kelly fraction f* is fraction of wealth to WAGER.
-        # In LMSR, cost ~ delta_q * price (roughly).
-        # Exact mapping from "fraction of wealth" to "delta_q" in LMSR is complex.
-        # Approximation: Cost ~= delta_q * price.
-        # So delta_q ~= (Wealth * f_star) / price.
-        
         for aid, f_star in desired_exposures.items():
             f_final = f_star * scale
             wager = wealth * f_final # Positive (long) or negative (short)
             
-            price = state.get_asset_price(aid)
-            price_safe = max(0.01, min(0.99, price))
+            asset = state.assets[aid]
+            b = state.liquidity_b
             
-            # Approx delta_q
-            # If Long: buying shares at ~price. Shares = Wager / Price
-            # If Short: selling shares (buying NO). Cost is similar.
+            # Use exact inverse cost function to determine shares for wager
+            if wager >= 0:
+                # Buying YES shares
+                delta_q = LMSRMarket.calculate_delta_q(
+                    asset.q_yes, asset.q_no, b, wager, is_yes_share=True
+                )
+            else:
+                # Buying NO shares (Shorting YES)
+                # We spend abs(wager) to buy NO shares
+                delta_q_no = LMSRMarket.calculate_delta_q(
+                    asset.q_yes, asset.q_no, b, abs(wager), is_yes_share=False
+                )
+                # In our convention, delta_q < 0 means buying NO shares
+                delta_q = -delta_q_no
             
-            # Refined approx using the log-price derivative:
-            # We want to move price towards belief? 
-            # Or just invest specific amount?
-            # Let's stick to the "Spend $X" logic.
-            
-            delta_q = wager / price_safe
-            
-            # Cap delta_q to avoid moving market too wildy in one go
-            # (Safety clamp)
+            # Cap delta_q to avoid moving market too wildly in one go
             if abs(delta_q) > 1000: 
                 delta_q = 1000 * (1 if delta_q > 0 else -1)
                 

@@ -11,15 +11,15 @@ class TestOrchestrator(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(orch.state.agents), 2)
         self.assertEqual(len(orch.state.assets), 2) # 2 candidates
         
-        # Initial prices should be 0.5
+        # Initial prices should be 0.5 (1/N for N=2)
         p0 = orch.state.get_asset_price("cand_0")
         self.assertAlmostEqual(p0, 0.5)
         
         # Round 1: Agent 0 bets on themselves
-        # Reduced belief to avoid immediate bankruptcy via "all-in" + tax
+        # Belief must be > p0 (0.5) to move price up.
         action_0 = AgentAction(
             agent_id="agent_0",
-            beliefs={"cand_0": 0.55} 
+            beliefs={"cand_0": 0.7} 
         )
         
         await orch.process_round([action_0])
@@ -70,6 +70,42 @@ class TestOrchestrator(unittest.IsolatedAsyncioTestCase):
         orch.state.round_num = 10
         summary_10 = orch.get_pretty_summary()
         self.assertIn("Round 10 Summary", summary_10)
+
+    async def test_symmetric_wealth_conservation(self):
+        """Verify that Whale wealth is perfectly conserved during its own trades."""
+        orch = Orchestrator("Test", n_agents=1, budget=1000.0)
+        await orch.initialize()
+        
+        initial_whale_wealth = orch.state.whale_wealth
+        
+        # Simulate a Whale active trade (deductive)
+        # Whale wants to buy 50 YES shares of cand_0
+        trades = [("cand_0", 50.0)]
+        orch._execute_trades("whale", trades)
+        
+        # Whale wealth should be EXACTLY the same (-cost + cost)
+        self.assertEqual(orch.state.whale_wealth, initial_whale_wealth)
+        # But price should have moved
+        self.assertTrue(orch.state.get_asset_price("cand_0") > 0.5)
+
+    async def test_agent_to_whale_transfer(self):
+        """Verify that agent payments are correctly transferred to the Whale."""
+        orch = Orchestrator("Test", n_agents=1, budget=1000.0)
+        await orch.initialize()
+        
+        initial_whale_wealth = orch.state.whale_wealth
+        initial_agent_wealth = orch.state.agents["agent_0"].wealth
+        
+        # Agent 0 buys 50 shares
+        trades = [("cand_0", 50.0)]
+        orch._execute_trades("agent_0", trades)
+        
+        agent_wealth_after = orch.state.agents["agent_0"].wealth
+        whale_wealth_after = orch.state.whale_wealth
+        
+        cost = initial_agent_wealth - agent_wealth_after
+        self.assertTrue(cost > 0)
+        self.assertAlmostEqual(whale_wealth_after, initial_whale_wealth + cost, places=5)
 
 if __name__ == '__main__':
     unittest.main()

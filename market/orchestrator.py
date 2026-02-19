@@ -71,11 +71,21 @@ class Orchestrator:
             async def setup_cand(c_dir, c_id, a_id):
                 # Run blocking shutil in a thread to not block the event loop
                 await asyncio.to_thread(self._clone_workspace, c_dir)
+                
+                # Initial Price: 1/N for candidates (Design 2.B.3)
+                import math
+                n = self.n_agents
+                b = self.state.liquidity_b
+                q_no = 0.0
+                if n > 1:
+                    q_no = b * math.log(n - 1)
+
                 self.state.assets[c_id] = MarketAsset(
                     id=c_id, 
                     type="CANDIDATE", 
                     description=f"Solution by {a_id}",
-                    code_path=c_dir # Point to ROOT of worktree
+                    code_path=c_dir, # Point to ROOT of worktree
+                    q_no=q_no
                 )
 
             tasks.append(setup_cand(cand_dir, cid, aid))
@@ -113,6 +123,14 @@ class Orchestrator:
         self.state.round_num += 1
         logging.info(f"--- Round {self.state.round_num} ---")
         
+        # 0. Update Liquidity at start of round (Design 4.H Step 5)
+        active_mkts = len(self.state.assets)
+        self.state.liquidity_b = LMSRMarket.calculate_liquidity(
+            self.state.whale_wealth, 
+            active_mkts, 
+            min_b=10.0
+        )
+
         # 1. Process Proposals (New Assets)
         for action in actions:
             for proposal in action.proposals:
@@ -132,18 +150,13 @@ class Orchestrator:
                                 logging.info(f"Agent {action.agent_id} updating code for {cid} ({p_type})")
                                 self._update_candidate_code(asset.code_path, proposal)
 
-        # 2. Oracle Execution
-        # Run all verifiers against all candidates
+        # 2. Oracle Execution (Design 4.H Step 2)
         await self._run_oracle()
         
         # 3. Mature Bonds (Unlock capital from previous rounds)
         self._mature_bonds()
         
-        # 4. Whale Logic (Active)
-        whale_trades = Whale.generate_trades(self.state)
-        self._execute_trades("whale", whale_trades)
-        
-        # 4. Agent Actions (Bets)
+        # 4. Agent Actions (Bets) - Execute before Whale to allow alpha capture
         for action in actions:
             agent_id = action.agent_id
             if agent_id not in self.state.agents:
@@ -157,25 +170,44 @@ class Orchestrator:
                     self.state
                 )
                 self._execute_trades(agent_id, trades)
-                
-        # 5. Apply Taxes & Check Bankruptcy
+
+        # 5. Whale Logic (Active Deductive) - Execute after agents (Design 4.H Step 7)
+        whale_trades = Whale.generate_trades(self.state)
+        self._execute_trades("whale", whale_trades)
+        
+        # 6. Apply Taxes & Check Bankruptcy (Net-Worth based)
         to_remove = []
         for aid, agent in self.state.agents.items():
             agent.wealth -= self.inference_tax
+            
+            # Bankruptcy Check (Design 2.C.6)
             if agent.wealth <= 0:
-                logging.info(f"Agent {aid} went bankrupt!")
-                to_remove.append(aid)
+                # Calculate current market value of all holdings (liquidation value)
+                liquidation_value = 0.0
+                liquidation_trades = []
+                for asset_id, q_shares in agent.shares.items():
+                    if q_shares != 0:
+                        liquidation_trades.append((asset_id, -q_shares))
+                
+                if liquidation_trades:
+                    logging.info(f"Agent {aid} is insolvent. Attempting mandatory liquidation...")
+                    self._execute_trades(aid, liquidation_trades)
+                
+                # If still bankrupt after liquidation
+                if agent.wealth <= 0:
+                    logging.info(f"Agent {aid} went bankrupt!")
+                    to_remove.append(aid)
+                else:
+                    logging.info(f"Agent {aid} survived bankruptcy via liquidation. Wealth: {agent.wealth:.2f}")
                 
         for aid in to_remove:
-            del self.state.agents[aid]
+            # Force liquidate any remaining bonds for this agent
+            agent_bonds = [b for b in self.state.bonds if b.agent_id == aid]
+            for bond in agent_bonds:
+                self._execute_trades(aid, [(bond.asset_id, -bond.q_shares)])
+                self.state.bonds.remove(bond)
             
-        # 6. Update Liquidity
-        active_mkts = len(self.state.assets)
-        self.state.liquidity_b = LMSRMarket.calculate_liquidity(
-            self.state.whale_wealth, 
-            active_mkts, 
-            min_b=10.0
-        )
+            del self.state.agents[aid]
 
     def _update_candidate_code(self, worktree_root: str, proposal: Dict):
         """Applies updates to candidate code via full rewrite or patch."""
@@ -453,24 +485,28 @@ class Orchestrator:
             asset.q_yes += d_yes
             asset.q_no += d_no
             
-            # Update Wealth
-            new_wealth = 0.0
+            # Update Wealth (Symmetric Zero-Sum Logic)
+            # 4a. Deduct cost from the Trader (Agent or Whale)
             if trader_id == "whale":
                 self.state.whale_wealth -= cost
-                new_wealth = self.state.whale_wealth
+            else:
+                self.state.agents[trader_id].wealth -= cost
                 
-                # Update Whale Portfolio
+            # 4b. Add cost back to the Market Maker (The Whale)
+            # This ensures that if the Whale is the trader, the net change is zero.
+            # If an agent is the trader, wealth is transferred from agent to whale.
+            self.state.whale_wealth += cost
+            
+            # Update Portfolio/Inventory Tracking
+            if trader_id == "whale":
                 current_shares = self.state.whale_shares.get(asset_id, 0.0)
                 self.state.whale_shares[asset_id] = current_shares + delta_q
             else:
-                self.state.agents[trader_id].wealth -= cost
-                new_wealth = self.state.agents[trader_id].wealth
-                
-                # Update Portfolio Tracking
                 current_shares = self.state.agents[trader_id].shares.get(asset_id, 0.0)
                 self.state.agents[trader_id].shares[asset_id] = current_shares + delta_q
             
-            logging.info(f"Trade Executed [{trader_id}]: Asset={asset_id}, Delta={delta_q:.2f} (d_yes={d_yes:.2f}, d_no={d_no:.2f}), Cost={cost:.2f}, NewWealth={new_wealth:.2f}, NewState(q_yes={asset.q_yes:.2f}, q_no={asset.q_no:.2f})")
+            p_after = self.state.get_asset_price(asset_id)
+            logging.info(f"Trade Executed [{trader_id}]: Asset={asset_id}, Delta={delta_q:.2f} (d_yes={d_yes:.2f}, d_no={d_no:.2f}), Cost={cost:.2f}, P_after={p_after:.4f}")
 
     def get_pretty_summary(self) -> str:
         lines = []
@@ -495,19 +531,51 @@ class Orchestrator:
 
     def get_final_report(self) -> str:
         """Generates a markdown report of the tournament results."""
-        # 1. Determine Winner
-        winner_id = ""
-        max_price = -1.0
-        
-        for aid, asset in self.state.assets.items():
-            if asset.type == "CANDIDATE":
-                p = self.state.get_asset_price(aid)
-                if p > max_price:
-                    max_price = p
-                    winner_id = aid
-        
-        if not winner_id:
+        # 1. Determine Winner (Design 2.D.WinnerSelection)
+        candidates = [a for a in self.state.assets.values() if a.type == "CANDIDATE"]
+        if not candidates:
             return "Tournament concluded with no candidates."
+            
+        # Get prices and sort
+        cand_prices = []
+        for c in candidates:
+            cand_prices.append((c.id, self.state.get_asset_price(c.id)))
+        
+        cand_prices.sort(key=lambda x: x[1], reverse=True)
+        
+        winner_id, max_price = cand_prices[0]
+        epsilon_tie = 0.01
+        
+        # Check for ties within epsilon
+        tied_candidates = [cid for cid, p in cand_prices if abs(p - max_price) < epsilon_tie]
+        
+        if len(tied_candidates) > 1:
+            logging.info(f"Tie detected between {tied_candidates}. Using failure count tiebreaker.")
+            # Tiebreaker: Lowest failure count on valid tests (P > 0.5)
+            best_cid = winner_id
+            min_failures = float('inf')
+            
+            valid_verifiers = [vid for vid, a in self.state.assets.items() 
+                              if a.type == "VERIFIER" and self.state.get_asset_price(vid) > 0.5]
+            
+            for cid in tied_candidates:
+                failures = 0
+                for vid in valid_verifiers:
+                    if self.state.test_failures.get(f"{vid}:{cid}"):
+                        failures += 1
+                
+                if failures < min_failures:
+                    min_failures = failures
+                    best_cid = cid
+                elif failures == min_failures:
+                    # If still tied, the one with the higher price wins
+                    current_best_p = next(p for cid_p, p in cand_prices if cid_p == best_cid)
+                    this_p = next(p for cid_p, p in cand_prices if cid_p == cid)
+                    if this_p > current_best_p:
+                        best_cid = cid
+            
+            winner_id = best_cid
+            max_price = next(p for cid_p, p in cand_prices if cid_p == winner_id)
 
         lines = [f"## Tournament Complete"]
         lines.append(f"**Winner:** {winner_id} (Market Confidence: {max_price:.1%})\n")

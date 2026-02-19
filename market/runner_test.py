@@ -29,20 +29,22 @@ class TestMarketRunner(unittest.IsolatedAsyncioTestCase):
         # Verify it ran 1 round
         self.assertEqual(runner.orchestrator.state.round_num, 1)
         
-    @patch('market.runner.Shark')
-    @patch('market.runner.socket.create_connection')
-    async def test_convergence_bankruptcy(self, MockSocket, MockShark):
-        MockSocket.return_value.__enter__.return_value = MagicMock()
-        runner = MarketRunner("Test", n_agents=2, budget=100.0, api_url="http://mock")
+        @patch('market.runner.Shark')
+        @patch('market.runner.socket.create_connection')
+        async def test_convergence_bankruptcy(self, MockSocket, MockShark):
+            MockSocket.return_value.__enter__.return_value = MagicMock()
+            budget = 100.0
+            runner = MarketRunner("Test", n_agents=2, budget=budget, api_url="http://mock")
         
-        # Manually initialize agents (simulating runner.initialize() without its side effects)
-        from market.core.state import AgentPortfolio
-        runner.orchestrator.state.agents["agent_0"] = AgentPortfolio(agent_id="agent_0", wealth=10.0)
-        runner.orchestrator.state.agents["agent_1"] = AgentPortfolio(agent_id="agent_1", wealth=10.0)
+            # Manually initialize agents (simulating runner.initialize() without its side effects)
+            from market.core.state import AgentPortfolio
+            # New threshold is 0.1 * B. For budget 100, threshold is 10.0.
+            # Set total wealth to 9.0 (sum of 4.5 + 4.5) to trigger bankruptcy convergence.
+            runner.orchestrator.state.agents["agent_0"] = AgentPortfolio(agent_id="agent_0", wealth=4.5)
+            runner.orchestrator.state.agents["agent_1"] = AgentPortfolio(agent_id="agent_1", wealth=4.5)
         
-        is_converged = runner.check_convergence()
-        self.assertTrue(is_converged)
-
+            is_converged = runner.check_convergence()
+            self.assertTrue(is_converged)
     @patch('market.runner.Shark')
     def test_convergence_stability(self, MockShark):
         runner = MarketRunner("Test", n_agents=2, budget=1000.0, api_url="http://mock")
