@@ -31,7 +31,7 @@ def main():
     run_parser.add_argument("--api-url", type=str, default="http://127.0.0.1:4096")
     run_parser.add_argument("--model", type=str, default="gemini-3-flash")
     run_parser.add_argument("--provider", type=str, default="opencode")
-    run_parser.add_argument("--target-file", type=str, help="Path to existing file to load into arena")
+    run_parser.add_argument("--json-logs", action="store_true", help="Output JSON logs to stdout instead of TUI")
     
     args = parser.parse_args()
 
@@ -52,17 +52,22 @@ def main():
             args.api_url, 
             model=args.model, 
             provider=args.provider, 
-            target_file=args.target_file,
             agent_timeout=args.timeout
         )
-        asyncio.run(runner.run_loop(args.rounds, stream_ui=True))
+        
+        async def run_tournament():
+            await runner.initialize(json_logs=args.json_logs)
+            await runner.run_loop(args.rounds, stream_ui=not args.json_logs, json_logs=args.json_logs)
+
+        asyncio.run(run_tournament())
         
         # Construct final output
         output = {
             "state": json.loads(runner.orchestrator.state.to_json()),
             "report": runner.orchestrator.get_final_report()
         }
-        print(json.dumps(output))
+        if not args.json_logs:
+            print(json.dumps(output))
 
 if __name__ == "__main__":
     main()

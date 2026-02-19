@@ -9,10 +9,15 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 from ..core.state import MarketState
 from ..orchestrator import AgentAction
 
-def log_retry_attempt(retry_state):
-    if retry_state.outcome.failed:
-        exc = retry_state.outcome.exception()
-        logging.warning(f"Retrying API call due to: {type(exc).__name__}: {exc}")
+class log_retry_attempt:
+    def __call__(self, retry_state):
+        if retry_state.outcome.failed:
+            exc = retry_state.outcome.exception()
+            logging.warning(f"Retrying API call due to: {type(exc).__name__}: {exc}")
+
+class LLMResponseError(Exception):
+    """Raised when the LLM returns an invalid or non-JSON response."""
+    pass
 
 class Shark:
     """
@@ -41,6 +46,7 @@ class Shark:
                     f.write(f"=== Session Created: {self.session.id} ===\n")
 
     def _log_interaction(self, prompt: str, response: Any, error: Optional[str] = None):
+        # Log to file
         if not self.log_path: return
         
         try:
@@ -111,11 +117,11 @@ Type 2: "VERIFIER" (Create test)
 """
 
     @retry(
-        retry=retry_if_exception_type(APITimeoutError),
+        retry=retry_if_exception_type((APITimeoutError, LLMResponseError)),
         stop=stop_after_attempt(5),
         wait=wait_exponential(multiplier=1, min=4, max=60),
         reraise=True,
-        before_sleep=log_retry_attempt
+        before_sleep=log_retry_attempt()
     )
     async def get_action(self, state: MarketState) -> AgentAction:
         """
@@ -149,56 +155,48 @@ Type 2: "VERIFIER" (Create test)
             msg = f"Shark {self.agent_id} got empty response. Response object: {response}"
             sys.stderr.write(msg + "\n")
             if hasattr(response, "info") and "error" in response.info:
-                raise RuntimeError(f"Shark {self.agent_id} API Error: {response.info['error']}")
-            raise RuntimeError(f"Shark {self.agent_id} returned empty content.")
+                raise LLMResponseError(f"Shark {self.agent_id} API Error: {response.info['error']}")
+            raise LLMResponseError(f"Shark {self.agent_id} returned empty content.")
         
-        # 3. Parse JSON
-        if "```json" in content:
-            content = content.split("```json")[1].split("```")[0].strip()
-        elif "```" in content:
-            content = content.split("```")[1].split("```")[0].strip()
-        else:
-            # Try to find JSON block manually if no markdown
-            start = content.find("{")
-            end = content.rfind("}")
-            if start != -1 and end != -1 and end > start:
-                content = content[start:end+1]
-            
+        # 3. Parse JSON using chompjs and json_repair for maximum robustness
         try:
-            data = json.loads(content)
-        except json.JSONDecodeError as e:
-            # Try to handle common LLM failure modes:
-            # 1. Extra text around the JSON block
-            # 2. Multiple objects (e.g. a todo list before the answer)
-            import re
+            from chompjs import parse_js_objects
+            from json_repair import loads as repair_loads
             
-            # Find all JSON-like objects
-            matches = re.findall(r'\{[^{}]*\}', content)
-            for m in reversed(matches): # Search from end, usually the answer is at the end
-                try:
-                    candidate = json.loads(m)
-                    if "beliefs" in candidate or "proposals" in candidate:
-                        data = candidate
-                        break
-                except:
-                    continue
-            else:
-                # Try finding the largest block starting with { and ending with }
-                start = content.find("{")
-                end = content.rfind("}")
-                if start != -1 and end != -1 and end > start:
-                    try:
-                        data = json.loads(content[start:end+1])
-                    except:
-                        raise RuntimeError(f"Shark {self.agent_id} returned invalid JSON: {content}") from e
-                else:
-                    raise RuntimeError(f"Shark {self.agent_id} returned invalid JSON: {content}") from e
+            # Find all potential JSON objects
+            # parse_js_objects is very good at extracting objects from noisy text
+            candidates = list(parse_js_objects(content))
+            
+            # If no candidates, try repairing the whole string
+            if not candidates:
+                repaired = repair_loads(content)
+                if isinstance(repaired, dict):
+                    candidates = [repaired]
+            
+            # Find the best candidate (usually the last one)
+            data = None
+            for cand in reversed(candidates):
+                if isinstance(cand, dict) and ("beliefs" in cand or "proposals" in cand):
+                    data = cand
+                    break
+            
+            if data is None:
+                raise LLMResponseError(f"Shark {self.agent_id} response missing required keys. Content: {content}")
+                
+        except Exception as e:
+            if isinstance(e, LLMResponseError):
+                raise e
+            raise LLMResponseError(f"Shark {self.agent_id} returned invalid JSON: {content}") from e
         
         return AgentAction(
             agent_id=self.agent_id,
             beliefs=data.get("beliefs", {}),
             proposals=data.get("proposals", [])
         )
+
+    async def close(self):
+        """Gracefully close the API client."""
+        await self.client.close()
 
     def _format_state_prompt(self, state: MarketState) -> str:
         # Create a concise summary of the market

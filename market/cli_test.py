@@ -14,6 +14,7 @@ class TestCLI(unittest.TestCase):
         # Use AsyncMock for coroutines
         from unittest.mock import AsyncMock
         mock_runner_instance.run_loop = AsyncMock()
+        mock_runner_instance.initialize = AsyncMock()
         
         mock_runner_instance.orchestrator.state.to_json.return_value = "{}"
         mock_runner_instance.orchestrator.get_final_report.return_value = "Report"
@@ -24,13 +25,13 @@ class TestCLI(unittest.TestCase):
             main()
             
         # Verify MarketRunner initialized correctly
-        MockRunner.assert_called_with("foo", 3, 1000.0, "http://127.0.0.1:4096", model="gemini-3-flash", provider="opencode", target_file=None)
+        MockRunner.assert_called_with("foo", 3, 1000.0, "http://127.0.0.1:4096", model="gemini-3-flash", provider="opencode", agent_timeout=300.0)
         
         # Verify loop called
-        mock_runner_instance.run_loop.assert_called_with(5, stream_ui=True)
+        mock_runner_instance.run_loop.assert_called_with(5, stream_ui=True, json_logs=False)
         
         # Verify loop called
-        mock_runner_instance.run_loop.assert_called_with(5, stream_ui=True)
+        mock_runner_instance.run_loop.assert_called_with(5, stream_ui=True, json_logs=False)
 
     @patch('market.cli.Orchestrator')
     def test_init_command(self, MockOrch):

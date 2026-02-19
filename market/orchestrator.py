@@ -22,7 +22,7 @@ class AgentAction:
     patch: Optional[str] = None # Code patch for their own candidate
 
 class Orchestrator:
-    def __init__(self, prompt: str, n_agents: int, budget: float = 1000.0, state: Optional[MarketState] = None, base_dir: str = "/tmp/market", target_file: Optional[str] = None):
+    def __init__(self, prompt: str, n_agents: int, budget: float = 1000.0, state: Optional[MarketState] = None, base_dir: str = "/tmp/market"):
         self.base_dir = base_dir
         self.worktrees_dir = os.path.join(self.base_dir, "worktrees")
         self.verifiers_dir = os.path.join(self.base_dir, "verifiers")
@@ -172,8 +172,10 @@ class Orchestrator:
         full_path = os.path.join(worktree_root, rel_path)
         
         try:
-            # Ensure dir exists if new file
-            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            # Ensure dir exists if new file in a subdirectory
+            dir_name = os.path.dirname(full_path)
+            if dir_name and dir_name != worktree_root:
+                os.makedirs(dir_name, exist_ok=True)
             
             if os.path.exists(full_path):
                 with open(full_path, "r") as f:
