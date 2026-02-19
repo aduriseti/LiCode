@@ -67,6 +67,7 @@ class MarketRunner:
         self.model = model
         self.provider = provider
         self.agent_timeout = agent_timeout
+        self.api_url = api_url # Store for UI
         
         self.log_buffer = deque(maxlen=20)
 
@@ -309,10 +310,10 @@ class MarketRunner:
             if live:
                 live.stop()
             
-            # DON'T close agents or servers - keep them alive for dashboard exploration
-            # close_tasks = [shark.close() for shark in self.sharks.values()]
-            # if close_tasks:
-            #     await asyncio.gather(*close_tasks, return_exceptions=True)
+            # Close agents but keep servers alive for dashboard exploration
+            close_tasks = [shark.close() for shark in self.sharks.values()]
+            if close_tasks:
+                await asyncio.gather(*close_tasks, return_exceptions=True)
             
         if json_logs:
              # Construct final output
@@ -327,17 +328,6 @@ class MarketRunner:
         
         # DON'T stop servers - let them persist for dashboard
         # self._stop_servers()
-
-    def _stop_servers(self):
-        """Terminates all agent server processes."""
-        for aid, proc in self.agent_servers.items():
-            logging.info(f"Stopping server for {aid}...")
-            proc.terminate()
-            try:
-                proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        self.agent_servers.clear()
 
     def check_convergence(self) -> bool:
         state = self.orchestrator.state

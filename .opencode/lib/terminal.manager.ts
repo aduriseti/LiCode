@@ -57,7 +57,11 @@ export class TerminalManager {
 
         if (attempt === 1 && this.helpers.has(agentId)) {
             const existing = this.helpers.get(agentId);
-            try { existing?.proc.kill(); } catch (e) {}
+            try { 
+                existing?.proc.kill(); 
+            } catch (e) {
+                this.log("warn", `[TERMINAL] Failed to kill existing helper for ${agentId}: ${e}`);
+            }
             this.helpers.delete(agentId);
         }
 
@@ -72,6 +76,12 @@ export class TerminalManager {
             stdio: ["ignore", "pipe", "pipe"],
             detached: true,
             env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor" }
+        });
+
+        // Forward helper stderr to dashboard log
+        child.stderr!.on("data", (chunk: Buffer) => {
+            const msg = chunk.toString().trim();
+            if (msg) this.log("debug", `[PTY-HELPER][${agentId}] ${msg}`);
         });
 
         let gotPort = false;
@@ -97,13 +107,6 @@ export class TerminalManager {
                 if (this.verbose) this.log("error", `[TERMINAL][${agentId}] Failed to parse helper output: ${stdoutBuf}`);
             }
         });
-
-        if (this.verbose) {
-            child.stderr!.on("data", (chunk: Buffer) => {
-                const clean = chunk.toString().replace(/[\u001b\u009b][\[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, "").trim();
-                if (clean) this.log("warn", `[TERMINAL-HELPER-ERR][${agentId}] ${clean.substring(0, 200)}`);
-            });
-        }
 
         child.on("exit", (code, signal) => {
             this.spawningAgents.delete(agentId);

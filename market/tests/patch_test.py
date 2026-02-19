@@ -23,7 +23,8 @@ class PatchTest(unittest.TestCase):
             "old_code": "return 1",
             "new_code": "return 2"
         }
-        self.orch._update_candidate_code(self.cand_path, proposal)
+        worktree_root = os.path.join(self.test_dir, "worktrees", "cand_0")
+        self.orch._update_candidate_code(worktree_root, proposal)
         
         with open(self.cand_path, "r") as f:
             content = f.read()
@@ -35,7 +36,8 @@ class PatchTest(unittest.TestCase):
             "old_code": "return 999",
             "new_code": "return 2"
         }
-        self.orch._update_candidate_code(self.cand_path, proposal)
+        worktree_root = os.path.join(self.test_dir, "worktrees", "cand_0")
+        self.orch._update_candidate_code(worktree_root, proposal)
         
         with open(self.cand_path, "r") as f:
             content = f.read()
@@ -51,7 +53,8 @@ class PatchTest(unittest.TestCase):
             "old_code": "print('hi')",
             "new_code": "print('bye')"
         }
-        self.orch._update_candidate_code(self.cand_path, proposal)
+        worktree_root = os.path.join(self.test_dir, "worktrees", "cand_0")
+        self.orch._update_candidate_code(worktree_root, proposal)
         
         # Should not change
         with open(self.cand_path, "r") as f:

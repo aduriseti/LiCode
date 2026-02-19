@@ -71,9 +71,15 @@ wss.on("connection", (ws) => {
             if (msg.type === "input") {
                 terminal.write(msg.data);
             } else if (msg.type === "resize" && msg.cols > 0 && msg.rows > 0) {
-                try { terminal.resize(msg.cols, msg.rows); } catch (e) {}
+                try { 
+                    terminal.resize(msg.cols, msg.rows); 
+                } catch (e) {
+                    console.error(`[PTY-HELPER] Terminal resize failed: ${e.message}`);
+                }
             }
-        } catch (e) {}
+        } catch (e) {
+            console.error(`[PTY-HELPER] Failed to parse message: ${e.message}`);
+        }
     });
 });
 

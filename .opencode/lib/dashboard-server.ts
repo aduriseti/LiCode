@@ -1,16 +1,40 @@
 import { createDashboardApp } from "./dashboard.app";
-import { TerminalManager } from "./terminal.manager";
+import { TerminalManager, type LogFn } from "./terminal.manager";
 import express from "express";
 import { EventSource } from "eventsource";
 import { exec } from "child_process";
+import fs from "fs";
 
 const { app, server, io, setupTerminalProxy } = createDashboardApp();
+
+// Parse log file from arguments if provided
+const logFilePath = process.argv.indexOf("--log-file") !== -1 
+    ? process.argv[process.argv.indexOf("--log-file") + 1] 
+    : null;
+
+// Logging helper to avoid polluting stdout when TUI is parsing JSON
+const log: LogFn = (level, msg) => {
+    const logLine = `[${new Date().toISOString()}][${level.toUpperCase()}] ${msg}\n`;
+    
+    // We use console.error for internal logging to keep stdout clean for the TUI 
+    // (which specifically parses the JSON port info from stdout).
+    console.error(logLine.trim());
+
+    // Also write to persistent log file if configured
+    if (logFilePath) {
+        try {
+            fs.appendFileSync(logFilePath, logLine);
+        } catch (e) {
+            // If file logging fails, we fallback to just stderr
+        }
+    }
+};
 
 // Middleware to parse JSON bodies
 app.use(express.json());
 
 // State
-const terminalManager = new TerminalManager(io, { verbose: true, log: (level, msg) => console.log(`[${level.toUpperCase()}] ${msg}`) });
+const terminalManager = new TerminalManager(io, { verbose: true, log });
 setupTerminalProxy(terminalManager);
 
 const activeStreams = new Map<string, EventSource>();
@@ -22,22 +46,31 @@ let dashboardClosed = false;
 const cleanup = () => {
     if (dashboardClosed) return;
     dashboardClosed = true;
-    console.log("[INFO] Dashboard closed, cleaning up resources...");
+    log("info", "Dashboard closed, cleaning up resources...");
     
     activeStreams.forEach(es => es.close());
     terminalManager.close();
 
     // Kill agent opencode serve processes by port
     for (const port of agentServerPorts) {
-        exec(`lsof -ti :${port} | xargs -r kill`, (err) => {
-            if (err) console.log(`[DEBUG] Failed to kill server on port ${port}: ${err.message}`);
-            else console.log(`[INFO] Killed agent server on port ${port}`);
+        exec(`lsof -ti :${port}`, (err, stdout) => {
+            if (err || !stdout) {
+                // lsof returns 1 if no PIDs found, or stdout might be empty
+                return;
+            }
+            const pids = stdout.trim().split('\n').filter(Boolean);
+            if (pids.length > 0) {
+                exec(`kill ${pids.join(' ')}`, (killErr) => {
+                    if (killErr) log("debug", `Failed to kill server on port ${port}: ${killErr.message}`);
+                    else log("info", `Killed agent server on port ${port}`);
+                });
+            }
         });
     }
     agentServerPorts.clear();
     
     server.close(() => {
-        console.log("[INFO] Server closed. Exiting process.");
+        log("info", "Server closed. Exiting process.");
         process.exit(0);
     });
 };
@@ -71,13 +104,15 @@ app.post('/api/agent', (req, res) => {
         return;
     }
 
-    console.log(`[INFO] Registering agent ${agent_id} at ${api_url}`);
+    log("info", `Registering agent ${agent_id} at ${api_url}`);
     
     // Track for cleanup
     try {
         const port = new URL(api_url).port;
         if (port) agentServerPorts.add(Number(port));
-    } catch (e) {}
+    } catch (e) {
+        log("error", `Failed to parse agent URL for cleanup: ${api_url} - ${e}`);
+    }
 
     sessionToAgent.set(session_id, agent_id);
     terminalManager.registerAgent(agent_id, api_url, session_id, arena_dir);
@@ -106,14 +141,16 @@ app.post('/api/agent', (req, res) => {
                             }
                         }
                     }
-                } catch (e) {}
+                } catch (e) {
+                    log("error", `Failed to parse EventSource message for ${agent_id}: ${e}`);
+                }
             };
-            es.onerror = () => {
-                 // specific error handling if needed
+            es.onerror = (err) => {
+                 log("error", `EventSource for ${api_url} encountered an error: ${JSON.stringify(err)}`);
             };
             activeStreams.set(api_url, es);
         } catch(err) {
-            console.error(`[ERROR] Failed to connect EventSource for ${agent_id}:`, err);
+            log("error", `Failed to connect EventSource for ${agent_id}: ${err}`);
         }
     }
 

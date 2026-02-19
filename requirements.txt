@@ -1,3 +1,5 @@
 opencode-ai
 tenacity
 rich
+chompjs
+json-repair

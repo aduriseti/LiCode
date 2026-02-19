@@ -4,6 +4,7 @@ import { spawn, type ChildProcess } from "child_process";
 import { type LogEvent } from "../lib/types";
 import open from "open";
 import path from "path";
+import fs from "fs";
 
 export const tournamentPlugin: Plugin = async ({ client, $ }) => {
   return {
@@ -22,9 +23,14 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
         async execute({ prompt, rounds, agents, model, provider, log_level, timeout }, ctx: ToolContext) {
             // 1. Start Dashboard Server (Detached)
             const dashboardServerPath = path.join(__dirname, "../lib/dashboard-server.ts");
+            const arenaDir = path.join(process.cwd(), ".arenas"); // Base arenas dir
+            const dashboardLogPath = path.join(arenaDir, "dashboard.log");
             
+            // Ensure arena dir exists for the log
+            if (!fs.existsSync(arenaDir)) fs.mkdirSync(arenaDir, { recursive: true });
+
             // Spawn detached process
-            const dashboardProcess = spawn("bun", [dashboardServerPath], {
+            const dashboardProcess = spawn("bun", [dashboardServerPath, "--log-file", dashboardLogPath], {
                 detached: true,
                 stdio: ["ignore", "pipe", "pipe"], // Capture stdout for port
                 env: { ...process.env } // Pass environment variables
@@ -68,10 +74,25 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
                 // Timeout after 10s
                 setTimeout(() => {
                     if (!resolved) {
-                        try { dashboardProcess.kill(); } catch(e){}
+                        try { 
+                            dashboardProcess.kill(); 
+                        } catch(e) {
+                            // Use log helper during plugin execution
+                            log("error", `[DASHBOARD-START] Failed to kill process on timeout: ${e}`);
+                        }
                         reject(new Error("Timeout waiting for dashboard URL"));
                     }
                 }, 10000);
+            });
+
+            // Forward Dashboard Server stderr to OpenCode logs while plugin is alive
+            dashboardProcess.stderr?.on("data", (data: Buffer) => {
+                const lines = data.toString().split("\n");
+                for (const line of lines) {
+                    if (line.trim()) {
+                        log("debug", `[DASHBOARD-SERVER] ${line.trim()}`);
+                    }
+                }
             });
 
             // Detach and unref so plugin can exit independently
@@ -138,8 +159,9 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(data)
-                    }).catch(() => {
-                        // Ignore errors if dashboard is closed
+                    }).catch((err) => {
+                        // Use the structured logger to avoid corrupting the TUI
+                        log("debug", `[DASHBOARD-COMM] Failed to send to ${endpoint}: ${err.message}`);
                     });
                 };
 

@@ -65,22 +65,31 @@ class TestMarketRunner(unittest.IsolatedAsyncioTestCase):
     @patch('market.runner.Shark')
     @patch('market.runner.socket.create_connection')
     @patch('market.runner.subprocess.Popen')
-    def test_server_home_env(self, MockPopen, MockSocket, MockShark):
+    async def test_server_home_env(self, MockPopen, MockSocket, MockShark):
         # Verify that HOME is overridden for isolation
         MockSocket.return_value.__enter__.return_value = MagicMock()
         MockPopen.return_value.poll.return_value = None
         
+        shark_instance = MockShark.return_value
+        shark_instance.initialize_session = AsyncMock()
+        shark_instance.session.id = "ses_mock_123"
+        
         runner = MarketRunner("Test", n_agents=1, budget=100.0, api_url="http://127.0.0.1")
+        await runner.initialize()
         
         # Check Popen calls
         self.assertTrue(MockPopen.called)
         args, kwargs = MockPopen.call_args
         
-        # Verify env has HOME set to arena dir
+        # Verify env has HOME set to agent home (not arena root)
         env = kwargs.get('env')
         self.assertIsNotNone(env)
-        self.assertEqual(env["HOME"], runner.arena_dir)
-        self.assertEqual(kwargs.get('cwd'), runner.arena_dir)
+        expected_home = os.path.join(runner.arena_dir, "homes", "agent_0")
+        self.assertEqual(env["HOME"], expected_home)
+        
+        # CWD should be the agent's worktree
+        expected_cwd = os.path.join(runner.arena_dir, "worktrees", "agent_0")
+        self.assertEqual(kwargs.get('cwd'), expected_cwd)
 
 if __name__ == '__main__':
     unittest.main()
