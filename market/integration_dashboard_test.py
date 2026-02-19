@@ -6,10 +6,12 @@ import shutil
 import tempfile
 import time
 import io
+import sys
+from collections import deque
 from unittest.mock import MagicMock, patch, AsyncMock
 from market.runner import MarketRunner
-from market.orchestrator import AgentAction
-from market.core.state import MarketState
+from market.orchestrator import AgentAction, Orchestrator
+from market.core.state import MarketState, MarketAsset, AgentPortfolio
 
 class IntegrationDashboardTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -26,7 +28,9 @@ class IntegrationDashboardTest(unittest.IsolatedAsyncioTestCase):
     @patch('market.runner.socket.create_connection')
     @patch('market.runner.asyncio.open_connection')
     @patch('market.runner.subprocess.Popen')
-    async def test_integration_flow_with_json_logs(self, MockPopen, MockAsyncSocket, MockSocket, MockShark):
+    @patch('market.orchestrator.Orchestrator._clone_workspace')
+    @patch('market.logic.oracle.Oracle.run_test', return_value="PASS")
+    async def test_integration_flow_with_json_logs(self, MockOracle, MockClone, MockPopen, MockAsyncSocket, MockSocket, MockShark):
         """
         Tests the integration between MarketRunner and the Dashboard's expected input (JSON logs).
         Mocks LLM (Shark) and OpenCode server.
@@ -41,6 +45,11 @@ class IntegrationDashboardTest(unittest.IsolatedAsyncioTestCase):
         MockPopen.return_value.__enter__.return_value.poll.return_value = None
         MockPopen.return_value.__enter__.return_value.communicate.return_value = (b"", b"")
         
+        # Mock Clone to just create the dir so checks pass
+        def side_effect_clone(dest):
+            os.makedirs(dest, exist_ok=True)
+        MockClone.side_effect = side_effect_clone
+        
         # 2. Setup Mock Shark (The LLM)
         # Agent 0 will propose a verifier that fails Agent 1
         agent_0_action = AgentAction(
@@ -48,10 +57,7 @@ class IntegrationDashboardTest(unittest.IsolatedAsyncioTestCase):
             beliefs={"agent_0_cand": 0.9, "agent_1_cand": 0.1},
             proposals=[{
                 "type": "VERIFIER",
-                "files": {
-                    "run.sh": "#!/bin/bash\\nexit 1", 
-                    "test.py": "print('fail')"
-                }
+                "path": "tests/v1"
             }]
         )
         # Agent 1 will just bet
@@ -90,6 +96,17 @@ class IntegrationDashboardTest(unittest.IsolatedAsyncioTestCase):
         # Intercept stdout to capture JSON logs
         with patch('sys.stdout', new_callable=io.StringIO) as mock_stdout:
             await runner.initialize(json_logs=True)
+            
+            # Setup verifier files in cand_0 worktree (since agent_0 proposes it)
+            # Orchestrator uses cand_{id} derived from agent_{id}
+            cand_0_dir = os.path.join(runner.orchestrator.worktrees_dir, "cand_0")
+            v1_dir = os.path.join(cand_0_dir, "tests", "v1")
+            os.makedirs(v1_dir, exist_ok=True)
+            run_sh = os.path.join(v1_dir, "run.sh")
+            with open(run_sh, "w") as f:
+                f.write("#!/bin/bash\nexit 1")
+            os.chmod(run_sh, 0o755)
+            
             await runner.run_loop(max_rounds=1, stream_ui=False, json_logs=True)
             output = mock_stdout.getvalue()
             
@@ -116,48 +133,90 @@ class IntegrationDashboardTest(unittest.IsolatedAsyncioTestCase):
             # Verify the verifier was created in the orchestrator
             self.assertEqual(len(runner.orchestrator.state.assets), 3)
 
-    @patch('market.runner.socket.create_connection')
-    @patch('market.runner.asyncio.open_connection')
-    @patch('market.runner.subprocess.Popen')
+    @patch('market.orchestrator.Orchestrator._clone_workspace')
     @patch('market.agents.shark.AsyncOpencode')
-    async def test_recovery_from_malformed_llm_json(self, MockClient, MockPopen, MockAsyncSocket, MockSocket):
+    @patch('market.runner.MarketRunner._start_agent_server')
+    @patch('market.runner.MarketRunner._find_free_port')
+    async def test_recovery_from_malformed_llm_json(self, MockPort, MockServer, MockClient, MockClone):
         """
-        Integration test verifying that the runner survives an agent returning non-JSON initially.
+        Test verifying that the runner survives an agent returning malformed JSON initially.
         """
-        mock_writer = MagicMock()
-        mock_writer.wait_closed = AsyncMock()
-        MockAsyncSocket.return_value = (MagicMock(), mock_writer)
+        MockClone.return_value = None
+        MockServer.return_value = MagicMock()
+        MockPort.return_value = 1234
         
-        MockSocket.return_value.__enter__.return_value = MagicMock()
-        MockPopen.return_value.poll.return_value = None
-        MockPopen.return_value.__enter__.return_value.poll.return_value = None
-        MockPopen.return_value.__enter__.return_value.communicate.return_value = (b"", b"")
-        
-        # Setup Mock Client
+        # 1. Setup Mock Client with recovery responses
         mock_client_inst = MockClient.return_value
         mock_client_inst.session.create = AsyncMock(return_value=MagicMock(id="ses_123"))
         mock_client_inst.close = AsyncMock()
         
         # Responses: 
-        # Shark 0 (R1): bad, then good (retry)
-        # Shark 1 (R1): good
-        res_0_bad = MagicMock(text="blabber")
-        res_0_good = MagicMock(text='{"beliefs": {"cand_0": 0.9}, "proposals": []}')
-        res_1_good = MagicMock(text='{"beliefs": {}, "proposals": []}')
-        
-        mock_client_inst.session.chat = AsyncMock(side_effect=[res_0_bad, res_0_good, res_1_good])
+        # Shark 0: bad, then good (retry)
+        res_bad = MagicMock(text="This is not JSON")
+        res_good = MagicMock(text='{"beliefs": {"cand_0": 0.5}}')
+        # We need 2 responses for shark 0 (bad+good) and 1 for shark 1
+        mock_client_inst.session.chat = AsyncMock(side_effect=[res_bad, res_good, res_good])
 
+        # 2. Setup Runner
         runner = MarketRunner(prompt="Test", n_agents=2, budget=100.0)
-        await runner.initialize(json_logs=True)
         
-        # Run 1 round.
-        # We need to patch tenacity wait to avoid delay
+        # 3. Run round with recovery
+        # Patch tenacity wait and asyncio sleep
         with patch('tenacity.nap.time.sleep'):
-            await runner.run_loop(max_rounds=1, stream_ui=False, json_logs=True)
+            with patch('asyncio.sleep', new_callable=AsyncMock):
+                await runner.initialize(json_logs=True)
+                await runner.run_loop(max_rounds=1, stream_ui=False, json_logs=True)
         
+        # Verify 
         self.assertEqual(runner.orchestrator.state.round_num, 1)
-        # 3 calls to chat: 2 for shark 0 (fail+retry), 1 for shark 1
+        # 3 calls: Shark 0 (bad + retry good), Shark 1 (good)
         self.assertEqual(mock_client_inst.session.chat.call_count, 3)
+        self.assertIn("agent_0", runner.orchestrator.state.agents)
+
+class TestDashboardFormatting(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        # Mock State
+        self.state = MarketState(
+            round_num=1,
+            liquidity_b=100.0,
+            whale_wealth=1000.0,
+            prompt="Test Prompt"
+        )
+        self.state.assets = {
+            "cand_0": MarketAsset(id="cand_0", type="CANDIDATE", description="Test Candidate"),
+            "v_123": MarketAsset(id="v_123", type="VERIFIER", description="Test Verifier")
+        }
+        self.state.agents = {
+            "agent_0": AgentPortfolio(agent_id="agent_0", wealth=500.0)
+        }
+        
+        # Initialize Orchestrator with mocked state
+        self.orchestrator = Orchestrator("Test", 1, 1000.0, state=self.state)
+        await self.orchestrator.initialize()
+
+    async def test_dashboard_content(self):
+        """Render the text dashboard to check for key content."""
+        output = self.orchestrator.get_pretty_summary()
+        
+        # Check Header
+        self.assertIn("Round 1", output)
+        # Note: Whitespace matching might be fragile, so check distinct parts
+        self.assertIn("Whale Wealth:", output)
+        self.assertIn("1000.00", output)
+        
+        # Check Assets
+        self.assertIn("cand_0", output)
+        self.assertIn("v_123", output)
+        
+        # Check Agents
+        self.assertIn("agent_0", output)
+        # 1000 is total budget, but agent has 500
+        # self.assertIn("1000.00", output) <- Removed this assumption as agent wealth is 500
+        self.assertIn("500.00", output)
+        
+        # Check Formatting (Plain text)
+        self.assertIn("--- Round 1 Summary ---", output)
+        self.assertIn("Market Prices:", output)
 
 if __name__ == '__main__':
     unittest.main()

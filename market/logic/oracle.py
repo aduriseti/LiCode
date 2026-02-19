@@ -3,7 +3,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
-from typing import Literal
+from typing import Literal, Optional
 
 ResultType = Literal["PASS", "FAIL", "TIMEOUT", "ERROR"]
 
@@ -13,34 +13,19 @@ class Oracle:
     """
     
     @staticmethod
-    async def run_test(candidate_path: str, verifier_dir: str, timeout: int = 5) -> ResultType:
-        """
-        Runs a verifier package against a candidate.
-        
-        Args:
-            candidate_path: Path to the solution file (e.g., solution.py)
-            verifier_dir: Path to the verifier directory containing run.sh
-            timeout: Max seconds to run
-            
-        Returns:
-            PASS (exit 0), FAIL (exit != 0), TIMEOUT, or ERROR
-        """
-        import asyncio
-        if not os.path.exists(candidate_path):
-            return "ERROR"
-        if not os.path.isdir(verifier_dir):
-            return "ERROR"
-            
-        run_sh_path = os.path.join(verifier_dir, "run.sh")
-        if not os.path.exists(run_sh_path):
-            return "ERROR"
-
-        # Create a unique temp directory for this execution
+    def _setup_sandbox(candidate_dir: str, verifier_dir: str) -> Optional[str]:
+        """Synchronous helper to setup the test sandbox."""
         temp_dir = os.path.join(tempfile.gettempdir(), f"market_exec_{uuid.uuid4().hex}")
         os.makedirs(temp_dir, exist_ok=True)
         
         try:
-            # 1. Copy verifier package contents to temp_dir
+            # 1. Copy ENTIRE candidate worktree to temp_dir
+            def ignore_agent_home(path, names):
+                return [".home", "__pycache__", ".git"] if any(x in names for x in [".home", "__pycache__", ".git"]) else []
+                
+            shutil.copytree(candidate_dir, temp_dir, dirs_exist_ok=True, ignore=ignore_agent_home)
+            
+            # 2. Overlay verifier package contents on top
             for item in os.listdir(verifier_dir):
                 s = os.path.join(verifier_dir, item)
                 d = os.path.join(temp_dir, item)
@@ -49,20 +34,53 @@ class Oracle:
                 else:
                     shutil.copy2(s, d)
             
-            # 2. Copy candidate to 'solution.py' so verifier can find it
-            dest_cand = os.path.join(temp_dir, "solution.py")
-            shutil.copy(candidate_path, dest_cand)
-            
             # 3. Ensure run.sh is executable
             local_run_sh = os.path.join(temp_dir, "run.sh")
             os.chmod(local_run_sh, 0o755)
             
+            return temp_dir
+        except Exception as e:
+            import logging
+            logging.error(f"Oracle Sandbox Setup Error: {e}")
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            return None
+
+    @staticmethod
+    async def run_test(candidate_dir: str, verifier_dir: str, timeout: int = 15) -> ResultType:
+        """
+        Runs a verifier package against a candidate worktree.
+        
+        Args:
+            candidate_dir: Path to the candidate's worktree root
+            verifier_dir: Path to the verifier directory containing run.sh
+            timeout: Max seconds to run
+            
+        Returns:
+            PASS (exit 0), FAIL (exit != 0), TIMEOUT, or ERROR
+        """
+        import asyncio
+        if not os.path.isdir(candidate_dir):
+            return "ERROR"
+        if not os.path.isdir(verifier_dir):
+            return "ERROR"
+            
+        run_sh_path = os.path.join(verifier_dir, "run.sh")
+        if not os.path.exists(run_sh_path):
+            return "ERROR"
+
+        # Offload blocking file IO to a thread
+        temp_dir = await asyncio.to_thread(Oracle._setup_sandbox, candidate_dir, verifier_dir)
+        
+        if not temp_dir:
+            return "ERROR"
+        
+        try:
             # 4. Run the verifier
-            # The verifier's run.sh is expected to handle execution and exit codes
             cmd = ["./run.sh"]
             
             import logging
-            logging.info(f"Oracle: Starting test {os.path.basename(verifier_dir)} on {os.path.basename(candidate_path)}")
+            logging.info(f"Oracle: Starting test {os.path.basename(verifier_dir)} on worktree {os.path.basename(candidate_dir)}")
             
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -73,7 +91,7 @@ class Oracle:
             
             try:
                 await asyncio.wait_for(process.wait(), timeout=timeout)
-                logging.info(f"Oracle: Finished test {os.path.basename(verifier_dir)} on {os.path.basename(candidate_path)}")
+                logging.info(f"Oracle: Finished test {os.path.basename(verifier_dir)} on {os.path.basename(candidate_dir)}")
                 
                 if process.returncode == 0:
                     return "PASS"
@@ -99,6 +117,6 @@ class Oracle:
                     pass
             return "ERROR"
         finally:
-            # Cleanup
+            # Cleanup (also offloaded to thread to avoid blocking on large deletes)
             if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir, ignore_errors=True)
+                await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)

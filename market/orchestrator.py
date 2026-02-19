@@ -19,8 +19,7 @@ from market.logic.oracle import Oracle
 class AgentAction:
     agent_id: str
     beliefs: Dict[str, float] = field(default_factory=dict)
-    proposals: List[Dict] = field(default_factory=list) # e.g. {"type": "VERIFIER", "code": "..."}
-    patch: Optional[str] = None # Code patch for their own candidate
+    proposals: List[Dict] = field(default_factory=list) # e.g. {"type": "VERIFIER", "path": "..."}
 
 class Orchestrator:
     def __init__(self, prompt: str, n_agents: int, budget: float = 1000.0, state: Optional[MarketState] = None, base_dir: str = "/tmp/market"):
@@ -123,40 +122,32 @@ class Orchestrator:
         self.state.round_num += 1
         logging.info(f"--- Round {self.state.round_num} ---")
         
-        # 0. Update Liquidity at start of round (Design 4.H Step 5)
-        active_mkts = len(self.state.assets)
-        self.state.liquidity_b = LMSRMarket.calculate_liquidity(
-            self.state.whale_wealth, 
-            active_mkts, 
-            min_b=10.0
-        )
+        # 0. Liquidity is now FIXED at budget/20.0 (set in __init__)
+        # No scaling or dynamic recalculation.
 
         # 1. Process Proposals (New Assets)
         for action in actions:
             for proposal in action.proposals:
                 p_type = proposal.get("type")
                 if p_type == "VERIFIER":
-                    vid = self._create_verifier(action.agent_id, proposal)
-                    if vid:
-                        logging.info(f"Agent {action.agent_id} proposed new verifier: {vid}")
-                
-                elif p_type == "CANDIDATE" or p_type == "PATCH":
-                    # Handle code updates
-                    if action.agent_id in self.state.agents:
-                        cid = f"cand_{action.agent_id.split('_')[-1]}"
-                        if cid in self.state.assets:
-                            asset = self.state.assets[cid]
-                            if asset.code_path:
-                                logging.info(f"Agent {action.agent_id} updating code for {cid} ({p_type})")
-                                self._update_candidate_code(asset.code_path, proposal)
+                    # Agent must have written files to their worktree first
+                    cid = f"cand_{action.agent_id.split('_')[-1]}"
+                    if cid in self.state.assets:
+                        candidate = self.state.assets[cid]
+                        source_path = proposal.get("path")
+                        if source_path and candidate.code_path:
+                            full_source = os.path.join(candidate.code_path, source_path)
+                            if os.path.isdir(full_source):
+                                vid = self._create_verifier_from_path(action.agent_id, full_source)
+                                if vid:
+                                    logging.info(f"Agent {action.agent_id} proposed new verifier: {vid}")
+                            else:
+                                logging.warning(f"Agent {action.agent_id} proposed verifier at non-existent path: {source_path}")
 
-        # 2. Oracle Execution (Design 4.H Step 2)
-        await self._run_oracle()
-        
-        # 3. Mature Bonds (Unlock capital from previous rounds)
+        # 2. Mature Bonds (Unlock capital from previous rounds)
         self._mature_bonds()
         
-        # 4. Agent Actions (Bets) - Execute before Whale to allow alpha capture
+        # 3. Agent Actions (Bets) - Execute before Oracle/Whale to allow alpha capture (Design 4.H Step 7)
         for action in actions:
             agent_id = action.agent_id
             if agent_id not in self.state.agents:
@@ -171,105 +162,145 @@ class Orchestrator:
                 )
                 self._execute_trades(agent_id, trades)
 
+        # 4. Oracle Execution (Design 4.H Step 2)
+        await self._run_oracle()
+
         # 5. Whale Logic (Active Deductive) - Execute after agents (Design 4.H Step 7)
         whale_trades = Whale.generate_trades(self.state)
         self._execute_trades("whale", whale_trades)
         
-        # 6. Apply Taxes & Check Bankruptcy (Net-Worth based)
+        # 6. INSTANT SETTLEMENT
+        # Mark-to-Market all belief-based trades at the end of the round.
+        # Locked bonds are EXCLUDED.
+        self._settle_all_bets()
+
+        # 7. Apply Taxes & Check Bankruptcy
         to_remove = []
         for aid, agent in self.state.agents.items():
             agent.wealth -= self.inference_tax
-            
-            # Bankruptcy Check (Design 2.C.6)
             if agent.wealth <= 0:
-                # Calculate current market value of all holdings (liquidation value)
-                liquidation_value = 0.0
-                liquidation_trades = []
-                for asset_id, q_shares in agent.shares.items():
-                    if q_shares != 0:
-                        liquidation_trades.append((asset_id, -q_shares))
-                
-                if liquidation_trades:
-                    logging.info(f"Agent {aid} is insolvent. Attempting mandatory liquidation...")
-                    self._execute_trades(aid, liquidation_trades)
-                
-                # If still bankrupt after liquidation
-                if agent.wealth <= 0:
-                    logging.info(f"Agent {aid} went bankrupt!")
-                    to_remove.append(aid)
-                else:
-                    logging.info(f"Agent {aid} survived bankruptcy via liquidation. Wealth: {agent.wealth:.2f}")
+                logging.info(f"Agent {aid} went bankrupt!")
+                to_remove.append(aid)
                 
         for aid in to_remove:
+            agent = self.state.agents[aid]
             # Force liquidate any remaining bonds for this agent
             agent_bonds = [b for b in self.state.bonds if b.agent_id == aid]
             for bond in agent_bonds:
+                # Proceed with liquidation trades. Cost will be negative (payout).
                 self._execute_trades(aid, [(bond.asset_id, -bond.q_shares)])
                 self.state.bonds.remove(bond)
             
+            # Transfer remaining estate to the Whale (Escheatment)
+            # This ensures zero-sum conservation when an agent is deleted.
+            if agent.wealth != 0:
+                logging.info(f"Agent {aid} estate of {agent.wealth:.2f} escheated to Whale.")
+                self.state.whale_wealth += agent.wealth
+                agent.wealth = 0.0
+                
             del self.state.agents[aid]
 
-    def _update_candidate_code(self, worktree_root: str, proposal: Dict):
-        """Applies updates to candidate code via full rewrite or patch."""
-        # Proposal must specify file_path relative to root
-        rel_path = proposal.get("file_path", "solution.py") # Default for back-compat
-        
-        # Prevent escaping worktree
-        if ".." in rel_path or rel_path.startswith("/"):
-            logging.error(f"Invalid file path: {rel_path}")
-            return
-            
-        full_path = os.path.join(worktree_root, rel_path)
-        
-        # If worktree_root is a file (common in tests), rel_path should be empty or we just use worktree_root
-        if os.path.isfile(worktree_root):
-            full_path = worktree_root
+    def _settle_all_bets(self):
+        """
+        Resolves all non-bond positions for the round by transferring their credit value
+        from the Whale to the Agents. Price discovery is preserved.
+        """
+        # Map of agent_id -> asset_id -> shares_to_keep (from bonds)
+        locked_shares = {}
+        for bond in self.state.bonds:
+            if bond.agent_id not in locked_shares:
+                locked_shares[bond.agent_id] = {}
+            locked_shares[bond.agent_id][bond.asset_id] = locked_shares[bond.agent_id].get(bond.asset_id, 0.0) + bond.q_shares
 
-        try:
-            # Ensure dir exists if new file
-            dir_name = os.path.dirname(full_path)
-            if dir_name and not os.path.exists(dir_name):
-                os.makedirs(dir_name, exist_ok=True)
-            
-            if os.path.exists(full_path) and os.path.isfile(full_path):
-                with open(full_path, "r") as f:
-                    content = f.read()
-            else:
-                content = ""
+        # 1. Settle Agents: Calculate payout for non-bond shares
+        for aid, agent in self.state.agents.items():
+            for asset_id, q_shares in list(agent.shares.items()):
+                locked = locked_shares.get(aid, {}).get(asset_id, 0.0)
+                exposure = q_shares - locked
                 
-            p_type = proposal.get("type")
-            if p_type == "CANDIDATE":
-                # Full rewrite
-                new_content = proposal.get("code", "")
-                with open(full_path, "w") as f:
-                    f.write(new_content)
-                logging.info(f"Updated {rel_path} via CANDIDATE (overwrite)")
+                if abs(exposure) > 0.0001:
+                    asset = self.state.assets[asset_id]
+                    # Calculate fair payout value without moving the price
+                    payout = LMSRMarket.calculate_payout(
+                        exposure, 
+                        asset.q_yes, 
+                        asset.q_no, 
+                        self.state.liquidity_b
+                    )
                     
-            elif p_type == "PATCH":
-                # Search and Replace
-                old_code = proposal.get("old_code", "")
-                new_code = proposal.get("new_code", "")
-                
-                if not old_code:
-                    # If file is empty, maybe append?
-                    # Strict patch: if old_code not found, fail.
-                    logging.warning("PATCH failed: 'old_code' is empty.")
-                    return
+                    # TRANSFER VALUE: Whale pays Agent
+                    agent.wealth += payout
+                    self.state.whale_wealth -= payout
+                    
+                    # Clear the exposure from agent
+                    if abs(locked) < 0.0001:
+                        del agent.shares[asset_id]
+                    else:
+                        agent.shares[asset_id] = locked
+                    
+                    if abs(payout) > 0.0001:
+                        logging.info(f"Settlement: Agent {aid} received {payout:.2f} payout for {asset_id} position ({exposure:.2f} shares)")
 
-                if content.count(old_code) == 0:
-                    logging.warning(f"PATCH failed: 'old_code' not found in {rel_path}.")
-                    return
-                elif content.count(old_code) > 1:
-                    logging.warning(f"PATCH failed: 'old_code' found multiple times in {rel_path}.")
-                    return
-                    
-                new_content = content.replace(old_code, new_code)
-                with open(full_path, "w") as f:
-                    f.write(new_content)
-                logging.info(f"Updated {rel_path} via PATCH")
-                    
-        except Exception as e:
-            logging.error(f"Failed to update code {full_path}: {e}")
+    def _create_verifier_from_path(self, agent_id: str, source_path: str) -> Optional[str]:
+        """Creates a verifier package by copying from agent's worktree."""
+        import hashlib
+        
+        if not os.path.exists(os.path.join(source_path, "run.sh")):
+            logging.warning(f"Verifier at {source_path} missing run.sh")
+            return None
+            
+        # Deterministic ID based on content of directory
+        # We'll just hash the run.sh for speed, ideally should hash all
+        with open(os.path.join(source_path, "run.sh"), "rb") as f:
+            content_hash = hashlib.md5(f.read()).hexdigest()[:8]
+            
+        vid = f"v_{content_hash}"
+        if vid in self.state.assets: return vid 
+        
+        v_dir = os.path.join(self.verifiers_dir, vid)
+        if os.path.exists(v_dir):
+            shutil.rmtree(v_dir)
+            
+        shutil.copytree(source_path, v_dir)
+        os.chmod(v_dir, 0o755)
+        
+        # Ensure executable
+        os.chmod(os.path.join(v_dir, "run.sh"), 0o755)
+            
+        # Write metadata.json
+        with open(os.path.join(v_dir, "metadata.json"), "w") as f:
+            json.dump({"proposer": agent_id, "timestamp": time.time()}, f)
+            
+        # Register in Market
+        self.state.assets[vid] = MarketAsset(
+            id=vid,
+            type="VERIFIER",
+            description=f"Verifier by {agent_id}",
+            test_path=v_dir
+        )
+        
+        # Bond logic (Force buy YES shares)
+        if agent_id in self.state.agents:
+            agent = self.state.agents[agent_id]
+            # Use Strategy to calculate bond size (buying YES shares)
+            bond_trades = Strategy.beliefs_to_trades(
+                {vid: 1.0 - self.epsilon}, 
+                agent.wealth, 
+                self.state
+            )
+            if bond_trades:
+                self._execute_trades(agent_id, bond_trades)
+                q_shares = agent.shares.get(vid, 0.0)
+                if q_shares > 0:
+                    self.state.bonds.append(MarketBond(
+                        agent_id=agent_id,
+                        asset_id=vid,
+                        q_shares=q_shares,
+                        unlock_round=self.state.round_num + self.bond_lock_period
+                    ))
+                    logging.info(f"Created bond for {agent_id} on {vid}: {q_shares:.2f} shares")
+
+        return vid
 
     def _create_verifier(self, agent_id: str, proposal: Dict) -> Optional[str]:
         """Creates a verifier package in the filesystem."""
@@ -304,6 +335,11 @@ class Orchestrator:
             fpath = os.path.join(v_dir, fname)
             # Prevent directory traversal
             if ".." in fname or fname.startswith("/"): continue
+            
+            # Ensure subdirectories exist if fname has them
+            f_dirname = os.path.dirname(fpath)
+            if f_dirname and not os.path.exists(f_dirname):
+                os.makedirs(f_dirname, exist_ok=True)
             
             if fname == "run.sh":
                 if not content.startswith("#!"):
@@ -367,12 +403,9 @@ class Orchestrator:
             for c in candidates:
                 if not v.test_path or not c.code_path: continue
                 
-                # Strategy: If candidate is a directory, we pass 'solution.py' inside it.
-                cand_file = c.code_path
-                if os.path.isdir(cand_file):
-                    cand_file = os.path.join(cand_file, "solution.py")
-                
-                tasks.append(Oracle.run_test(cand_file, v.test_path))
+                # Pass the worktree root directly to the Oracle
+                # The Oracle will handle copying the full tree and running the verifier
+                tasks.append(Oracle.run_test(c.code_path, v.test_path))
                 task_info.append((v, c))
 
         if not tasks:
@@ -486,24 +519,17 @@ class Orchestrator:
             asset.q_no += d_no
             
             # Update Wealth (Symmetric Zero-Sum Logic)
-            # 4a. Deduct cost from the Trader (Agent or Whale)
-            if trader_id == "whale":
-                self.state.whale_wealth -= cost
-            else:
+            if trader_id != "whale":
+                # Agents pay the Market Maker (The Whale)
                 self.state.agents[trader_id].wealth -= cost
+                self.state.whale_wealth += cost
                 
-            # 4b. Add cost back to the Market Maker (The Whale)
-            # This ensures that if the Whale is the trader, the net change is zero.
-            # If an agent is the trader, wealth is transferred from agent to whale.
-            self.state.whale_wealth += cost
-            
-            # Update Portfolio/Inventory Tracking
-            if trader_id == "whale":
-                current_shares = self.state.whale_shares.get(asset_id, 0.0)
-                self.state.whale_shares[asset_id] = current_shares + delta_q
-            else:
+                # Update Agent Portfolio
                 current_shares = self.state.agents[trader_id].shares.get(asset_id, 0.0)
                 self.state.agents[trader_id].shares[asset_id] = current_shares + delta_q
+            
+            # Whale trades only move the global pool (the MM inventory).
+            # No internal wealth transfer is needed because Whale wealth IS the MM pool.
             
             p_after = self.state.get_asset_price(asset_id)
             logging.info(f"Trade Executed [{trader_id}]: Asset={asset_id}, Delta={delta_q:.2f} (d_yes={d_yes:.2f}, d_no={d_no:.2f}), Cost={cost:.2f}, P_after={p_after:.4f}")

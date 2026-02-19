@@ -66,54 +66,49 @@ class Shark:
     def _build_system_prompt(self) -> str:
         cid = f"cand_{self.agent_id.split('_')[-1]}"
         return f"""You are Agent {self.agent_id}, a strategic software engineer participating in a Logical Induction Market Tournament.
-Your Goal: Win the tournament by producing the code that BEST satisfies the User's Problem Statement and profiting from accurate predictions.
-Your assigned candidate solution is "{cid}".
+Your Goal: Win the tournament by producing the project that BEST satisfies the User's Problem Statement and profiting from accurate predictions.
+Your assigned candidate solution is the ENTIRE worktree "{cid}".
 
 **The Environment:**
-- You are operating in a cloned workspace of the user's project.
-- You have WRITE access ONLY to your assigned workspace ("{cid}"). You cannot modify other agents' code or the base system.
-- The market evaluates "Code Quality" based on which Candidate passes the most "Valid Verifiers" (tests).
-- **Verifiers** are test scripts proposed by agents. The market decides if a verifier is "Valid" (correctly tests the requirement) based on trading.
+- **Read Access:** You can read files in ANY candidate's worktree to analyze rival solutions.
+- **Write Access:** You can ONLY modify your own worktree ("{cid}").
+- **Modifications:** You have direct write access. Use your tools (e.g. `write_file`) to edit your code. Do NOT return file content in your JSON response.
 
-**Your Capabilities:**
-1. **Explore:** You can read any file in your workspace (provided in the context).
-2. **Modify:** You can PATCH any file or CREATE new files to implement the solution.
-3. **Verify:** You can propose new VERIFIERS (tests) to prove your code works or to expose bugs in others.
+**The Market & Verification:**
+- **Verifiers:** You propose tests (`VERIFIER` packages) to prove your code works or expose bugs in others.
+- **Creation:** To propose a Verifier:
+    1. Create a directory in your worktree (e.g., `tests/v1`).
+    2. Write your test files (must include `run.sh`) into that directory.
+    3. Return a `VERIFIER` proposal in your JSON pointing to that path.
+- **Execution:** The system will copy that directory to the central registry and run it against all candidates.
+    1. The system creates a clean sandbox.
+    2. It copies the target Candidate's *entire worktree* into the sandbox.
+    3. It overlays your Verifier files (e.g. `run.sh`) into the root.
+    4. It executes `./run.sh`.
+    **Implication:** Your `run.sh` executes **inside** a copy of the candidate's project. You can access their `main.py` directly as `./main.py`.
+- **Scope:** Verifiers can test Logic, Performance, and Stability.
+- **Self-Verification:** Your verifier MUST pass on your own candidate! If it fails, you look incompetent.
 
-**Strategy:**
-- **Implement:** Write code that solves the user's problem. Do not limit yourself to one file unless restricted by the problem.
-- **Test:** Write robust tests (Verifiers) that pass on your code but fail on broken code.
-- **Bet:** High confidence (0.9+) means you believe a candidate is good or a test is valid. Low confidence means the opposite.
+**Critical Rule: The Consensus Interface**
+- **The Contract:** You must implement the interface defined or implied by the Problem Statement (e.g., "script must be named `main.py`", "server must listen on port 3000").
+- **Portability:** Your Verifier MUST NOT import internal code from your own solution (e.g., `from my_utils import func`). It must test the **Observable Behavior** of the project (e.g., running the CLI, making HTTP requests, checking output files).
+- **Good vs Bad Failures:**
+    - **GOOD:** Your test fails on Rival B because their logic is wrong.
+    - **BAD:** Your test fails on Rival B because you hardcoded `import agent_0_utils` which they don't have.
 
 **Output Format:**
-You must output a single JSON object. Do not include markdown formatting like ```json ... ``` outside of the block if possible, but the parser is robust.
+You must output a single JSON object.
 
 {{
   "beliefs": {{
     "cand_X": 0.0-1.0, // Probability that Candidate X is the BEST solution
-    "v_HASH": 0.0-1.0  // Probability that Verifier HASH is a VALID test
+    "v_HASH": 0.0-1.0  // Probability that Verifier HASH is a VALID test of the contract
   }},
   "proposals": [
-    // Action 1: Modify Code
-    {{
-      "type": "PATCH",
-      "file_path": "path/to/file.py", // Relative to root
-      "old_code": "exact string to replace",
-      "new_code": "new string"
-    }},
-    // OR Full Rewrite
-    {{
-      "type": "CANDIDATE",
-      "file_path": "path/to/new_or_existing_file.py",
-      "code": "full content of file"
-    }},
-    // Action 2: Create Test (Verifier)
+    // Register a Verifier you have already written to your disk
     {{
       "type": "VERIFIER",
-      "files": {{
-        "run.sh": "#!/bin/bash\\npython3 test_feature.py", // Entry point (exit 0 = pass)
-        "test_feature.py": "import ..."
-      }}
+      "path": "tests/my_new_test" // Relative path to directory containing run.sh
     }}
   ]
 }}
@@ -244,64 +239,68 @@ You must output a single JSON object. Do not include markdown formatting like ``
 
         lines.append("\n=== Candidate Code Changes (Diffs) ===")
         
-        # 1. Get list of files to compare (respecting .gitignore)
-        try:
-            res = subprocess.run(
-                ["git", "ls-files", "-co", "--exclude-standard"],
-                capture_output=True, text=True, check=True
-            )
-            project_files = res.stdout.splitlines()
-        except Exception as e:
-            logging.warning(f"Failed to get project files via git ls-files: {e}")
-            project_files = []
-
         async def get_candidate_diff(aid, asset) -> str:
             if not asset.code_path or not os.path.exists(asset.code_path):
                 return f"\n--- {aid} Diff ---\n(Workspace not available)\n------------------"
             
-            file_diffs = []
-            tasks = []
-            import shlex
+            # Efficient Project-Wide Diff using Option A:
+            # 1. diff -urN: Recursive, handle new/deleted files
+            # 2. sed logic: 
+            #    - When we see 'diff -urN', reset counter
+            #    - If counter < 100, print line and increment
+            #    - If counter == 100, print '[Truncated]' and stop printing for this file
+            # 3. Exclude noisy paths
             
-            # For each project file, run an individual diff if it exists in the candidate worktree
-            for f in project_files:
-                cand_file = os.path.join(asset.code_path, f)
-                if os.path.isfile(cand_file):
-                    # -c core.filemode=false: Natively ignore permission changes
-                    # --no-index: Compare files on disk
-                    # sed: Hide the absolute candidate path
-                    # head -n 100: Truncate each individual file diff
-                    f_q = shlex.quote(f)
-                    cand_file_q = shlex.quote(cand_file)
-                    cmd = f"git -c core.filemode=false diff --no-index --no-color --src-prefix=a/ --dst-prefix=b/ {f_q} {cand_file_q} | sed 's|{asset.code_path}||g' | head -n 100"
+            exclude_args = []
+            for pattern in [".git", ".arenas", "__pycache__", "node_modules", ".home", "*.log", "*.db", ".pytest_cache"]:
+                exclude_args.extend(["--exclude", pattern])
+
+            cmd = [
+                "diff", "-urN"
+            ] + exclude_args + [
+                ".", asset.code_path
+            ]
+            
+            # The sed script tracks state to truncate per-file
+            # /^diff / matches the start of a new file's diff
+            sed_script = '/^diff / { x; s/.*/0/; x; }; x; /^[0-9][0-9]*$/ { s/^99$/100/; t trunc; s/$/1/; x; p; d; :trunc; s/.*/truncated/; i\\... [File Truncated at 100 lines] ...\n; d; }; x; d'
+            # Simpler approach: use python to handle the stream if sed is too cryptic
+            
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                
+                # We'll parse the output in Python to ensure per-file truncation is correct
+                stdout_lines = []
+                count = 0
+                while True:
+                    line_bytes = await process.stdout.readline()
+                    if not line_bytes: break
+                    line = line_bytes.decode(errors='replace')
                     
-                    async def run_diff(command, filename):
-                        process = await asyncio.create_subprocess_shell(
-                            command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                        )
-                        try:
-                            stdout, _ = await asyncio.wait_for(process.communicate(), timeout=5)
-                            return stdout.decode(errors='replace').strip(), filename
-                        except Exception as e:
-                            try: process.kill(); await process.wait()
-                            except: pass
-                            return f"[Error generating diff for {filename}: {e}]", filename
-
-                    tasks.append(run_diff(cmd, f))
-
-            if not tasks:
-                return f"\n--- {aid} Diff ---\n(Candidate exactly matches base project - no changes made yet)\n------------------"
-
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for result in results:
-                if isinstance(result, tuple) and result[0]:
-                    file_diffs.append(result[0])
-            
-            full_diff = "\n".join(file_diffs).strip()
-            if full_diff:
-                return f"\n--- {aid} Diff ---\n{full_diff}\n------------------"
-            else:
-                return f"\n--- {aid} Diff ---\n(Candidate exactly matches base project - no changes made yet)\n------------------"
+                    if line.startswith("diff -urN"):
+                        count = 0
+                        stdout_lines.append(line)
+                    elif count < 100:
+                        stdout_lines.append(line)
+                        count += 1
+                        if count == 100:
+                            stdout_lines.append("... [File Truncated at 100 lines] ...\n")
+                
+                await process.wait()
+                diff_text = "".join(stdout_lines).strip()
+                
+                if diff_text:
+                    # Cleanup: Remove absolute paths from headers to keep it clean for LLM
+                    diff_text = diff_text.replace(asset.code_path, "")
+                    return f"\n--- {aid} Diff ---\n{diff_text}\n------------------"
+                else:
+                    return f"\n--- {aid} Diff ---\n(Candidate exactly matches base project - no changes made yet)\n------------------"
+            except Exception as e:
+                return f"\n--- {aid} Diff ---\n[Error generating diff: {e}]\n------------------"
 
         if state.assets:
             diff_results = await asyncio.gather(*[

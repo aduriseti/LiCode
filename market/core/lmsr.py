@@ -135,3 +135,26 @@ class LMSRMarket:
         # ln(2) approx 0.693147
         derived_b = (0.5 * whale_wealth) / (active_markets * math.log(2))
         return max(min_b, derived_b)
+
+    @staticmethod
+    def calculate_payout(q_agent: float, q_yes_pool: float, q_no_pool: float, b: float) -> float:
+        """
+        Calculates the credit value of q_agent shares if they were sold back to the pool.
+        This is the difference in the cost function if the pool's shares were reduced by q_agent.
+        Formula: Cost(Q_pool) - Cost(Q_pool - q_agent)
+        """
+        if abs(q_agent) < 1e-9:
+            return 0.0
+            
+        current_cost = LMSRMarket.cost_function(q_yes_pool, q_no_pool, b)
+        
+        # If agent owns q_agent 'net' shares, it means they have a claim on the YES pool
+        # (if q_agent > 0) or the NO pool (if q_agent < 0).
+        if q_agent > 0:
+            # Payout for selling YES shares
+            reduced_cost = LMSRMarket.cost_function(q_yes_pool - q_agent, q_no_pool, b)
+        else:
+            # Payout for selling NO shares (q_agent is negative, so we subtract it)
+            reduced_cost = LMSRMarket.cost_function(q_yes_pool, q_no_pool + q_agent, b)
+            
+        return current_cost - reduced_cost
