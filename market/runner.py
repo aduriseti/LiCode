@@ -172,10 +172,13 @@ class MarketRunner:
         env = os.environ.copy()
         env["HOME"] = agent_home
         
+        agent_log = os.path.join(agent_dir, "opencode_serve.log")
+        log_file = open(agent_log, "w")
+        
         proc = subprocess.Popen(
             ["opencode", "serve", "--port", str(port), "--hostname=127.0.0.1"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=log_file,
+            stderr=log_file,
             cwd=agent_dir,
             env=env
         )

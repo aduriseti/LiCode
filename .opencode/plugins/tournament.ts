@@ -46,6 +46,12 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
                 env: { ...process.env, DASHBOARD_PORT: String(port) }
             });
 
+            // Capture dashboard errors/logs for system view
+            dashboardProcess.stderr?.on("data", (data: Buffer) => {
+                const msg = data.toString();
+                client.app.log({ body: { service: "dashboard-server", level: "info", message: msg } }).catch(() => {});
+            });
+
             // Unref immediately so plugin can exit independently
             dashboardProcess.unref();
 
@@ -109,7 +115,7 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
                 
                 const args: string[] = [
                     "-m", "market.cli",
-                    "--log-level", log_level,
+                    "--log-level", log_level.toUpperCase(),
                     "run",
                     "--prompt", prompt,
                     "--rounds", String(rounds),
@@ -188,14 +194,8 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
                                     sendToDashboard('/api/log', event);
                                 }
                             } catch (e: unknown) {
-                                const err = e as Error;
-                                client.app.log({
-                                    body: {
-                                        service: "tournament-tool",
-                                        level: "debug",
-                                        message: `Failed to parse JSON: ${err.message}`
-                                    }
-                                }).catch(() => {});
+                                // If not JSON, log as raw info to app logs
+                                log("info", `[PYTHON STDOUT] ${line}`);
                             }
                         }
                     }
@@ -203,6 +203,7 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
 
                 child.stderr?.on("data", (data: Buffer) => {
                     const msg: string = data.toString();
+                    log("error", `[PYTHON STDERR] ${msg}`);
                     sendToDashboard('/api/log', { type: 'log', message: `[STDERR] ${msg}` });
                 });
 

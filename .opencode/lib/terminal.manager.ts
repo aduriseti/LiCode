@@ -81,7 +81,7 @@ export class TerminalManager {
         // Forward helper stderr to dashboard log
         child.stderr!.on("data", (chunk: Buffer) => {
             const msg = chunk.toString().trim();
-            if (msg) this.log("debug", `[PTY-HELPER][${agentId}] ${msg}`);
+            if (msg) this.log("error", `[PTY-HELPER-ERROR][${agentId}] ${msg}`);
         });
 
         let gotPort = false;
