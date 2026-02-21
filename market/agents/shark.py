@@ -240,75 +240,81 @@ You must output a single JSON object.
         lines.append("\n=== Candidate Code Changes (Diffs) ===")
         
         async def get_candidate_diff(aid, asset) -> str:
-            if not asset.code_path or not os.path.exists(asset.code_path):
-                return f"\n--- {aid} Diff ---\n(Workspace not available)\n------------------"
-            
-            # Efficient Project-Wide Diff using Option A:
-            # 1. diff -urN: Recursive, handle new/deleted files
-            # 2. sed logic: 
-            #    - When we see 'diff -urN', reset counter
-            #    - If counter < 100, print line and increment
-            #    - If counter == 100, print '[Truncated]' and stop printing for this file
-            # 3. Exclude noisy paths
-            
-            exclude_args = []
-            for pattern in [".git", ".arenas", "__pycache__", "node_modules", ".home", "*.log", "*.db", ".pytest_cache"]:
-                exclude_args.extend(["--exclude", pattern])
-
-            cmd = [
-                "diff", "-urN"
-            ] + exclude_args + [
-                ".", asset.code_path
-            ]
-            
-            # The sed script tracks state to truncate per-file
-            # /^diff / matches the start of a new file's diff
-            sed_script = '/^diff / { x; s/.*/0/; x; }; x; /^[0-9][0-9]*$/ { s/^99$/100/; t trunc; s/$/1/; x; p; d; :trunc; s/.*/truncated/; i\\... [File Truncated at 100 lines] ...\n; d; }; x; d'
-            # Simpler approach: use python to handle the stream if sed is too cryptic
+            if not asset.code_path or not os.path.isdir(asset.code_path):
+                return f"--- {aid} Diff ---\n(Workspace not available)"
             
             try:
-                process = await asyncio.create_subprocess_exec(
-                    *cmd,
+                # Use Shadow Git: Stage changes -> Diff against Baseline
+                # We need to stage current changes first to capture them
+                # Note: We do NOT commit, just update the index for the diff
+                proc_add = await asyncio.create_subprocess_shell(
+                    "git add .", 
+                    cwd=asset.code_path,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL
+                )
+                await proc_add.wait()
+                
+                # Run git diff --cached HEAD
+                proc_diff = await asyncio.create_subprocess_exec(
+                    "git", "diff", "--cached", "HEAD",
+                    cwd=asset.code_path,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
+                stdout, stderr = await proc_diff.communicate()
                 
-                # We'll parse the output in Python to ensure per-file truncation is correct
-                stdout_lines = []
-                count = 0
-                while True:
-                    line_bytes = await process.stdout.readline()
-                    if not line_bytes: break
-                    line = line_bytes.decode(errors='replace')
-                    
-                    if line.startswith("diff -urN"):
-                        count = 0
-                        stdout_lines.append(line)
-                    elif count < 100:
-                        stdout_lines.append(line)
-                        count += 1
-                        if count == 100:
-                            stdout_lines.append("... [File Truncated at 100 lines] ...\n")
+                if proc_diff.returncode != 0:
+                    return f"--- {aid} Diff ---\n(Error generating diff: {stderr.decode()})"
                 
-                await process.wait()
-                diff_text = "".join(stdout_lines).strip()
-                
-                if diff_text:
-                    # Cleanup: Remove absolute paths from headers to keep it clean for LLM
-                    diff_text = diff_text.replace(asset.code_path, "")
-                    return f"\n--- {aid} Diff ---\n{diff_text}\n------------------"
-                else:
-                    return f"\n--- {aid} Diff ---\n(Candidate exactly matches base project - no changes made yet)\n------------------"
-            except Exception as e:
-                return f"\n--- {aid} Diff ---\n[Error generating diff: {e}]\n------------------"
+                full_diff = stdout.decode(errors='replace')
+                if not full_diff.strip():
+                     return f"--- {aid} Diff ---\n(No changes from baseline)"
 
+                # Process Diff with Truncation
+                processed_diff = []
+                current_file_diff = []
+                
+                for line in full_diff.splitlines():
+                    if line.startswith("diff --git"):
+                        # Process previous file
+                        if current_file_diff:
+                            if len(current_file_diff) > 100:
+                                processed_diff.extend(current_file_diff[:100])
+                                processed_diff.append(f"... (Truncated {len(current_file_diff) - 100} lines) ...")
+                            else:
+                                processed_diff.extend(current_file_diff)
+                        current_file_diff = [line]
+                    else:
+                        current_file_diff.append(line)
+                        
+                # Process last file
+                if current_file_diff:
+                    if len(current_file_diff) > 100:
+                        processed_diff.extend(current_file_diff[:100])
+                        processed_diff.append(f"... (Truncated {len(current_file_diff) - 100} lines) ...")
+                    else:
+                        processed_diff.extend(current_file_diff)
+
+                final_output = "\n".join(processed_diff)
+                return f"--- {aid} Diff ---\n{final_output}\n\n[To view full diff: cd {asset.code_path} && git diff --cached HEAD]"
+
+            except Exception as e:
+                return f"--- {aid} Diff ---\n[Error: {e}]"
+
+        candidates_diffs = []
         if state.assets:
-            diff_results = await asyncio.gather(*[
-                get_candidate_diff(aid, asset) 
-                for aid, asset in state.assets.items() 
-                if asset.type == "CANDIDATE"
-            ])
-            lines.extend(diff_results)
+             # Run in parallel
+            tasks = []
+            for aid, asset in state.assets.items():
+                if asset.type == "CANDIDATE":
+                    tasks.append(get_candidate_diff(aid, asset))
+            
+            if tasks:
+                candidates_diffs = await asyncio.gather(*tasks)
+
+        lines.extend(candidates_diffs)
+
 
         lines.append("\n=== Verifier Code ===")
         for aid, asset in state.assets.items():

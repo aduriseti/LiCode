@@ -10,11 +10,12 @@ from market.core.state import MarketState, MarketAsset, AgentPortfolio
 class SharkTest(unittest.IsolatedAsyncioTestCase):
 
     @patch('market.agents.shark.subprocess.run')
+    @patch('market.agents.shark.asyncio.create_subprocess_shell') # Mock shell for git add
     @patch('market.agents.shark.asyncio.create_subprocess_exec')
-    @patch('market.agents.shark.os.path.exists')
+    @patch('market.agents.shark.os.path.isdir') # Changed from exists to isdir
     @patch('market.agents.shark.os.listdir')
     @patch('market.agents.shark.open', new_callable=mock_open)
-    async def test_format_state_prompt_content(self, mock_file, mock_listdir, mock_exists, mock_exec, mock_run):
+    async def test_format_state_prompt_content(self, mock_file, mock_listdir, mock_isdir, mock_exec, mock_shell, mock_run):
         # Setup State
         state = MarketState(round_num=1, liquidity_b=10.0, prompt="Solve X")
         cand_path = "/tmp/cand_0"
@@ -26,7 +27,7 @@ class SharkTest(unittest.IsolatedAsyncioTestCase):
         shark = Shark("agent_0")
         
         # Mocks
-        mock_exists.return_value = True
+        mock_isdir.return_value = True
         
         # Mock Verifier Files
         def listdir_side_effect(path):
@@ -43,18 +44,19 @@ class SharkTest(unittest.IsolatedAsyncioTestCase):
             return mock_open(read_data=file_content_map.get(str(file), "")).return_value
         mock_file.side_effect = open_mock
 
-        # Mock Subprocess (Diff)
+        # Mock 'git add .'
+        mock_shell_process = MagicMock()
+        mock_shell_process.wait = AsyncMock()
+        mock_shell.return_value = mock_shell_process
+
+        # Mock 'git diff'
         mock_process = MagicMock()
-        mock_stream = MagicMock()
-        mock_stream.readline = AsyncMock(side_effect=[
-            b"diff -urN ./main.py /tmp/cand_0/main.py\n", 
-            b"@@ -1 +1 @@\n",
-            b"diff output line 1\n",
-            b"+ line 2\n", 
+        # communicate returns (stdout, stderr)
+        mock_process.communicate = AsyncMock(return_value=(
+            b"diff --git a/main.py b/main.py\n@@ -1 +1 @@\ndiff output line 1\n+ line 2\n",
             b""
-        ])
-        mock_process.stdout = mock_stream
-        mock_process.wait = AsyncMock()
+        ))
+        mock_process.returncode = 0
         mock_exec.return_value = mock_process
         
         # Call Method
@@ -66,73 +68,75 @@ class SharkTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("diff output line 1", prompt)
         self.assertIn("=== Verifier Code ===", prompt)
 
-    @patch('market.agents.shark.subprocess.run')
+    @patch('market.agents.shark.asyncio.create_subprocess_shell')
     @patch('market.agents.shark.asyncio.create_subprocess_exec')
-    @patch('market.agents.shark.os.path.exists')
-    async def test_format_state_prompt_no_error_on_valid_diff(self, mock_exists, mock_exec, mock_run):
+    @patch('market.agents.shark.os.path.isdir')
+    async def test_format_state_prompt_no_error_on_valid_diff(self, mock_isdir, mock_exec, mock_shell):
         state = MarketState(round_num=1, liquidity_b=10.0, prompt="Fix Bug")
         state.assets["cand_0"] = MarketAsset("cand_0", "CANDIDATE", "Desc", code_path="/tmp/cand_0")
         
         shark = Shark("agent_0")
-        mock_exists.return_value = True
+        mock_isdir.return_value = True
         
+        # Mock git add
+        mock_shell.return_value.wait = AsyncMock()
+
         # Mock successful diff with changes
         mock_process = MagicMock()
-        mock_stream = MagicMock()
-        mock_stream.readline = AsyncMock(side_effect=[b"diff -urN file.py\n", b"@@ -1 +1 @@\nsome diff content\n", b""])
-        mock_process.stdout = mock_stream
-        mock_process.wait = AsyncMock()
+        mock_process.communicate = AsyncMock(return_value=(
+            b"diff --git a/file.py b/file.py\n@@ -1 +1 @@\nsome diff content\n",
+            b""
+        ))
+        mock_process.returncode = 0
         mock_exec.return_value = mock_process
         
-        with patch('market.agents.shark.os.path.isfile', return_value=True):
-            prompt = await shark._format_state_prompt(state)
+        prompt = await shark._format_state_prompt(state)
         
         self.assertIn("some diff content", prompt)
 
-    @patch('market.agents.shark.subprocess.run')
+    @patch('market.agents.shark.asyncio.create_subprocess_shell')
     @patch('market.agents.shark.asyncio.create_subprocess_exec')
-    @patch('market.agents.shark.os.path.exists')
-    async def test_format_state_prompt_handles_timeout(self, mock_exists, mock_exec, mock_run):
+    @patch('market.agents.shark.os.path.isdir')
+    async def test_format_state_prompt_handles_timeout(self, mock_isdir, mock_exec, mock_shell):
         state = MarketState(round_num=1, liquidity_b=10.0, prompt="Fix Bug")
         state.assets["cand_0"] = MarketAsset("cand_0", "CANDIDATE", "Desc", code_path="/tmp/cand_0")
         
         shark = Shark("agent_0")
-        mock_exists.return_value = True
+        mock_isdir.return_value = True
         
+        mock_shell.return_value.wait = AsyncMock()
+
         mock_process = MagicMock()
-        mock_process.stdout = MagicMock()
-        # Mock a timeout in readline (using a real timeout or exception)
-        mock_process.stdout.readline = AsyncMock(side_effect=asyncio.TimeoutError())
-        mock_process.wait = AsyncMock()
+        # Mock an exception during communicate (simulating timeout or crash)
+        mock_process.communicate = AsyncMock(side_effect=Exception("Timeout or Crash"))
         mock_exec.return_value = mock_process
         
-        with patch('market.agents.shark.os.path.isfile', return_value=True):
-            prompt = await shark._format_state_prompt(state)
+        prompt = await shark._format_state_prompt(state)
         
-        self.assertIn("[Error generating diff", prompt)
+        self.assertIn("[Error: Timeout or Crash]", prompt)
 
-    @patch('market.agents.shark.subprocess.run')
+    @patch('market.agents.shark.asyncio.create_subprocess_shell')
     @patch('market.agents.shark.asyncio.create_subprocess_exec')
-    @patch('market.agents.shark.os.path.exists')
-    async def test_format_state_prompt_no_diff(self, mock_exists, mock_exec, mock_run):
+    @patch('market.agents.shark.os.path.isdir')
+    async def test_format_state_prompt_no_diff(self, mock_isdir, mock_exec, mock_shell):
         state = MarketState(round_num=1, liquidity_b=10.0, prompt="Fix Bug")
         state.assets["cand_0"] = MarketAsset("cand_0", "CANDIDATE", "Desc", code_path="/tmp/cand_0")
         
         shark = Shark("agent_0")
-        mock_exists.return_value = True
+        mock_isdir.return_value = True
         
+        mock_shell.return_value.wait = AsyncMock()
+
         # Mock empty diff
         mock_process = MagicMock()
-        mock_process.stdout = MagicMock()
-        mock_process.stdout.readline = AsyncMock(return_value=b"")
-        mock_process.wait = AsyncMock()
+        mock_process.communicate = AsyncMock(return_value=(b"", b""))
+        mock_process.returncode = 0
         mock_exec.return_value = mock_process
         
-        with patch('market.agents.shark.os.path.isfile', return_value=True):
-            prompt = await shark._format_state_prompt(state)
+        prompt = await shark._format_state_prompt(state)
         
         self.assertIn("--- cand_0 Diff ---", prompt)
-        self.assertIn("(Candidate exactly matches base project - no changes made yet)", prompt)
+        self.assertIn("(No changes from baseline)", prompt)
 
 class TestSharkActionParsing(unittest.TestCase):
 

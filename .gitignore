@@ -3,3 +3,35 @@ __pycache__/
 *.pyc
 node_modules
 *.log
+
+# Python
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+dist/
+build/
+*.egg-info/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS Generated
+.DS_Store
+Thumbs.db
+
+# Project Specific
+.home/
+worktrees/
+verifiers/
+*.db

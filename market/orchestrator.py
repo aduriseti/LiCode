@@ -93,26 +93,48 @@ class Orchestrator:
             await asyncio.gather(*tasks)
 
     def _clone_workspace(self, dest_dir: str):
-        """Clones the project workspace to the destination, respecting .gitignore."""
+        """Clones the project workspace using Hybrid Snapshot Strategy (Clone + Tar Overlay)."""
         src = os.getcwd()
-        os.makedirs(dest_dir, exist_ok=True)
-        
-        # Performance optimized clone:
-        # 1. 'git ls-files' finds all tracked and untracked (non-ignored) files.
-        # 2. 'tar' stream copies them to the destination.
-        cmd = f"git ls-files -co --exclude-standard -z | tar -c --null -T - | tar -x -C {dest_dir}"
-        
+        os.makedirs(os.path.dirname(dest_dir), exist_ok=True)
+        if os.path.exists(dest_dir):
+            shutil.rmtree(dest_dir)
+            
         try:
-            subprocess.run(cmd, shell=True, check=True, cwd=src, capture_output=True)
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Cloning failed: {e.stderr.decode()}")
-            raise
+            # 1. Clean Baseline from Git (Only committed files)
+            # --no-hardlinks ensures full isolation (safer for untrusted agents)
+            subprocess.run(["git", "clone", "--local", "--no-hardlinks", src, dest_dir], check=True, capture_output=True)
+            
+            # 2. Safety: Remove origin
+            subprocess.run(["git", "remote", "remove", "origin"], cwd=dest_dir, check=True, capture_output=True)
+            
+            # 3. Overlay Current Work (Modified + Untracked non-ignored files)
+            # Use 'git ls-files -co' to find everything we want to sync
+            tar_cmd = f"git ls-files -co --exclude-standard -z | tar -c --null -T - | tar -x -C {dest_dir}"
+            subprocess.run(tar_cmd, shell=True, check=True, cwd=src, capture_output=True)
 
-        # Ensure write permissions (tar preserves permissions, but we want 755 on dirs and 644 on files)
-        for root, dirs, files in os.walk(dest_dir):
-            os.chmod(root, 0o755)
-            for f in files:
-                os.chmod(os.path.join(root, f), 0o644)
+            # Fix permissions (git clone/tar might leave them varying)
+            for root, dirs, files in os.walk(dest_dir):
+                # Don't touch .git directory internals as that can break git
+                if ".git" in dirs:
+                    dirs.remove(".git")
+                
+                os.chmod(root, 0o755)
+                for f in files:
+                    # Skip .git files if walk goes into it (though we removed from dirs)
+                    if ".git/" in os.path.join(root, f): continue
+                    os.chmod(os.path.join(root, f), 0o644)
+
+            # 4. Initialize Shadow Git Config (Needed for baseline commit)
+            subprocess.run(["git", "config", "user.email", "market@local"], cwd=dest_dir, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Market Oracle"], cwd=dest_dir, check=True, capture_output=True)
+            
+            # 5. Commit Baseline (Captures uncommitted work as starting point)
+            subprocess.run(["git", "add", "."], cwd=dest_dir, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "--allow-empty", "-m", "Initial Baseline"], cwd=dest_dir, check=True, capture_output=True)
+
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Hybrid Clone failed: {e.stderr.decode() if e.stderr else e}")
+            raise
 
     async def process_round(self, actions: List[AgentAction]):
         """
@@ -609,39 +631,61 @@ class Orchestrator:
         # 2. Winning Code / Diff
         winner = self.state.assets[winner_id]
         if winner.code_path and os.path.isdir(winner.code_path):
-            # Generate diff between original workspace and winning worktree
-            # Original: os.getcwd() (Project Root)
-            # Winner: winner.code_path
-            
-            # Use diff -ur to get recursive unified diff
-            # Exclude .git, .arenas, etc. to avoid noise
             try:
-                # We need to be careful about absolute paths in diff headers
-                # We want paths relative to project root
-                cmd = [
-                    "diff", "-urN",
-                    "--exclude=.git", "--exclude=.arenas", "--exclude=__pycache__", "--exclude=node_modules", "--exclude=.home",
-                    ".", # Original (Current Dir)
-                    winner.code_path # New
-                ]
+                # Stage changes to capture new files
+                subprocess.run("git add .", shell=True, check=True, cwd=winner.code_path, capture_output=True)
                 
-                # Run diff
-                result = subprocess.run(cmd, capture_output=True, text=True)
+                # Get raw diff
+                result = subprocess.run(
+                    ["git", "diff", "--cached", "HEAD"], 
+                    cwd=winner.code_path, 
+                    capture_output=True, 
+                    text=True
+                )
                 
-                # Diff returns exit code 1 if differences found, 0 if same
-                if result.returncode > 1:
-                    lines.append(f"_Error generating diff: {result.stderr}_")
-                    lines.append("\n")
-                elif not result.stdout.strip():
-                    lines.append("_No changes made to the codebase._\n")
-                    # Still try to show the main file content as a fallback context
-                    main_file = os.path.join(winner.code_path, "solution.py")
-                    if os.path.exists(main_file):
+                if not result.stdout.strip():
+                     lines.append("_No changes made to the codebase._\n")
+                     # Fallback to solution.py content
+                     main_file = os.path.join(winner.code_path, "solution.py")
+                     if os.path.exists(main_file):
                         with open(main_file, "r") as f:
                             lines.append(f"### Full Content of solution.py\n```python\n{f.read()}\n```\n")
                 else:
-                    lines.append(f"### Proposed Changes (Diff)\n```diff\n{result.stdout}\n```\n")
+                    # Process Diff with Truncation
+                    full_diff = result.stdout
+                    processed_diff = []
+                    current_file_lines = []
+                    in_hunk = False
+                    file_header = ""
                     
+                    # Split by file diffs (diff --git a/...)
+                    raw_lines = full_diff.split('\n')
+                    
+                    current_file_diff = []
+                    for line in raw_lines:
+                        if line.startswith("diff --git"):
+                            # Process previous file
+                            if current_file_diff:
+                                if len(current_file_diff) > 100:
+                                    processed_diff.extend(current_file_diff[:100])
+                                    processed_diff.append(f"... (Truncated {len(current_file_diff) - 100} lines. Use 'git diff' to see full changes) ...")
+                                else:
+                                    processed_diff.extend(current_file_diff)
+                            current_file_diff = [line]
+                        else:
+                            current_file_diff.append(line)
+                            
+                    # Process last file
+                    if current_file_diff:
+                        if len(current_file_diff) > 100:
+                            processed_diff.extend(current_file_diff[:100])
+                            processed_diff.append(f"... (Truncated {len(current_file_diff) - 100} lines) ...")
+                        else:
+                            processed_diff.extend(current_file_diff)
+
+                    lines.append(f"### Proposed Changes (Diff)\n```diff\n" + "\n".join(processed_diff) + "\n```\n")
+                    lines.append("> **Note:** Large diffs are truncated. To view the full diff, run:\n> `cd " + winner.code_path + " && git diff --cached HEAD`\n")
+
             except Exception as e:
                 lines.append(f"_Failed to generate diff: {e}_")
                 lines.append("\n")

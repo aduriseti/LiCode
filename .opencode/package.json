@@ -1,6 +1,6 @@
 {
   "dependencies": {
-    "@opencode-ai/plugin": "1.2.6",
+    "@opencode-ai/plugin": "1.2.10",
     "@types/express": "^5.0.6",
     "@types/socket.io": "^3.0.1",
     "eventsource": "^4.1.0",
