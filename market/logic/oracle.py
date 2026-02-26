@@ -40,11 +40,10 @@ class Oracle:
             
             return temp_dir
         except Exception as e:
-            import logging
-            logging.error(f"Oracle Sandbox Setup Error: {e}")
+            # Cleanup immediately on failure
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
-            return None
+            raise e # Propagate error to main thread
 
     @staticmethod
     async def run_test(candidate_dir: str, verifier_dir: str, timeout: int = 15) -> ResultType:
@@ -60,6 +59,8 @@ class Oracle:
             PASS (exit 0), FAIL (exit != 0), TIMEOUT, or ERROR
         """
         import asyncio
+        import logging
+        
         if not os.path.isdir(candidate_dir):
             return "ERROR"
         if not os.path.isdir(verifier_dir):
@@ -70,7 +71,11 @@ class Oracle:
             return "ERROR"
 
         # Offload blocking file IO to a thread
-        temp_dir = await asyncio.to_thread(Oracle._setup_sandbox, candidate_dir, verifier_dir)
+        try:
+            temp_dir = await asyncio.to_thread(Oracle._setup_sandbox, candidate_dir, verifier_dir)
+        except Exception as e:
+            logging.error(f"Oracle Sandbox Setup Error: {e}")
+            return "ERROR"
         
         if not temp_dir:
             return "ERROR"

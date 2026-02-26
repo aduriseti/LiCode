@@ -4,8 +4,55 @@ import logging
 import asyncio
 import os
 import json
+import textwrap
 from market.orchestrator import Orchestrator
 from market.runner import MarketRunner
+
+class WrappingFormatter(logging.Formatter):
+    """Wraps log messages to a fixed width for better terminal readability."""
+    def __init__(self, fmt=None, datefmt=None, width=100):
+        super().__init__(fmt, datefmt)
+        self.width = width
+
+    def format(self, record):
+        # Format the original message
+        original_msg = super().format(record)
+        
+        # Split header (timestamp/level) from message body if possible
+        # Our format is: %(asctime)s - %(levelname)s - %(message)s
+        # We try to wrap only the message part if we can find the separator
+        parts = original_msg.split(" - ", 2)
+        if len(parts) >= 3:
+            header = f"{parts[0]} - {parts[1]} - "
+            body = parts[2]
+            # Wrap the body
+            wrapped_body = textwrap.fill(body, width=self.width, subsequent_indent=" " * len(header))
+            return f"{header}{wrapped_body}"
+        else:
+            # Fallback: Wrap the whole line
+            return textwrap.fill(original_msg, width=self.width)
+
+class UnbufferedStreamHandler(logging.StreamHandler):
+    """Forces raw atomic writes with CRLF to prevent UI line clumping."""
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            # Use CRLF for stronger terminal line-break signal
+            data = (msg + "\r\n").encode('utf-8')
+            
+            if hasattr(self.stream, 'fileno'):
+                try:
+                    # Raw syscall write is more atomic and bypasses high-level buffering
+                    os.write(self.stream.fileno(), data)
+                    return
+                except (OSError, io.UnsupportedOperation):
+                    pass
+            
+            # Fallback for streams without fileno (like StringIO in tests)
+            self.stream.write(msg + "\n")
+            self.flush()
+        except Exception:
+            self.handleError(record)
 
 def main():
     parser = argparse.ArgumentParser(description="Logical Induction Market CLI")
@@ -38,7 +85,18 @@ def main():
     # Configure Logging
     log_level_name = args.log_level.upper()
     log_level = getattr(logging, log_level_name, logging.ERROR)
-    logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
+    
+    # Use custom handler and formatter
+    handler = UnbufferedStreamHandler(sys.stderr)
+    formatter = WrappingFormatter(fmt='%(asctime)s - %(levelname)s - %(message)s', width=100)
+    handler.setFormatter(formatter)
+    
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    # Remove existing handlers to avoid duplicates if re-initialized
+    if root_logger.hasHandlers():
+        root_logger.handlers.clear()
+    root_logger.addHandler(handler)
     
     if args.command == "init":
         orch = Orchestrator(args.prompt, args.agents, args.budget)

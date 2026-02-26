@@ -330,7 +330,7 @@
         socket.on('log', (data) => {
             if (data.type === 'log') {
                 const line = document.createElement('div');
-                line.className = 'log-entry mb-0.5 border-b border-gray-50/50 pb-0.5 whitespace-nowrap overflow-hidden text-ellipsis';
+                line.className = 'log-entry mb-0.5 border-b border-gray-50/50 pb-0.5 whitespace-pre-wrap break-words';
                 line.textContent = `[${new Date().toLocaleTimeString().split(' ')[0]}] ${data.message}`;
                 logsEl.appendChild(line);
                 logsEl.scrollTop = logsEl.scrollHeight;
@@ -356,7 +356,7 @@
 
         function addLog(msg, classes = 'text-gray-500') {
             const line = document.createElement('div');
-            line.className = `log-entry mb-0.5 border-b border-gray-50/50 pb-0.5 ${classes}`;
+            line.className = `log-entry mb-0.5 border-b border-gray-50/50 pb-0.5 whitespace-pre-wrap break-words ${classes}`;
             line.textContent = `[${new Date().toLocaleTimeString().split(' ')[0]}] ${msg}`;
             logsEl.appendChild(line);
             logsEl.scrollTop = logsEl.scrollHeight;

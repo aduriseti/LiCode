@@ -102,6 +102,7 @@ class Orchestrator:
         try:
             # 1. Clean Baseline from Git (Only committed files)
             # --no-hardlinks ensures full isolation (safer for untrusted agents)
+            logging.info(f"Cloning workspace from {src} to {dest_dir}")
             subprocess.run(["git", "clone", "--local", "--no-hardlinks", src, dest_dir], check=True, capture_output=True)
             
             # 2. Safety: Remove origin
@@ -109,6 +110,7 @@ class Orchestrator:
             
             # 3. Overlay Current Work (Modified + Untracked non-ignored files)
             # Use 'git ls-files -co' to find everything we want to sync
+            logging.info(f"Overlaying uncommitted changes to {dest_dir}")
             tar_cmd = f"git ls-files -co --exclude-standard -z | tar -c --null -T - | tar -x -C {dest_dir}"
             subprocess.run(tar_cmd, shell=True, check=True, cwd=src, capture_output=True)
 
@@ -131,6 +133,7 @@ class Orchestrator:
             # 5. Commit Baseline (Captures uncommitted work as starting point)
             subprocess.run(["git", "add", "."], cwd=dest_dir, check=True, capture_output=True)
             subprocess.run(["git", "commit", "--allow-empty", "-m", "Initial Baseline"], cwd=dest_dir, check=True, capture_output=True)
+            logging.info(f"Workspace setup complete for {dest_dir}")
 
         except subprocess.CalledProcessError as e:
             logging.error(f"Hybrid Clone failed: {e.stderr.decode() if e.stderr else e}")
