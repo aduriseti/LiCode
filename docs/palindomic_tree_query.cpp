@@ -81,8 +81,8 @@ store the XOR difference array of the trees euler tour
 #include <string>
 #include <algorithm>
 #include <map>
-#include "dbg.h"
 #include <sstream>
+#include <functional>
 
 using namespace std;
 
@@ -96,7 +96,7 @@ struct FenwickTree {
   
   void update(int i, int val) {
     ++i; // covert to 1-indexed
-    for(; i<=n; i += (i & -i)) {3
+    for(; i<=n; i += (i & -i)) {
       tree[i] ^= val;
     }
   }
@@ -109,7 +109,7 @@ struct FenwickTree {
     }
     return res;
   }
-}
+};
 
 class Solution {
 public:
@@ -123,8 +123,8 @@ public:
           graph[uv[1]].push_back(uv[0]);
         }
         vector<vector<int>> up(n, vector<int>(32));
-        std::function<void(int)> dfs = [&](int node, int parent) {
-          if (euler_in[node] >= 0) return; 
+        const int LOG = 32;
+        std::function<void(int, int)> dfs = [&](int node, int parent) {
           euler_in[node] = euler_tour.size();
           euler_tour.push_back(node);
 
@@ -135,22 +135,24 @@ public:
           }
 
           for (int neighbor : graph[node]) {
-            dfs(neighbor);
+            if (neighbor != parent) dfs(neighbor, node);
           }
 
           euler_out[node] = euler_tour.size();
         };
-        dfs(0);
-        dbg(euler_tour);
-        dbg(euler_in);
-        dbg(euler_out);
-        FenwickTree tree(n+1);
-        auto fenwick_tree_populate(int node, char c) {
-          tree.update(euler_in[node], char_bitmask(c));
-          tree.update(euler_out[node], char_bitmask(c));
+        dfs(0, -1);
+
+        auto is_ancestor = [&](int u, int v) {
+          return euler_in[u] <= euler_in[v] && euler_out[u] >= euler_out[v];
         };
+
+        FenwickTree tree(n+1);
         auto char_bitmask = [](char c) {
           return 1 << (c - 'a'); 
+        };
+        auto fenwick_tree_populate = [&](int node, char c) {
+          tree.update(euler_in[node], char_bitmask(c));
+          tree.update(euler_out[node], char_bitmask(c));
         };
         for (int i = 0; i < n; ++i) {
           fenwick_tree_populate(i, s[i]);
@@ -170,22 +172,21 @@ public:
 
         auto get_path_xor = [&](int u, int v) {
           int lca = get_lca(u, v);
-          return tree.query(euler_in[u]) ^ tree.query(euler_in[v]) ^ char_bitmask[s[lca]];
-        }
+          return tree.query(euler_in[u]) ^ tree.query(euler_in[v]) ^ char_bitmask(s[lca]);
+        };
 
-        auto update_node_value(int node, char c) {
-          char cur = s[node];
-          fenwick_tree_populate(node, cur);
-          s[node] = cur;
-          fenwick_tree_populate(node, cur);
-        }
+        auto update_node_value = [&](int node, char c) {
+          fenwick_tree_populate(node, s[node]);
+          s[node] = c;
+          fenwick_tree_populate(node, s[node]);
+        };
 
         // Handles: query u v
         auto handle_query = [&](int u, int v) -> bool {
             int path_xor = get_path_xor(u, v);
             
             // Palindrome check: at most one bit set
-            return (path_mask == 0) || ((path_mask & (path_mask - 1)) == 0);
+            return (path_xor == 0) || ((path_xor & (path_xor - 1)) == 0);
         };
 
         std::vector<bool> res;
@@ -217,10 +218,19 @@ int main() {
   vector<vector<int>> edges = {{0,1},{1,2}};
   string str = "aac";
   vector<string> queries = {"query 0 2","update 1 b","query 0 2"};
-  cout << "Hello world!\n";
+  cout << "Example 1 Output: [";
   Solution s;
-  for(bool ans : s.palindromePath(n, edges, str, queries)) {
-    cout << (int)ans << ", ";
-  }
-  cout << "\n";
+  vector<bool> ans1 = s.palindromePath(n, edges, str, queries);
+  for(int i=0; i<ans1.size(); ++i) cout << (ans1[i]?"true":"false") << (i==ans1.size()-1?"":",");
+  cout << "]\n";
+
+  // Example 2: n = 4, edges = [[0,1],[0,2],[0,3]], s = "abca", queries = ["query 1 2","update 0 b","query 2 3","update 3 a","query 1 3"]
+  n = 4;
+  edges = {{0,1},{0,2},{0,3}};
+  str = "abca";
+  queries = {"query 1 2","update 0 b","query 2 3","update 3 a","query 1 3"};
+  cout << "Example 2 Output: [";
+  vector<bool> ans2 = s.palindromePath(n, edges, str, queries);
+  for(int i=0; i<ans2.size(); ++i) cout << (ans2[i]?"true":"false") << (i==ans2.size()-1?"":",");
+  cout << "]\n";
 }
