@@ -64,16 +64,10 @@ The system begins when the user provides a prompt $P_{user}$ and a budget $B$.
 
 4. **LMSR Market Initialization:** For each sentence $\phi$, create an LMSR market with:
    
-   **Dynamic Liquidity Parameter:**
-   $$b_t = \max\left(b_{min}, \frac{0.5 \cdot W_{whale,t}}{M_{active,t} \cdot \ln(2)}\right)$$
+   **Fixed Liquidity Parameter:**
+   $$b = B / 20.0$$
    
-   where:
-   - $W_{whale,t}$: Whale's current wealth
-   - $M_{active,t}$: Number of active markets at round $t$
-   - $b_{min} = B/200$: Minimum liquidity floor
-   - $\ln(2) \approx 0.693$
-   
-   **Purpose:** This ensures the Whale cannot lose more than 50% of its wealth in any single round while maintaining minimum market liquidity.
+   **Purpose:** Using a fixed liquidity parameter ensures mathematical stability and prevents **"Revaluation Arbitrage."** In an LMSR market, the credit value of shares is tied to $b$. If $b$ were dynamic (scaling with the Whale's wealth), the value of an agent's existing position would change retroactively based on the Whale's performance rather than the agent's accuracy. A fixed $b$ ensures that a 10% price move always results in the same credit payout, regardless of when it occurs in the tournament.
    
    **Market Initialization:**
    - Initial shares: $q_{yes} = 0, q_{no} = 0$ (neutral prior)
@@ -122,7 +116,7 @@ When an agent proposes a new sentence, they must stake a **forced long position*
 1. **New LMSR Market Created:**
    - Initial state: $q_{yes} = 0, q_{no} = 0$
    - Initial price: $P_0 = 0.5$ (neutral starting point for verifiers; $1/N$ for candidates)
-   - Liquidity: $b_t$ calculated using current Whale wealth
+   - Liquidity: Fixed $b$ established at tournament start
 
 2. **Proposer Buys Bond:**
    - Proposer stakes a target wager $W_{bond}$ on the LMSR at current price ($P_0 = 0.5$) to acquire $\Delta q_{bond}$ shares
@@ -215,13 +209,12 @@ $$b_{clipped}=\min(\max(b_{raw},\epsilon),1-\epsilon)$$
 where $\epsilon = 0.01$ (agents can't be >99% confident)
 
 **Step B: Compute Ideal Kelly Fractions**
-For each sentence $j$, calculate the fraction of wealth to wager:
-- If $b_{clipped} > P_t$: $f_j^* = \frac{b_{clipped} - P_t}{1 - P_t}$ (Long)
-- If $b_{clipped} < P_t$: $f_j^* = \frac{b_{clipped} - P_t}{P_t}$ (Short)
+For each sentence $j$, calculate the fraction of wealth to wager using the binary Kelly criterion:
+$$f_j^* = \frac{b_{clipped} - P_t}{P_t \cdot (1 - P_t)}$$
 
 *Interpretation:*
 - $f^* > 0$ indicates a long position; $f^* < 0$ indicates a short position.
-- Magnitude reflects the "edge" size relative to current risk.
+- Magnitude reflects the "edge" size relative to the current market variance ($P \cdot (1-P)$).
 
 **Step C: Portfolio Normalization (No Leverage)**
 Ensure total intended wager doesn't exceed wealth:
@@ -256,15 +249,14 @@ For each sentence $\phi$ with current price $P_t$:
 - ✅ **No Overshooting:** Agents never spend more than their calculated Kelly wager.
 - ✅ **Automatically Zero-Sum:** The Whale perfectly balances the net LMSR movement.
 - ✅ **Always Liquid:** Can always trade at current price
-- ✅ **Bounded Loss:** Whale's max loss per round = $0.5 \cdot W_{whale,t}$ (by construction of $b_t$)
+- ✅ **Simplified Liquidity:** Uses fixed $b = B/20.0$ to prevent Revaluation Arbitrage.
 - ✅ **Incentive Compatible:** Truth-revealing (proper scoring rule)
 
 **Execution Order:**
-1. Recalculate $b_t$ based on current Whale wealth and active markets
-2. Snapshot the current Market State (prices and verifier confidences).
-3. Agents and Whale calculate target Wagers based on the frozen snapshot.
-4. Execute all wagers simultaneously via the Batch Clearing Algorithm.
-5. Prices update to new equilibrium via LMSR formula.
+1. Snapshot the current Market State (prices and verifier confidences).
+2. Agents and Whale calculate target Wagers based on the frozen snapshot.
+3. Execute all wagers simultaneously via the Batch Clearing Algorithm.
+4. Prices update to new equilibrium via LMSR formula.
 
 #### **5. Instant Settlement (Mark-to-Market)**
 
@@ -524,25 +516,15 @@ Each sentence $\varphi \in \Phi_t$ has an associated LMSR market $M_\varphi$ wit
 **State Variables:**
 - $q_{yes,\varphi,t}$: Total YES shares outstanding at round $t$
 - $q_{no,\varphi,t}$: Total NO shares outstanding at round $t$
-- $b_t$: Liquidity parameter (recalculated each round)
-
-**Dynamic Liquidity Parameter:**
-
-At the start of each round $t$, recalculate:
-$$b_t = \max\left(b_{min}, \frac{0.5 \cdot W_{whale,t}}{M_{active,t} \cdot \ln(2)}\right)$$
-
-where:
-- $M_{active,t} = |\Phi_t|$: Number of active markets
-- $b_{min} = B/200$: Minimum liquidity floor
-- Purpose: Ensures Whale cannot lose more than 50% wealth in one round
+- $b$: Fixed liquidity parameter ($b = B / 20.0$)
 
 **Price Function:**
-$$P_t(\varphi) = \frac{\exp(q_{yes,\varphi,t}/b_t)}{\exp(q_{yes,\varphi,t}/b_t) + \exp(q_{no,\varphi,t}/b_t)}$$
+$$P_t(\varphi) = \frac{\exp(q_{yes,\varphi,t}/b)}{\exp(q_{yes,\varphi,t}/b) + \exp(q_{no,\varphi,t}/b)}$$
 
 *Interpretation:* $P_t(\varphi)$ is the market's current probability that sentence $\varphi$ is true.
 
 **Cost Function:**
-$$C_\varphi(q_{yes}, q_{no}) = b_t \cdot \ln\left(\exp(q_{yes}/b_t) + \exp(q_{no}/b_t)\right)$$
+$$C_\varphi(q_{yes}, q_{no}) = b \cdot \ln\left(\exp(q_{yes}/b) + \exp(q_{no}/b)\right)$$
 
 *Purpose:* Determines how much an agent must pay to change share quantities.
 
@@ -564,7 +546,7 @@ Update the corresponding $q_{yes}$ or $q_{no}$ based on the trade.
 - **Proper Scoring:** Agents maximize expected wealth by reporting true beliefs.
 - **Zero-Sum:** All payments are transacted with the Whale via the cost function.
 - **Always Liquid:** Can always trade at current $P_t(\varphi)$.
-- **Bounded Loss per Round:** Whale's max loss ≤ $0.5 \cdot W_{whale,t}$ (by construction of $b_t$).
+- **Fixed Depth:** Predictable price impact via constant $b$.
 
 ### C. Agent Beliefs & Actions
 
@@ -624,13 +606,12 @@ where $\epsilon = 0.01$ (prevents extreme confidence)
 
 **Step 2 - Compute Ideal Kelly Fractions:**
 For each sentence $\varphi$:
-- If $b_{i,t}^{clip} > P_t$: $f_{\varphi}^* = \frac{b_{i,t}^{clip} - P_t}{1 - P_t}$ (Long)
-- If $b_{i,t}^{clip} < P_t$: $f_{\varphi}^* = \frac{b_{i,t}^{clip} - P_t}{P_t}$ (Short)
+$$f_{\varphi}^* = \frac{b_{i,t}^{clip} - P_t}{P_t \cdot (1 - P_t)}$$
 
 *Interpretation:*
 - $f_{\varphi}^* > 0$: Want to long (buy YES shares)
 - $f_{\varphi}^* < 0$: Want to short (buy NO shares)
-- $|f_{\varphi}^*|$: Fraction of wealth to wager
+- $|f_{\varphi}^*|$: Magnitude of the wealth fraction to wager based on perceived edge.
 
 **Step 3 - Normalize Portfolio (No Leverage):**
 $$L_i = \sum_{\varphi \in \Phi_t} |f_{\varphi}^*| + \sum_{k \in \text{NewProposals}} |f_{bond,k}|$$
@@ -650,17 +631,15 @@ For each sentence $\varphi$ (existing or newly proposed), calculate the target w
 
 After all agents submit their wagers in round $t$:
 
-1. **Recalculate Liquidity:** Update $b_t$ based on current $W_{whale,t}$ and $M_{active,t}$
+1. **Simultaneous Batch Clearing:** For each sentence $\varphi$, pool all YES wagers and NO wagers across all participants. Match opposing wagers at current price $P_t$, then apply the remaining wager to push the LMSR curve.
 
-2. **Simultaneous Batch Clearing:** For each sentence $\varphi$, pool all YES wagers and NO wagers across all participants. Match opposing wagers at current price $P_t$, then apply the remaining wager to push the LMSR curve.
-
-3. **Trade Costs:** Agents are charged exactly their target wagers.
+2. **Trade Costs:** Agents are charged exactly their target wagers.
    $$\text{Cost}_{i,\varphi,t} = |W_{i,\varphi}|$$
    
-4. **Aggregate Wealth Change from Trading:**
+3. **Aggregate Wealth Change from Trading:**
    $$\Delta W_{i,t}^{trade} = -\sum_{\varphi \in \Phi_t} \text{Cost}_{i,\varphi,t}$$
    
-5. **Taxes:**
+4. **Taxes:**
    $$\Delta W_{i,t}^{taxes} = -T_{inf}$$
 
 **End-of-Round Wealth:**
@@ -742,18 +721,17 @@ $$k^* = \arg\min_{k} |F_k|$$
 
 **One Complete Round ($t \to t+1$):**
 
-1. **Observation:** Agents query market state $(P_t, W_t)$ and code $\{C_k\}$
+1. **Observation:** Agents query their assigned state, current prices, and rival Diff Summaries.
 2. **Oracle Execution:** Run all verifiers, get $\mathcal{O}(V_j, C_k)$ for all $(j,k)$
 3. **Whale Belief Update:** Compute $b_{whale,t+1}$ via softmax (only for $\Phi_G$)
 4. **Agent Belief Submission:** Agents submit $b_{i,t}$
-5. **Liquidity Recalculation:** Update $b_t$ based on current Whale wealth
-6. **Trade Conversion:** Convert beliefs to target Wagers via Kelly heuristic
-7. **Trade Execution:** Execute all wagers simultaneously via Batch Clearing, deduct costs, and update LMSR markets
-8. **Instant Settlement:** Resolve belief-based trades into liquid wealth; Whale absorbs shares to preserve price discovery
-9. **Tax Application:** Deduct $T_{inf}$ from agent wealth
-10. **Bankruptcy Check:** Remove agents with total net worth $\leq T_{inf}$
-11. **Bond Maturation:** Unlock and settle bonds from round $t - N_{lock}$
-12. **Termination Check:** If $\mathcal{T}(t+1)$, terminate and select winner
+5. **Trade Conversion:** Convert beliefs to target Wagers via Kelly heuristic
+6. **Trade Execution:** Execute all wagers simultaneously via Batch Clearing, deduct costs, and update LMSR markets
+7. **Instant Settlement:** Resolve belief-based trades into liquid wealth; Whale absorbs shares to preserve price discovery
+8. **Tax Application:** Deduct $T_{inf}$ from agent wealth
+9. **Bankruptcy Check:** Remove agents with total net worth $\leq T_{inf}$
+10. **Bond Maturation:** Unlock and settle bonds from round $t - N_{lock}$
+11. **Termination Check:** If $\mathcal{T}(t+1)$, terminate and select winner
 
 ## 5. Implementation
 
@@ -817,12 +795,18 @@ The tool creates a Bubble Tea dashboard component that renders as an overlay in 
 
 To keep the main project clean, the Orchestrator creates a **"Disposable Universe"** in `/tmp/`. This folder contains everything specific to this run: agent code, private memories, and test cases (verifiers) that agents generate to attack each other.
 
-**Permission Model:**
+**Permission Model (Strict Isolation):**
 
-The system uses OS-level permissions to enforce isolation while allowing read access:
-- **Write Access:** Each agent can only write to its own worktree and session database
-- **Read/Execute Access:** All agents can read all code and execute all verifiers
-- **Oracle Execution:** When an agent proposes a verifier, the orchestrator executes it against all candidate worktrees
+The system uses a combination of OS-level permissions and non-interactive configuration to enforce strict isolation and prevent agents from blocking on permission prompts:
+- **Write Access:** Each agent can ONLY write to its own worktree and session database.
+- **Strict Read Isolation:** Each agent's worktree is restricted to `0o700` (owner-only), and files are set to `0o600`. The parent `worktrees/` directory is `0o711`, allowing traversal only to assigned paths. Agents CANNOT directly read or execute files in rival worktrees.
+- **Auto-Deny Configuration:** Agent servers are injected with `OPENCODE_PERMISSION` and `OPENCODE_CONFIG_CONTENT` environment variables that explicitly set `external_directory` access to `"deny"`. This ensures tool calls targeting external paths fail immediately with an error rather than hanging on an interactive prompt.
+- **Indirect Rival Analysis:** Since direct access is blocked, agents are provided with **Diff Summaries** of rival candidate changes in their round state prompts.
+- **Oracle Execution:** When an agent proposes a verifier, the neutral Orchestrator executes it against all candidate worktrees in isolation.
+
+**Privacy & Path Masking:**
+
+To prevent leakage and maintain the "logical" nature of the market, all absolute filesystem paths are stripped from agent prompts. Agents only see their assigned workspace as `./` and have no visibility into the physical location of rival candidates or the verifier registry.
 
 **Filesystem Layout:**
 
@@ -862,11 +846,11 @@ The system uses OS-level permissions to enforce isolation while allowing read ac
 
 **Design Rationale:**
 
-This "open border" permission model serves several purposes:
-1. **Transparency:** Agents can analyze rival solutions (encouraging adversarial testing)
-2. **Constructive Competition:** Must propose tests that discriminate (you pass, opponent fails)
-3. **Simplicity:** No complex sandboxing; rely on filesystem permissions
-4. **Auditability:** All code and tests visible in plain filesystem for debugging
+This **Strict Isolation** model serves several critical purposes:
+1. **Privacy & Focus:** Agents analyze rival solutions via curated Diffs, preventing them from being overwhelmed by full project file structures while protecting internal agent state.
+2. **Security:** OS-level lockdowns (`0o700`) prevent unauthorized cross-talk or malicious code execution between rival worktrees.
+3. **Automated Stability:** The "Auto-Deny" configuration prevents agents from hanging on interactive "Allow Access?" prompts, ensuring rounds progress smoothly without human intervention.
+4. **Auditability:** All code and tests remain visible in the host filesystem for external debugging and post-tournament analysis.
 
 ### Core Architecture Components
 
@@ -945,15 +929,7 @@ class MarketState:
     - Track agent and Whale wealth
     - Manage sentence registry (metadata, verifier paths)
     - Handle bond lifecycle (creation, maturation)
-    - Calculate dynamic liquidity parameter
     """
-    
-    def calculate_liquidity(self) -> float:
-        """
-        Compute b_t based on current Whale wealth and active markets
-        Returns liquidity parameter ensuring 50% max loss per round
-        """
-        ...
     
     def serialize(self) -> dict:
         """
@@ -1086,10 +1062,10 @@ Each round follows a deterministic sequence:
 1. **Observation:** Agents query market state concurrently
 2. **Oracle Execution:** Run all verifiers against all candidates (parallel)
 3. **Whale Belief Update:** Compute softmax beliefs based on test results
-4. **Liquidity Recalculation:** Update $b_t$ based on current Whale wealth
-5. **Agent Submission:** Collect belief vectors and actions (with timeout)
-6. **Trade Conversion:** Convert all beliefs (Whale + agents) to LMSR trades
-7. **Atomic Settlement:** Execute all trades sequentially, update markets
+4. **Agent Submission:** Collect belief vectors and actions (with timeout)
+5. **Trade Conversion:** Convert all beliefs (Whale + agents) to LMSR trades
+6. **Trade Execution:** Execute all wagers simultaneously via Batch Clearing, deduct costs, and update LMSR markets
+7. **Instant Settlement:** Resolve belief-based trades into liquid wealth; Whale absorbs shares to preserve price discovery
 8. **Economic Rules:** Apply inference tax, process bankruptcies
 9. **Bond Management:** Unlock matured bonds, create new ones
 10. **Dashboard Update:** Emit events to TUI for display
@@ -1205,7 +1181,7 @@ However, we maintain the **key property**: The market respects computationally v
 1. **Simplicity:** No need to match buyers/sellers; AMM always available
 2. **Liquidity:** Whale can always provide counterparty (at current price)
 3. **Zero-Sum:** Automatically guaranteed by cost function mathematics
-4. **Bounded Loss:** Whale's exposure controllable via dynamic $b_t$
+4. **Bounded Loss:** Whale's exposure predictable via constant $b$
 5. **Proper Scoring:** Incentive compatibility proven (Chen & Pennock 2007)
 6. **Implementation:** Cleaner code (no order book, no matching algorithm)
 
@@ -1213,7 +1189,7 @@ However, we maintain the **key property**: The market respects computationally v
 - LMSR prices less granular than order book (single price vs. bid/ask spread)
 - LMSR can't express complex order types (limit orders, stop losses)
 - LMSR requires liquidity provider (Whale) with sufficient capital
-- Dynamic $b$ means liquidity decreases as Whale loses money
+- **Fixed $b$:** Ensures stability and prevents arbitrage, but means Whale's loss is only bounded by its total wealth.
 
 For our use case (bounded tournament, known participant set, automatic trading), LMSR is superior.
 
@@ -1254,16 +1230,14 @@ The parameter $b$ is the single most important tuning knob in LMSR. It controls:
 1. **Price Sensitivity:** How much the price moves when someone trades
    - **Low $b$** (e.g., $b = 1$): Prices very sensitive; small trades move market a lot
    - **High $b$** (e.g., $b = 100$): Prices stable; requires large trades to move market
-   - **Intuition:** Think of $b$ as "market depth" or "resistance to price change"
+   - **Fixed Model:** Our system uses a fixed $b = B/20.0$ to ensure stability.
 
-2. **Market Maker's Risk:** Maximum amount the market maker can lose
+2. **Prevention of Revaluation Arbitrage:** Using a fixed $b$ ensures that the credit value of an agent's shares remains consistent throughout the tournament. In LMSR, the payout for selling a share is tied to $b$. If $b$ were dynamic (scaling with the Whale's wealth), an agent's existing position would fluctuate in value based on the Whale's reserves rather than the logical merit of the agent's bet. A fixed $b$ preserves the mathematical integrity of the Proper Scoring Rule.
+
+3. **Market Maker's Risk:** Maximum amount the market maker can lose
    - **Worst-case loss** = $b \cdot \ln(2) \approx 0.693b$
    - Occurs when market maker is maximally wrong (priced at 50%, outcome at 100%)
    - **Example:** If $b = 100$, max loss is ~$69.3
-
-3. **Subsidy for Information:** How much the system "pays" for price discovery
-   - Higher $b$ = more willing to pay traders to reveal information
-   - Lower $b$ = cheaper to run but less incentive to trade
 
 **Mathematical Properties:**
 
@@ -1324,31 +1298,6 @@ When outcome $\omega$ is revealed:
 - **Worst case:** $\max|C| = b \cdot \ln(2) \approx 0.693b$
 - **Occurs when:** Market goes from 50-50 to 100-0
 - **Interpretation:** Even if completely wrong, max loss is predictable
-
-#### Dynamic Liquidity Parameter
-
-In our system, $b$ is **not constant** but recalculated each round to prevent Whale bankruptcy.
-
-**Formula:**
-$$b_t = \max\left(b_{min}, \frac{0.5 \cdot W_{whale,t}}{M_{active,t} \cdot \ln(2)}\right)$$
-
-**Components:**
-- $W_{whale,t}$: Whale's current wealth
-- $M_{active,t}$: Number of active markets
-- $b_{min}$: Minimum liquidity floor (typically $B/200$)
-- $\ln(2) \approx 0.693$
-
-**Purpose:**
-The numerator $0.5 \cdot W_{whale,t}$ ensures that even if ALL markets move from 50% to 100% simultaneously, the Whale's maximum loss is:
-$$L_{max} = M_{active} \cdot b_t \cdot \ln(2) = M_{active} \cdot \frac{0.5 \cdot W_{whale,t}}{M_{active} \cdot \ln(2)} \cdot \ln(2) = 0.5 \cdot W_{whale,t}$$
-
-**Effects:**
-- **As Whale wins:** $W_{whale}$ increases → $b$ increases → markets more liquid
-- **As Whale loses:** $W_{whale}$ decreases → $b$ decreases → markets less liquid
-- **Floor prevents death spiral:** $b_{min}$ ensures markets don't become impossibly illiquid
-
-**Trade-off:**
-Lower liquidity means higher price impact per trade. As the Whale loses money, it becomes easier for agents to move prices, but they can extract less total value per round.
 
 ### Appendix B: True Kelly Optimization via Convex Programming
 
@@ -1436,7 +1385,7 @@ We considered several mechanisms before choosing LMSR:
 
 | Parameter | Symbol | Recommended Value | Rationale |
 |-----------|--------|-------------------|-----------|
-| Min Liquidity | $b_{min}$ | $B/200$ | Prevents death spiral while allowing dynamic adjustment |
+| Fixed Liquidity | $b$ | $B/20.0$ | Balances depth with price sensitivity; prevents Revaluation Arbitrage |
 | Inference Tax | $T_{inf}$ | $0.01 \cdot B/N$ per round | Should eliminate poor traders in ~100 rounds |
 | Belief Clip | $\epsilon$ | $0.01$ | Prevents catastrophic losses from overconfidence |
 | Bond Lock Period | $N_{lock}$ | 1 round | Long enough to see market reaction, short enough to iterate |
@@ -1444,11 +1393,10 @@ We considered several mechanisms before choosing LMSR:
 
 **Sensitivity Analysis:**
 
-**Minimum Liquidity ($b_{min}$):**
-- **Too low** (e.g., $b_{min} = B/1000$): Markets can become impossibly illiquid late in tournament
-- **Too high** (e.g., $b_{min} = B/50$): Doesn't prevent Whale bankruptcy if many markets active
-- **Rule of thumb:** $b_{min} = B/(2 \times M_{max})$
-- **Ensures:** Minimum liquidity allows some trading
+**Fixed Liquidity ($b$):**
+- **Too low** (e.g., $b = B/100$): Prices too sensitive; agents can't place large informative bets without extreme slippage.
+- **Too high** (e.g., $b = B/5$): Prices too sticky; requires massive capital to move market toward truth.
+- **Why fixed?** Ensures that agent payouts are purely a function of price accuracy, not Whale reserve fluctuations.
 
 **Inference Tax ($T_{inf}$):**
 - **Too low** (e.g., $T_{inf} = 0.001 \cdot B/N$): Poor traders survive too long; noise dominates

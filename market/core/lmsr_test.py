@@ -81,27 +81,6 @@ class TestLMSRMarket(unittest.TestCase):
         # Selling YES also lowers YES price.
         pass
 
-    def test_liquidity_dynamic(self):
-        """Test dynamic liquidity adjustment"""
-        min_b = 10.0
-        whale_wealth = 2000.0
-        
-        # Case 1: 1 active market
-        # b = (0.5 * 2000) / (1 * 0.693) = 1000 / 0.693 = ~1443
-        b_1 = LMSRMarket.calculate_liquidity(whale_wealth, 1, min_b)
-        self.assertTrue(b_1 > min_b)
-        self.assertAlmostEqual(b_1, 1000 / math.log(2), places=2)
-        
-        # Case 2: 100 active markets
-        # b = 1000 / 69.3 = ~14.4
-        b_100 = LMSRMarket.calculate_liquidity(whale_wealth, 100, min_b)
-        self.assertTrue(b_100 < b_1)
-        
-        # Case 3: Poor whale
-        whale_wealth_poor = 1.0
-        b_poor = LMSRMarket.calculate_liquidity(whale_wealth_poor, 10, min_b)
-        self.assertEqual(b_poor, min_b)
-
     def test_calculate_delta_q_accuracy(self):
         """Verify that calculate_delta_q produces the expected cost via cost_function."""
         b = 100.0

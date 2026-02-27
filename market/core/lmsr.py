@@ -120,23 +120,6 @@ class LMSRMarket:
             return 1000.0
 
     @staticmethod
-    def calculate_liquidity(whale_wealth: float, active_markets: int, min_b: float) -> float:
-        """
-        Calculates the dynamic liquidity parameter b_t.
-        
-        Formula: b_t = max(b_min, (0.5 * W_whale) / (M * ln(2)))
-        
-        This ensures the Whale cannot lose more than 50% of its wealth 
-        even if all markets move against it completely.
-        """
-        if active_markets <= 0:
-            return min_b
-            
-        # ln(2) approx 0.693147
-        derived_b = (0.5 * whale_wealth) / (active_markets * math.log(2))
-        return max(min_b, derived_b)
-
-    @staticmethod
     def calculate_payout(q_agent: float, q_yes_pool: float, q_no_pool: float, b: float) -> float:
         """
         Calculates the credit value of q_agent shares if they were sold back to the pool.
