@@ -266,7 +266,21 @@ For each sentence $\phi$ with current price $P_t$:
 4. Execute all wagers simultaneously via the Batch Clearing Algorithm.
 5. Prices update to new equilibrium via LMSR formula.
 
-#### **5. Wealth Updates**
+#### **5. Instant Settlement (Mark-to-Market)**
+
+At the end of each round, all belief-based positions (non-bond shares) are settled into liquid wealth. This ensures agents can re-allocate their entire capital every round based on new information.
+
+**Mechanism:**
+1. **Valuation:** The Orchestrator calculates the "Credit Value" of each agent's current position using the final LMSR price of the round.
+2. **Wealth Transfer:** The Whale (Market Maker) pays the agent the market value of their shares in compute credits.
+3. **Whale Absorption:** Instead of being sold back to the pool (which would crash the price), the shares are transferred to the Whale's private inventory.
+
+**Why this is used:**
+- ✅ **Preserves Price Discovery:** By absorbing the shares, the Whale maintains the current market consensus into the next round.
+- ✅ **Prevents Capital Lockup:** Agents aren't "stuck" in old positions and can bet their full wealth on new realizations every tick.
+- ✅ **Ensures Solvency:** Forces a clean reconciliation of wealth for accurate bankruptcy checks.
+
+#### **6. Wealth Updates**
 
 **For Agents:**
 $$W_{i,t+1} = W_{i,t} - \sum_{j} \text{Cost}_{i,j} - T_{inf}$$
@@ -296,7 +310,7 @@ When bond unlocks (after $N_{lock}$ ticks):
 - If price rose: agent profits (captured information alpha)
 - If price fell: agent loses (market rejected proposal)
 
-#### **6. Agent Cleanup**
+#### **7. Agent Cleanup**
 
 **Bankruptcy:** If $W_{i, total} \leq T_{inf}$ where $W_{i, total}$ is the agent's total net worth including both liquid wealth ($W_i$) and the current market value of all their locked bonds:
 - Agent is eliminated from market
@@ -735,10 +749,11 @@ $$k^* = \arg\min_{k} |F_k|$$
 5. **Liquidity Recalculation:** Update $b_t$ based on current Whale wealth
 6. **Trade Conversion:** Convert beliefs to target Wagers via Kelly heuristic
 7. **Trade Execution:** Execute all wagers simultaneously via Batch Clearing, deduct costs, and update LMSR markets
-8. **Tax Application:** Deduct $T_{inf}$ from agent wealth
-9. **Bankruptcy Check:** Remove agents with total net worth $\leq T_{inf}$
-10. **Bond Maturation:** Unlock and settle bonds from round $t - N_{lock}$
-11. **Termination Check:** If $\mathcal{T}(t+1)$, terminate and select winner
+8. **Instant Settlement:** Resolve belief-based trades into liquid wealth; Whale absorbs shares to preserve price discovery
+9. **Tax Application:** Deduct $T_{inf}$ from agent wealth
+10. **Bankruptcy Check:** Remove agents with total net worth $\leq T_{inf}$
+11. **Bond Maturation:** Unlock and settle bonds from round $t - N_{lock}$
+12. **Termination Check:** If $\mathcal{T}(t+1)$, terminate and select winner
 
 ## 5. Implementation
 

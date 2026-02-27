@@ -6,6 +6,7 @@ import stat
 import tempfile
 from market.orchestrator import Orchestrator, AgentAction
 from market.core.state import MarketState, AgentPortfolio, MarketAsset, MarketBond
+from market.core.strategy import Strategy
 
 class TestOrchestrator(unittest.IsolatedAsyncioTestCase):
     
@@ -205,17 +206,27 @@ class TestBondLogic(unittest.IsolatedAsyncioTestCase):
         with open(os.path.join(v_src, "run.sh"), "w") as f:
             f.write("#!/bin/bash\necho hello")
             
-        proposal = {
-            "type": "VERIFIER",
-            "path": "tests/v1"
-        }
-        
-        # This will create a bond via Strategy logic
-        full_src = os.path.join(cand_dir, "tests", "v1")
-        frozen_state = self.orch.state.clone()
-        vid = self.orch._create_verifier_from_path("agent_0", full_src, frozen_state)
-        
+        # 2. Propose verifier (Registers asset)
+        vid = self.orch._create_verifier_from_path("agent_0", v_src)
         self.assertIsNotNone(vid)
+        
+        # 3. Simulate Bond Creation (What process_round does)
+        # Unified Kelly bet for the bond
+        wagers = Strategy.beliefs_to_wagers(
+            {vid: 0.99},
+            self.state.agents["agent_0"].wealth,
+            self.state
+        )
+        self.orch._execute_wager_batch([("agent_0", vid, wagers[0][1])])
+        
+        # Record bond
+        q_shares = self.state.agents["agent_0"].shares.get(vid, 0.0)
+        self.state.bonds.append(MarketBond(
+            agent_id="agent_0",
+            asset_id=vid,
+            q_shares=q_shares,
+            unlock_round=self.state.round_num + 1
+        ))
         
         # Check Bond exists
         self.assertEqual(len(self.state.bonds), 1)
@@ -231,7 +242,7 @@ class TestBondLogic(unittest.IsolatedAsyncioTestCase):
         # Check Cost (Wealth should decrease)
         self.assertTrue(self.state.agents["agent_0"].wealth < 1000.0)
         
-        # 2. Advance Round (Matures immediately if lock=1 and next round is 1)
+        # 4. Advance Round (Matures immediately if lock=1 and next round is 1)
         self.state.round_num += 1
         self.orch._mature_bonds()
         
@@ -311,8 +322,7 @@ class TestOrchestratorVerifier(unittest.IsolatedAsyncioTestCase):
         with open(os.path.join(src_dir, "data.txt"), "w") as f:
             f.write("some data")
             
-        frozen_state = self.orchestrator.state.clone()
-        vid = self.orchestrator._create_verifier_from_path("agent_0", src_dir, frozen_state)
+        vid = self.orchestrator._create_verifier_from_path("agent_0", src_dir)
         self.assertIsNotNone(vid)
         
         # Verify it was copied to verifiers dir
@@ -332,8 +342,7 @@ class TestOrchestratorVerifier(unittest.IsolatedAsyncioTestCase):
         with open(os.path.join(src_dir, "test.py"), "w") as f:
             f.write("print('hi')")
             
-        frozen_state = self.orchestrator.state.clone()
-        vid = self.orchestrator._create_verifier_from_path("agent_0", src_dir, frozen_state)
+        vid = self.orchestrator._create_verifier_from_path("agent_0", src_dir)
         self.assertIsNone(vid)
 
 class PermissionsTest(unittest.IsolatedAsyncioTestCase):

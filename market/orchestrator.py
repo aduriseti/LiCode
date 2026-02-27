@@ -163,45 +163,65 @@ class Orchestrator:
         self.state.round_num += 1
         logging.info(f"--- Round {self.state.round_num} ---")
         
-        # 1. Snapshot State for decision making
+        # 1. Snapshot State at the very start of the round
+        # All decisions (Kelly bets, Whale logic) will be based on this snapshot.
         frozen_state = self.state.clone()
         
         batch_wagers = [] # List of (trader_id, asset_id, wager)
         
-        # 2. Process Proposals & Bonds
+        # Track which assets are new bonds for which agents
+        new_bonds_to_create = {} # agent_id -> list of vids
+        
+        # 2. Process Proposals
         for action in actions:
+            agent_id = action.agent_id
             for proposal in action.proposals:
                 p_type = proposal.get("type")
                 if p_type == "VERIFIER":
-                    cid = f"cand_{action.agent_id.split('_')[-1]}"
+                    cid = f"cand_{agent_id.split('_')[-1]}"
                     if cid in self.state.assets:
                         candidate = self.state.assets[cid]
                         source_path = proposal.get("path")
                         if source_path and candidate.code_path:
                             full_source = os.path.join(candidate.code_path, source_path)
                             if os.path.isdir(full_source):
-                                # Pass frozen_state so the bond wager is calculated against start-of-round wealth
-                                vid = self._create_verifier_from_path(action.agent_id, full_source, frozen_state)
+                                # Register verifier in BOTH active and frozen state
+                                # This allows the Kelly strategy to 'see' the new asset in the frozen state
+                                # while preserving its initial price (0.5).
+                                vid = self._create_verifier_from_path(agent_id, full_source)
                                 if vid:
-                                    logging.info(f"Agent {action.agent_id} proposed new verifier: {vid}")
+                                    # Manually mirror to frozen state assets for consistent decision mapping
+                                    frozen_state.assets[vid] = self.state.assets[vid]
+                                    
+                                    logging.info(f"Agent {agent_id} registered new verifier: {vid}")
+                                    if agent_id not in new_bonds_to_create:
+                                        new_bonds_to_create[agent_id] = []
+                                    new_bonds_to_create[agent_id].append(vid)
                             else:
-                                logging.warning(f"Agent {action.agent_id} proposed verifier at non-existent path: {source_path}")
+                                logging.warning(f"Agent {agent_id} proposed verifier at non-existent path: {source_path}")
 
-        # 3. Mature Bonds (Deterministic selling, done before active trading)
+        # 3. Mature Bonds (Active state only; frozen state remains as it was at round start)
         self._mature_bonds()
         
-        # 4. Agent Actions (Bets)
+        # 4. Agent Actions (Unified Kelly Bets & Bonds)
         for action in actions:
             agent_id = action.agent_id
             if agent_id not in self.state.agents:
                 continue
                 
-            agent = self.state.agents[agent_id]
-            if action.beliefs:
-                # Agents calculate desired wagers based on the FROZEN start-of-round state
+            # Unified Belief Vector: Lump general beliefs + forced bond wagers
+            unified_beliefs = action.beliefs.copy()
+            
+            # Add forced 0.99 belief for all new verifiers proposed by this agent
+            vids = new_bonds_to_create.get(agent_id, [])
+            for vid in vids:
+                unified_beliefs[vid] = 1.0 - self.epsilon
+            
+            if unified_beliefs:
+                # Use ONLY frozen_state for wealth and prices to ensure round-start consistency.
                 wagers = Strategy.beliefs_to_wagers(
-                    action.beliefs, 
-                    frozen_state.agents[agent_id].wealth, # Use frozen wealth 
+                    unified_beliefs, 
+                    frozen_state.agents[agent_id].wealth, 
                     frozen_state
                 )
                 for aid, wager in wagers:
@@ -211,15 +231,31 @@ class Orchestrator:
         await self._run_oracle()
 
         # 6. Whale Logic
-        # Whale computes target beliefs using frozen prices, then wagers based on frozen state
-        whale_wagers = Whale.generate_trades(frozen_state, verifier_prices=None) # Whale logic natively uses the passed state
+        # Whale computes target beliefs and wagers using frozen state context.
+        whale_wagers = Whale.generate_trades(frozen_state, verifier_prices=None) 
         for aid, wager in whale_wagers:
             batch_wagers.append(("whale", aid, wager))
             
         # 7. Simultaneous Execution (The Clearing Engine)
+        # Trades are applied to active self.state
         self._execute_wager_batch(batch_wagers)
         
-        # 8. INSTANT SETTLEMENT
+        # 8. Record Bonds (New bonds are now part of agent.shares)
+        for agent_id, vids in new_bonds_to_create.items():
+            if agent_id in self.state.agents:
+                agent = self.state.agents[agent_id]
+                for vid in vids:
+                    q_shares = agent.shares.get(vid, 0.0)
+                    if q_shares > 0:
+                        self.state.bonds.append(MarketBond(
+                            agent_id=agent_id,
+                            asset_id=vid,
+                            q_shares=q_shares,
+                            unlock_round=self.state.round_num + self.bond_lock_period
+                        ))
+                        logging.info(f"Recorded bond for {agent_id} on {vid}: {q_shares:.2f} shares")
+
+        # 9. INSTANT SETTLEMENT
         self._settle_all_bets()
 
         # 9. Apply Taxes & Check Bankruptcy
@@ -410,7 +446,7 @@ class Orchestrator:
             p_after = self.state.get_asset_price(asset_id)
             logging.info(f"Batch Executed [{asset_id}]: W_yes={w_yes:.2f}, W_no={w_no:.2f}, Q_match={q_match:.2f}, P_after={p_after:.4f}")
 
-    def _create_verifier_from_path(self, agent_id: str, source_path: str, frozen_state: MarketState) -> Optional[str]:
+    def _create_verifier_from_path(self, agent_id: str, source_path: str) -> Optional[str]:
         """Creates a verifier package by copying from agent's worktree."""
         import hashlib
         
@@ -448,37 +484,11 @@ class Orchestrator:
             test_path=v_dir
         )
         
-        # Bond logic (Force buy YES shares using batch logic)
-        if agent_id in self.state.agents:
-            agent = self.state.agents[agent_id]
-            frozen_agent = frozen_state.agents.get(agent_id)
-            if frozen_agent:
-                # Use Strategy to calculate bond wager based on FROZEN wealth
-                bond_wagers = Strategy.beliefs_to_wagers(
-                    {vid: 1.0 - self.epsilon}, 
-                    frozen_agent.wealth, 
-                    self.state # Use active state since asset is brand new
-                )
-                if bond_wagers:
-                    _, wager = bond_wagers[0]
-                    # Execute this single wager through the batch engine
-                    self._execute_wager_batch([(agent_id, vid, wager)])
-                    q_shares = agent.shares.get(vid, 0.0)
-                    if q_shares > 0:
-                        self.state.bonds.append(MarketBond(
-                            agent_id=agent_id,
-                            asset_id=vid,
-                            q_shares=q_shares,
-                            unlock_round=self.state.round_num + self.bond_lock_period
-                        ))
-                        logging.info(f"Created bond for {agent_id} on {vid}: {q_shares:.2f} shares")
-
         return vid
 
-    def _create_verifier(self, agent_id: str, proposal: Dict, frozen_state: MarketState) -> Optional[str]:
+    def _create_verifier(self, agent_id: str, proposal: Dict) -> Optional[str]:
         """Creates a verifier package in the filesystem."""
         import hashlib
-        import time
         
         files = proposal.get("files", {})
         code = proposal.get("code", "")
@@ -539,29 +549,6 @@ class Orchestrator:
             test_path=v_dir
         )
         
-        # Bond logic (Force buy YES shares using batch logic)
-        if agent_id in self.state.agents:
-            agent = self.state.agents[agent_id]
-            frozen_agent = frozen_state.agents.get(agent_id)
-            if frozen_agent:
-                bond_wagers = Strategy.beliefs_to_wagers(
-                    {vid: 1.0 - self.epsilon}, 
-                    frozen_agent.wealth, 
-                    self.state # Use active state since asset is new
-                )
-                if bond_wagers:
-                    _, wager = bond_wagers[0]
-                    self._execute_wager_batch([(agent_id, vid, wager)])
-                    q_shares = agent.shares.get(vid, 0.0)
-                    if q_shares > 0:
-                        self.state.bonds.append(MarketBond(
-                            agent_id=agent_id,
-                            asset_id=vid,
-                            q_shares=q_shares,
-                            unlock_round=self.state.round_num + self.bond_lock_period
-                        ))
-                        logging.info(f"Created bond for {agent_id} on {vid}: {q_shares:.2f} shares")
-
         return vid
 
     async def _run_oracle(self):
