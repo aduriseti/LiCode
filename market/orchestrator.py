@@ -216,12 +216,27 @@ class Orchestrator:
         self._settle_all_bets()
 
         # 7. Apply Taxes & Check Bankruptcy
+        # An agent is bankrupt if their TOTAL value (Liquid Wealth + Bond Value) <= Tax
         to_remove = []
         for aid, agent in self.state.agents.items():
-            agent.wealth -= self.inference_tax
-            if agent.wealth <= 0:
-                logging.info(f"Agent {aid} went bankrupt!")
+            # Calculate current market value of all bonds held by this agent
+            bond_value = 0.0
+            agent_bonds = [b for b in self.state.bonds if b.agent_id == aid]
+            for bond in agent_bonds:
+                asset = self.state.assets.get(bond.asset_id)
+                if asset:
+                    # Current price of the bond (as NO shares were not bought, this is current price of YES shares)
+                    price = self.state.get_asset_price(bond.asset_id)
+                    bond_value += bond.q_shares * price
+            
+            total_net_worth = agent.wealth + bond_value
+            
+            if total_net_worth <= self.inference_tax:
+                logging.info(f"Agent {aid} went bankrupt! (Net Worth: {total_net_worth:.2f}, Tax: {self.inference_tax:.2f})")
                 to_remove.append(aid)
+            else:
+                # Pay tax from liquid wealth (can go slightly negative if total value is high)
+                agent.wealth -= self.inference_tax
                 
         for aid in to_remove:
             agent = self.state.agents[aid]
@@ -234,7 +249,7 @@ class Orchestrator:
             
             # Transfer remaining estate to the Whale (Escheatment)
             # This ensures zero-sum conservation when an agent is deleted.
-            if agent.wealth != 0:
+            if abs(agent.wealth) > 0.0001:
                 logging.info(f"Agent {aid} estate of {agent.wealth:.2f} escheated to Whale.")
                 self.state.whale_wealth += agent.wealth
                 agent.wealth = 0.0
