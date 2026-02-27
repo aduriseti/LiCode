@@ -41,12 +41,13 @@ class Strategy:
             # 1. Clip belief (Design 4.D Step 1: epsilon = 0.01)
             p_belief = max(epsilon, min(1.0 - epsilon, belief))
             
-            # 2. Clip price for denominator safety (Design 4.D Step 2)
+            # 2. Clip price for denominator safety AND edge calculation (Design 4.D Step 2)
+            # Symmetric clipping prevents "phantom edges" at the price boundaries (0.0 and 1.0)
             p_safe = max(epsilon, min(1.0 - epsilon, price))
             
-            # Kelly fraction: f* = (p_belief - price) / (price * (1 - price))
-            # If p_belief > price, we go long. If p_belief < price, we go short.
-            f_star = (p_belief - price) / (p_safe * (1.0 - p_safe))
+            # Kelly fraction: f* = (p_belief - p_safe) / (p_safe * (1 - p_safe))
+            # If p_belief > p_safe, we go long. If p_belief < p_safe, we go short.
+            f_star = (p_belief - p_safe) / (p_safe * (1.0 - p_safe))
             
             # Record absolute exposure for normalization
             desired_exposures[aid] = f_star

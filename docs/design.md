@@ -606,7 +606,13 @@ where $\epsilon = 0.01$ (prevents extreme confidence)
 
 **Step 2 - Compute Ideal Kelly Fractions:**
 For each sentence $\varphi$:
-$$f_{\varphi}^* = \frac{b_{i,t}^{clip} - P_t}{P_t \cdot (1 - P_t)}$$
+$$f_{\varphi}^* = \frac{b_{i,t}^{clip} - P_t^{clip}}{P_t^{clip} \cdot (1 - P_t^{clip})}$$
+
+where:
+- $b_{i,t}^{clip} = \text{clip}(b_{i,t}, \epsilon, 1-\epsilon)$
+- $P_t^{clip} = \text{clip}(P_t, \epsilon, 1-\epsilon)$
+
+*Rationale:* Symmetric clipping ensures that if both the agent and the market are at the confidence ceiling (e.g., belief = 0.99, price = 1.0), the perceived edge is zero. This prevents "flash crashes" where agents are mathematically incentivized to short-sell a highly successful candidate simply because the agent's belief is clipped while the market price is not.
 
 *Interpretation:*
 - $f_{\varphi}^* > 0$: Want to long (buy YES shares)
