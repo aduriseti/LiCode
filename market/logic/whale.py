@@ -1,6 +1,6 @@
 import math
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 # Use relative imports if running as package, or assume PYTHONPATH set
 from ..core.lmsr import LMSRMarket
@@ -17,7 +17,7 @@ class Whale:
     """
     
     @staticmethod
-    def compute_survival_scores(state: MarketState) -> Dict[str, float]:
+    def compute_survival_scores(state: MarketState, verifier_prices: Optional[Dict[str, float]] = None) -> Dict[str, float]:
         """
         Calculates log-survival score for each candidate.
         S_i = Sum( ln(1 - P(Verifier_j)) ) for all j where i failed j.
@@ -31,11 +31,16 @@ class Whale:
         # Identify all candidates
         candidates = [aid for aid, a in state.assets.items() if a.type == "CANDIDATE"]
         
-        # Pre-calculate verifier probabilities to avoid repeated math
-        verifier_probs = {}
-        for aid, asset in state.assets.items():
-            if asset.type == "VERIFIER":
-                verifier_probs[aid] = state.get_asset_price(aid)
+        # Determine which probabilities to use
+        # If verifier_prices is provided, use those (e.g. start-of-round prices)
+        # Otherwise fall back to current state prices
+        if verifier_prices is None:
+            verifier_probs = {}
+            for aid, asset in state.assets.items():
+                if asset.type == "VERIFIER":
+                    verifier_probs[aid] = state.get_asset_price(aid)
+        else:
+            verifier_probs = verifier_prices
                 
         for cid in candidates:
             score = 0.0
@@ -45,6 +50,7 @@ class Whale:
                 vid, failed_cid = fail_key.split(":")
                 if failed_cid == cid:
                     # Get probability that this verifier is VALID
+                    # Default to 0.5 if it's a brand new verifier not in pre-trade prices
                     p_valid = verifier_probs.get(vid, 0.5)
                     
                     # Avoid log(0)
@@ -81,7 +87,7 @@ class Whale:
         return {cid: v / total_exp for cid, v in exps.items()}
 
     @staticmethod
-    def generate_trades(state: MarketState) -> List[Tuple[str, float]]:
+    def generate_trades(state: MarketState, verifier_prices: Optional[Dict[str, float]] = None) -> List[Tuple[str, float]]:
         """
         Determines what trades the Whale should make to enforce logic.
         Uses the Kelly Strategy for active trading.
@@ -89,7 +95,7 @@ class Whale:
         Returns:
             List of (asset_id, delta_q)
         """
-        scores = Whale.compute_survival_scores(state)
+        scores = Whale.compute_survival_scores(state, verifier_prices=verifier_prices)
         beliefs = Whale.compute_whale_beliefs(scores)
         
         if scores:
@@ -101,7 +107,7 @@ class Whale:
             
         # The Whale trades using the same Kelly strategy as agents
         # (Design 2.C.2 and 4.C)
-        return Strategy.beliefs_to_trades(
+        return Strategy.beliefs_to_wagers(
             beliefs,
             state.whale_wealth,
             state

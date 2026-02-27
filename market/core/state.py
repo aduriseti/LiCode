@@ -84,6 +84,10 @@ class MarketState:
             "bonds": [b.to_dict() for b in self.bonds]
         }, indent=2)
 
+    def clone(self):
+        """Returns a deep copy of the current state."""
+        return MarketState.from_json(self.to_json())
+
     @staticmethod
     def from_json(json_str: str):
         data = json.loads(json_str)

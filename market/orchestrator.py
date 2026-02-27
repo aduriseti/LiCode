@@ -6,7 +6,7 @@ import hashlib
 import shutil
 import subprocess
 import asyncio
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
 from market.core.state import MarketState, AgentPortfolio, MarketAsset, MarketBond
@@ -157,21 +157,22 @@ class Orchestrator:
 
     async def process_round(self, actions: List[AgentAction]):
         """
-        Executes one full market round.
+        Executes one full market round using Simultaneous Batching.
         """
         import asyncio
         self.state.round_num += 1
         logging.info(f"--- Round {self.state.round_num} ---")
         
-        # 0. Liquidity is now FIXED at budget/20.0 (set in __init__)
-        # No scaling or dynamic recalculation.
-
-        # 1. Process Proposals (New Assets)
+        # 1. Snapshot State for decision making
+        frozen_state = self.state.clone()
+        
+        batch_wagers = [] # List of (trader_id, asset_id, wager)
+        
+        # 2. Process Proposals & Bonds
         for action in actions:
             for proposal in action.proposals:
                 p_type = proposal.get("type")
                 if p_type == "VERIFIER":
-                    # Agent must have written files to their worktree first
                     cid = f"cand_{action.agent_id.split('_')[-1]}"
                     if cid in self.state.assets:
                         candidate = self.state.assets[cid]
@@ -179,16 +180,17 @@ class Orchestrator:
                         if source_path and candidate.code_path:
                             full_source = os.path.join(candidate.code_path, source_path)
                             if os.path.isdir(full_source):
-                                vid = self._create_verifier_from_path(action.agent_id, full_source)
+                                # Pass frozen_state so the bond wager is calculated against start-of-round wealth
+                                vid = self._create_verifier_from_path(action.agent_id, full_source, frozen_state)
                                 if vid:
                                     logging.info(f"Agent {action.agent_id} proposed new verifier: {vid}")
                             else:
                                 logging.warning(f"Agent {action.agent_id} proposed verifier at non-existent path: {source_path}")
 
-        # 2. Mature Bonds (Unlock capital from previous rounds)
+        # 3. Mature Bonds (Deterministic selling, done before active trading)
         self._mature_bonds()
         
-        # 3. Agent Actions (Bets) - Execute before Oracle/Whale to allow alpha capture (Design 4.H Step 7)
+        # 4. Agent Actions (Bets)
         for action in actions:
             agent_id = action.agent_id
             if agent_id not in self.state.agents:
@@ -196,36 +198,39 @@ class Orchestrator:
                 
             agent = self.state.agents[agent_id]
             if action.beliefs:
-                trades = Strategy.beliefs_to_trades(
+                # Agents calculate desired wagers based on the FROZEN start-of-round state
+                wagers = Strategy.beliefs_to_wagers(
                     action.beliefs, 
-                    agent.wealth, 
-                    self.state
+                    frozen_state.agents[agent_id].wealth, # Use frozen wealth 
+                    frozen_state
                 )
-                self._execute_trades(agent_id, trades)
+                for aid, wager in wagers:
+                    batch_wagers.append((agent_id, aid, wager))
 
-        # 4. Oracle Execution (Design 4.H Step 2)
+        # 5. Oracle Execution
         await self._run_oracle()
 
-        # 5. Whale Logic (Active Deductive) - Execute after agents (Design 4.H Step 7)
-        whale_trades = Whale.generate_trades(self.state)
-        self._execute_trades("whale", whale_trades)
+        # 6. Whale Logic
+        # Whale computes target beliefs using frozen prices, then wagers based on frozen state
+        whale_wagers = Whale.generate_trades(frozen_state, verifier_prices=None) # Whale logic natively uses the passed state
+        for aid, wager in whale_wagers:
+            batch_wagers.append(("whale", aid, wager))
+            
+        # 7. Simultaneous Execution (The Clearing Engine)
+        self._execute_wager_batch(batch_wagers)
         
-        # 6. INSTANT SETTLEMENT
-        # Mark-to-Market all belief-based trades at the end of the round.
-        # Locked bonds are EXCLUDED.
+        # 8. INSTANT SETTLEMENT
         self._settle_all_bets()
 
-        # 7. Apply Taxes & Check Bankruptcy
+        # 9. Apply Taxes & Check Bankruptcy
         # An agent is bankrupt if their TOTAL value (Liquid Wealth + Bond Value) <= Tax
         to_remove = []
         for aid, agent in self.state.agents.items():
-            # Calculate current market value of all bonds held by this agent
             bond_value = 0.0
             agent_bonds = [b for b in self.state.bonds if b.agent_id == aid]
             for bond in agent_bonds:
                 asset = self.state.assets.get(bond.asset_id)
                 if asset:
-                    # Current price of the bond (as NO shares were not bought, this is current price of YES shares)
                     price = self.state.get_asset_price(bond.asset_id)
                     bond_value += bond.q_shares * price
             
@@ -235,20 +240,15 @@ class Orchestrator:
                 logging.info(f"Agent {aid} went bankrupt! (Net Worth: {total_net_worth:.2f}, Tax: {self.inference_tax:.2f})")
                 to_remove.append(aid)
             else:
-                # Pay tax from liquid wealth (can go slightly negative if total value is high)
                 agent.wealth -= self.inference_tax
                 
         for aid in to_remove:
             agent = self.state.agents[aid]
-            # Force liquidate any remaining bonds for this agent
             agent_bonds = [b for b in self.state.bonds if b.agent_id == aid]
             for bond in agent_bonds:
-                # Proceed with liquidation trades. Cost will be negative (payout).
-                self._execute_trades(aid, [(bond.asset_id, -bond.q_shares)])
+                self._liquidate_shares(aid, bond.asset_id, bond.q_shares)
                 self.state.bonds.remove(bond)
             
-            # Transfer remaining estate to the Whale (Escheatment)
-            # This ensures zero-sum conservation when an agent is deleted.
             if abs(agent.wealth) > 0.0001:
                 logging.info(f"Agent {aid} estate of {agent.wealth:.2f} escheated to Whale.")
                 self.state.whale_wealth += agent.wealth
@@ -256,20 +256,46 @@ class Orchestrator:
                 
             del self.state.agents[aid]
 
+    def _liquidate_shares(self, agent_id: str, asset_id: str, q_shares: float):
+        """Sells shares back to the LMSR pool and credits the agent."""
+        if agent_id not in self.state.agents: return
+        agent = self.state.agents[agent_id]
+        if asset_id not in self.state.assets: return
+        asset = self.state.assets[asset_id]
+        b = self.state.liquidity_b
+        
+        payout = LMSRMarket.calculate_payout(q_shares, asset.q_yes, asset.q_no, b)
+        
+        if q_shares > 0:
+            asset.q_yes -= q_shares
+        else:
+            asset.q_no += q_shares
+            
+        agent.wealth += payout
+        self.state.whale_wealth -= payout
+        
+        current_shares = agent.shares.get(asset_id, 0.0)
+        new_shares = current_shares - q_shares
+        if abs(new_shares) < 1e-5:
+            if asset_id in agent.shares: del agent.shares[asset_id]
+        else:
+            agent.shares[asset_id] = new_shares
+            
+        logging.info(f"Liquidated {q_shares:.2f} of {asset_id} for {agent_id}. Payout: {payout:.2f}")
+
     def _settle_all_bets(self):
         """
-        Resolves all non-bond positions for the round by transferring their credit value
-        from the Whale to the Agents. Price discovery is preserved.
+        Mark-to-Market all belief-based trades.
+        Shares not locked in bonds are settled: agents get their current value,
+        and the Whale absorbs the position to preserve price discovery.
         """
-        # Map of agent_id -> asset_id -> shares_to_keep (from bonds)
         locked_shares = {}
         for bond in self.state.bonds:
             if bond.agent_id not in locked_shares:
                 locked_shares[bond.agent_id] = {}
             locked_shares[bond.agent_id][bond.asset_id] = locked_shares[bond.agent_id].get(bond.asset_id, 0.0) + bond.q_shares
 
-        # 1. Settle Agents: Calculate payout for non-bond shares
-        for aid, agent in self.state.agents.items():
+        for aid, agent in list(self.state.agents.items()):
             for asset_id, q_shares in list(agent.shares.items()):
                 locked = locked_shares.get(aid, {}).get(asset_id, 0.0)
                 exposure = q_shares - locked
@@ -288,6 +314,9 @@ class Orchestrator:
                     agent.wealth += payout
                     self.state.whale_wealth -= payout
                     
+                    # Whale absorbs the shares to maintain the market price
+                    self.state.whale_shares[asset_id] = self.state.whale_shares.get(asset_id, 0.0) + exposure
+                    
                     # Clear the exposure from agent
                     if abs(locked) < 0.0001:
                         del agent.shares[asset_id]
@@ -297,7 +326,91 @@ class Orchestrator:
                     if abs(payout) > 0.0001:
                         logging.info(f"Settlement: Agent {aid} received {payout:.2f} payout for {asset_id} position ({exposure:.2f} shares)")
 
-    def _create_verifier_from_path(self, agent_id: str, source_path: str) -> Optional[str]:
+        # Whale's active trades are kept as part of the market, they aren't settled here.
+                
+    def _execute_wager_batch(self, intents: List[Tuple[str, str, float]]):
+        """
+        Clears all intended wagers simultaneously for each asset.
+        """
+        # Group by asset
+        asset_intents = {}
+        for trader_id, asset_id, wager in intents:
+            if asset_id not in asset_intents:
+                asset_intents[asset_id] = []
+            asset_intents[asset_id].append((trader_id, wager))
+            
+        b = self.state.liquidity_b
+        
+        for asset_id, trades in asset_intents.items():
+            if asset_id not in self.state.assets: continue
+            asset = self.state.assets[asset_id]
+            p0 = self.state.get_asset_price(asset_id)
+            
+            w_yes = 0.0
+            w_no = 0.0
+            
+            for _, wager in trades:
+                if wager > 0: w_yes += wager
+                elif wager < 0: w_no += abs(wager)
+                
+            if w_yes == 0 and w_no == 0: continue
+            
+            # 1. Matching (Cancel opposing wagers at current price)
+            p_yes_safe = max(1e-9, min(1.0 - 1e-9, p0))
+            p_no_safe = 1.0 - p_yes_safe
+            
+            q_match = min(w_yes / p_yes_safe, w_no / p_no_safe)
+            
+            match_w_yes = q_match * p_yes_safe
+            match_w_no = q_match * p_no_safe
+            
+            rem_w_yes = w_yes - match_w_yes
+            rem_w_no = w_no - match_w_no
+            
+            # 2. Push LMSR with remainder
+            delta_q_lmsr_yes = 0.0
+            delta_q_lmsr_no = 0.0
+            
+            if rem_w_yes > 1e-5:
+                delta_q_lmsr_yes = LMSRMarket.calculate_delta_q(asset.q_yes, asset.q_no, b, rem_w_yes, True)
+                asset.q_yes += delta_q_lmsr_yes
+            elif rem_w_no > 1e-5:
+                delta_q_lmsr_no = LMSRMarket.calculate_delta_q(asset.q_yes, asset.q_no, b, rem_w_no, False)
+                asset.q_no += delta_q_lmsr_no
+                
+            total_yes_created = q_match + delta_q_lmsr_yes
+            total_no_created = q_match + delta_q_lmsr_no
+            
+            # 3. Distribute Shares & Deduct Wealth
+            for trader_id, wager in trades:
+                if abs(wager) < 1e-5: continue
+                
+                # Wealth transfer: Agents pay the pool (Whale)
+                if trader_id != "whale":
+                    trader_obj = self.state.agents.get(trader_id)
+                    if trader_obj:
+                        trader_obj.wealth -= abs(wager)
+                        self.state.whale_wealth += abs(wager)
+                
+                if wager > 0:
+                    portion = wager / w_yes if w_yes > 0 else 0
+                    shares_won = total_yes_created * portion
+                    if trader_id == "whale":
+                        self.state.whale_shares[asset_id] = self.state.whale_shares.get(asset_id, 0.0) + shares_won
+                    else:
+                        trader_obj.shares[asset_id] = trader_obj.shares.get(asset_id, 0.0) + shares_won
+                else:
+                    portion = abs(wager) / w_no if w_no > 0 else 0
+                    shares_won = total_no_created * portion
+                    if trader_id == "whale":
+                        self.state.whale_shares[asset_id] = self.state.whale_shares.get(asset_id, 0.0) - shares_won
+                    else:
+                        trader_obj.shares[asset_id] = trader_obj.shares.get(asset_id, 0.0) - shares_won
+            
+            p_after = self.state.get_asset_price(asset_id)
+            logging.info(f"Batch Executed [{asset_id}]: W_yes={w_yes:.2f}, W_no={w_no:.2f}, Q_match={q_match:.2f}, P_after={p_after:.4f}")
+
+    def _create_verifier_from_path(self, agent_id: str, source_path: str, frozen_state: MarketState) -> Optional[str]:
         """Creates a verifier package by copying from agent's worktree."""
         import hashlib
         
@@ -335,32 +448,37 @@ class Orchestrator:
             test_path=v_dir
         )
         
-        # Bond logic (Force buy YES shares)
+        # Bond logic (Force buy YES shares using batch logic)
         if agent_id in self.state.agents:
             agent = self.state.agents[agent_id]
-            # Use Strategy to calculate bond size (buying YES shares)
-            bond_trades = Strategy.beliefs_to_trades(
-                {vid: 1.0 - self.epsilon}, 
-                agent.wealth, 
-                self.state
-            )
-            if bond_trades:
-                self._execute_trades(agent_id, bond_trades)
-                q_shares = agent.shares.get(vid, 0.0)
-                if q_shares > 0:
-                    self.state.bonds.append(MarketBond(
-                        agent_id=agent_id,
-                        asset_id=vid,
-                        q_shares=q_shares,
-                        unlock_round=self.state.round_num + self.bond_lock_period
-                    ))
-                    logging.info(f"Created bond for {agent_id} on {vid}: {q_shares:.2f} shares")
+            frozen_agent = frozen_state.agents.get(agent_id)
+            if frozen_agent:
+                # Use Strategy to calculate bond wager based on FROZEN wealth
+                bond_wagers = Strategy.beliefs_to_wagers(
+                    {vid: 1.0 - self.epsilon}, 
+                    frozen_agent.wealth, 
+                    self.state # Use active state since asset is brand new
+                )
+                if bond_wagers:
+                    _, wager = bond_wagers[0]
+                    # Execute this single wager through the batch engine
+                    self._execute_wager_batch([(agent_id, vid, wager)])
+                    q_shares = agent.shares.get(vid, 0.0)
+                    if q_shares > 0:
+                        self.state.bonds.append(MarketBond(
+                            agent_id=agent_id,
+                            asset_id=vid,
+                            q_shares=q_shares,
+                            unlock_round=self.state.round_num + self.bond_lock_period
+                        ))
+                        logging.info(f"Created bond for {agent_id} on {vid}: {q_shares:.2f} shares")
 
         return vid
 
-    def _create_verifier(self, agent_id: str, proposal: Dict) -> Optional[str]:
+    def _create_verifier(self, agent_id: str, proposal: Dict, frozen_state: MarketState) -> Optional[str]:
         """Creates a verifier package in the filesystem."""
         import hashlib
+        import time
         
         files = proposal.get("files", {})
         code = proposal.get("code", "")
@@ -421,28 +539,28 @@ class Orchestrator:
             test_path=v_dir
         )
         
-        # Bond logic (Force buy YES shares)
+        # Bond logic (Force buy YES shares using batch logic)
         if agent_id in self.state.agents:
             agent = self.state.agents[agent_id]
-            # Use Strategy to calculate bond size (buying YES shares)
-            bond_trades = Strategy.beliefs_to_trades(
-                {vid: 1.0 - self.epsilon}, 
-                agent.wealth, 
-                self.state
-            )
-            if bond_trades:
-                # Execute the trade
-                self._execute_trades(agent_id, bond_trades)
-                # Record the bond for later maturation
-                q_shares = agent.shares.get(vid, 0.0)
-                if q_shares > 0:
-                    self.state.bonds.append(MarketBond(
-                        agent_id=agent_id,
-                        asset_id=vid,
-                        q_shares=q_shares,
-                        unlock_round=self.state.round_num + self.bond_lock_period
-                    ))
-                    logging.info(f"Created bond for {agent_id} on {vid}: {q_shares:.2f} shares")
+            frozen_agent = frozen_state.agents.get(agent_id)
+            if frozen_agent:
+                bond_wagers = Strategy.beliefs_to_wagers(
+                    {vid: 1.0 - self.epsilon}, 
+                    frozen_agent.wealth, 
+                    self.state # Use active state since asset is new
+                )
+                if bond_wagers:
+                    _, wager = bond_wagers[0]
+                    self._execute_wager_batch([(agent_id, vid, wager)])
+                    q_shares = agent.shares.get(vid, 0.0)
+                    if q_shares > 0:
+                        self.state.bonds.append(MarketBond(
+                            agent_id=agent_id,
+                            asset_id=vid,
+                            q_shares=q_shares,
+                            unlock_round=self.state.round_num + self.bond_lock_period
+                        ))
+                        logging.info(f"Created bond for {agent_id} on {vid}: {q_shares:.2f} shares")
 
         return vid
 
@@ -492,103 +610,8 @@ class Orchestrator:
             logging.info(f"Maturing {len(matured)} bonds")
             
         for bond in matured:
-            # Sell back shares: delta_q = -q_shares
-            # We use _execute_trades which handles wealth updates and share tracking
-            self._execute_trades(bond.agent_id, [(bond.asset_id, -bond.q_shares)])
+            self._liquidate_shares(bond.agent_id, bond.asset_id, bond.q_shares)
             self.state.bonds.remove(bond)
-
-    def _execute_trades(self, trader_id: str, trades: List[tuple]):
-        if trades:
-            logging.info(f"Executing {len(trades)} trades for {trader_id}")
-        for asset_id, delta_q in trades:
-            if asset_id not in self.state.assets:
-                continue
-                
-            asset = self.state.assets[asset_id]
-            b = self.state.liquidity_b
-            
-            # --- 1. Determine Trade Structure (d_yes, d_no) ---
-            # We map the requested 'net delta' into changes in YES and NO shares
-            # based on the agent's current holding.
-            
-            current_pos = 0.0
-            if trader_id != "whale":
-                current_pos = self.state.agents[trader_id].shares.get(asset_id, 0.0)
-            else:
-                current_pos = self.state.whale_shares.get(asset_id, 0.0)
-            
-            d_yes = 0.0
-            d_no = 0.0
-            
-            if delta_q > 0:
-                # Buying YES (Net Long)
-                if current_pos < 0:
-                    # Covering Short: Sell NO shares back
-                    # current_pos is negative (e.g. -10). We want to buy +15.
-                    # Cover 10 NO shares (d_no = -10), then Buy 5 YES (d_yes = +5).
-                    cover_amt = min(delta_q, abs(current_pos))
-                    d_no -= cover_amt
-                    rem_delta = delta_q - cover_amt
-                    d_yes += rem_delta
-                else:
-                    # Already Long or Neutral: Just Buy YES
-                    d_yes += delta_q
-                    
-            elif delta_q < 0:
-                # Selling YES / Buying NO (Net Short)
-                abs_delta = abs(delta_q)
-                if current_pos > 0:
-                    # Closing Long: Sell YES shares back
-                    # current_pos is 10. We want to sell -15.
-                    # Sell 10 YES (d_yes = -10), then Buy 5 NO (d_no = +5).
-                    sell_amt = min(abs_delta, current_pos)
-                    d_yes -= sell_amt
-                    rem_delta = abs_delta - sell_amt
-                    d_no += rem_delta
-                else:
-                    # Already Short or Neutral: Just Buy NO
-                    d_no += abs_delta
-
-            # --- 2. Calculate Cost ---
-            # Cost = C(new) - C(old)
-            old_cost = LMSRMarket.cost_function(asset.q_yes, asset.q_no, b)
-            new_cost = LMSRMarket.cost_function(asset.q_yes + d_yes, asset.q_no + d_no, b)
-            cost = new_cost - old_cost
-            
-            # --- 3. Check Affordability ---
-            if trader_id != "whale":
-                agent = self.state.agents[trader_id]
-                if cost > agent.wealth:
-                    # Scale down trade
-                    # If cost is positive (paying), we are limited by budget.
-                    # If cost is negative (profit), we are not limited.
-                    if cost > 0:
-                        ratio = agent.wealth / cost
-                        d_yes *= ratio
-                        d_no *= ratio
-                        # Recalculate cost
-                        new_cost = LMSRMarket.cost_function(asset.q_yes + d_yes, asset.q_no + d_no, b)
-                        cost = new_cost - old_cost
-
-            # --- 4. Execute ---
-            asset.q_yes += d_yes
-            asset.q_no += d_no
-            
-            # Update Wealth (Symmetric Zero-Sum Logic)
-            if trader_id != "whale":
-                # Agents pay the Market Maker (The Whale)
-                self.state.agents[trader_id].wealth -= cost
-                self.state.whale_wealth += cost
-                
-                # Update Agent Portfolio
-                current_shares = self.state.agents[trader_id].shares.get(asset_id, 0.0)
-                self.state.agents[trader_id].shares[asset_id] = current_shares + delta_q
-            
-            # Whale trades only move the global pool (the MM inventory).
-            # No internal wealth transfer is needed because Whale wealth IS the MM pool.
-            
-            p_after = self.state.get_asset_price(asset_id)
-            logging.info(f"Trade Executed [{trader_id}]: Asset={asset_id}, Delta={delta_q:.2f} (d_yes={d_yes:.2f}, d_no={d_no:.2f}), Cost={cost:.2f}, P_after={p_after:.4f}")
 
     def get_pretty_summary(self) -> str:
         lines = []

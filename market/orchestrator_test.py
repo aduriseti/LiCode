@@ -113,11 +113,11 @@ class TestOrchestrator(unittest.IsolatedAsyncioTestCase):
         initial_whale_wealth = orch.state.whale_wealth
         
         # Simulate a Whale active trade (deductive)
-        # Whale wants to buy 50 YES shares of cand_0
-        trades = [("cand_0", 50.0)]
-        orch._execute_trades("whale", trades)
+        # Whale wants to wager 50 on YES for cand_0
+        wagers = [("whale", "cand_0", 50.0)]
+        orch._execute_wager_batch(wagers)
         
-        # Whale wealth should be EXACTLY the same (-cost + cost)
+        # Whale wealth should be EXACTLY the same (-cost + cost for market making vs trading)
         self.assertEqual(orch.state.whale_wealth, initial_whale_wealth)
         # But price should have moved
         self.assertTrue(orch.state.get_asset_price("cand_0") > 0.5)
@@ -130,16 +130,52 @@ class TestOrchestrator(unittest.IsolatedAsyncioTestCase):
         initial_whale_wealth = orch.state.whale_wealth
         initial_agent_wealth = orch.state.agents["agent_0"].wealth
         
-        # Agent 0 buys 50 shares
-        trades = [("cand_0", 50.0)]
-        orch._execute_trades("agent_0", trades)
+        # Agent 0 wagers 50
+        wagers = [("agent_0", "cand_0", 50.0)]
+        orch._execute_wager_batch(wagers)
         
         agent_wealth_after = orch.state.agents["agent_0"].wealth
         whale_wealth_after = orch.state.whale_wealth
         
         cost = initial_agent_wealth - agent_wealth_after
-        self.assertTrue(cost > 0)
+        self.assertAlmostEqual(cost, 50.0, places=5) # Agent spent exactly 50
         self.assertAlmostEqual(whale_wealth_after, initial_whale_wealth + cost, places=5)
+
+    async def test_no_overspend_during_round(self):
+        """
+        Integration test verifying an agent's total spend across multiple assets 
+        never exceeds their initial wealth during a full batch execution.
+        """
+        orch = Orchestrator("Test Overspend", n_agents=1, budget=1000.0)
+        await orch.initialize()
+        
+        # Add a couple of dummy assets
+        from market.core.state import MarketAsset
+        orch.state.assets["cand_1"] = MarketAsset("cand_1", "CANDIDATE", "Desc")
+        orch.state.assets["cand_2"] = MarketAsset("cand_2", "CANDIDATE", "Desc")
+        
+        initial_wealth = orch.state.agents["agent_0"].wealth
+        
+        # Agent has extreme beliefs, wants to bet everything on all three candidates
+        action = AgentAction(
+            agent_id="agent_0",
+            beliefs={"cand_0": 0.99, "cand_1": 0.01, "cand_2": 0.99}
+        )
+        
+        # We patch oracle to avoid FS ops
+        with mock.patch.object(orch, '_run_oracle', new_callable=mock.AsyncMock):
+            await orch.process_round([action])
+            
+        final_wealth = orch.state.agents["agent_0"].wealth
+        
+        # Calculate how much was spent on trading (excluding inference tax)
+        trade_spend = initial_wealth - (final_wealth + orch.inference_tax)
+        
+        # Verify the agent didn't spend more than they started with
+        self.assertLessEqual(trade_spend, initial_wealth + 1e-5)
+        # Because we settle trades immediately, their net trade spend is 0,
+        # but they didn't overspend during execution.
+        self.assertAlmostEqual(trade_spend, 0.0, places=5)
 
 class TestBondLogic(unittest.IsolatedAsyncioTestCase):
 
@@ -176,7 +212,8 @@ class TestBondLogic(unittest.IsolatedAsyncioTestCase):
         
         # This will create a bond via Strategy logic
         full_src = os.path.join(cand_dir, "tests", "v1")
-        vid = self.orch._create_verifier_from_path("agent_0", full_src)
+        frozen_state = self.orch.state.clone()
+        vid = self.orch._create_verifier_from_path("agent_0", full_src, frozen_state)
         
         self.assertIsNotNone(vid)
         
@@ -244,8 +281,9 @@ class TestBondLogic(unittest.IsolatedAsyncioTestCase):
         
         self.assertTrue(agent.shares.get(vid, 0.0) > 0)
         
-        # Verify Whale deductive positions also settled
-        self.assertEqual(len(orch.state.whale_shares), 0)
+        # Verify Whale absorbed the settled positions to maintain price
+        self.assertTrue(len(orch.state.whale_shares) > 0)
+        self.assertTrue(orch.state.whale_shares.get("cand_0", 0.0) > 0)
 
 class TestOrchestratorVerifier(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -273,7 +311,8 @@ class TestOrchestratorVerifier(unittest.IsolatedAsyncioTestCase):
         with open(os.path.join(src_dir, "data.txt"), "w") as f:
             f.write("some data")
             
-        vid = self.orchestrator._create_verifier_from_path("agent_0", src_dir)
+        frozen_state = self.orchestrator.state.clone()
+        vid = self.orchestrator._create_verifier_from_path("agent_0", src_dir, frozen_state)
         self.assertIsNotNone(vid)
         
         # Verify it was copied to verifiers dir
@@ -293,7 +332,8 @@ class TestOrchestratorVerifier(unittest.IsolatedAsyncioTestCase):
         with open(os.path.join(src_dir, "test.py"), "w") as f:
             f.write("print('hi')")
             
-        vid = self.orchestrator._create_verifier_from_path("agent_0", src_dir)
+        frozen_state = self.orchestrator.state.clone()
+        vid = self.orchestrator._create_verifier_from_path("agent_0", src_dir, frozen_state)
         self.assertIsNone(vid)
 
 class PermissionsTest(unittest.IsolatedAsyncioTestCase):

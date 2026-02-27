@@ -125,7 +125,7 @@ When an agent proposes a new sentence, they must stake a **forced long position*
    - Liquidity: $b_t$ calculated using current Whale wealth
 
 2. **Proposer Buys Bond:**
-   - Proposer purchases $\Delta q$ shares from the LMSR at current price ($P_0 = 0.5$)
+   - Proposer stakes a target wager $W_{bond}$ on the LMSR at current price ($P_0 = 0.5$) to acquire $\Delta q_{bond}$ shares
    - Payment goes into LMSR cost function
    - Shares are locked for $N_{lock}$ ticks (cannot be sold immediately)
 
@@ -135,7 +135,7 @@ When an agent proposes a new sentence, they must stake a **forced long position*
    - Whale does NOT submit any active belief or trade for newly proposed verifier validity
 
 4. **Price Movement:**
-   - After bond purchase: $q_{yes} = \Delta q$
+   - After bond purchase: $q_{yes} = \Delta q_{bond}$
    - New price: $P_1 > P_0$ (bond moved the market)
    - Other agents now see this price and can trade
 
@@ -230,53 +230,41 @@ $$\kappa_{i}=\frac{1}{\max(1,L_{i})}$$
 
 If $L_i > 1$, scale down all positions (bets and bonds) proportionally.
 
-**Step D: Convert to LMSR Share Purchases**
-The orchestrator determines the number of shares $\Delta q$ that results in the desired cost $S = W \cdot \kappa \cdot f^*$. In LMSR, this is non-linear:
+**Step D: Convert to Target Wagers**
+Instead of calculating individual LMSR share quantities (which causes overshooting if agents trade simultaneously), the orchestrator calculates the exact **Wager ($W_{i,j}$)** the agent wants to spend:
+$$W_{i,j} = W_i \cdot \kappa_i \cdot f_j^*$$
 
-For YES shares ($f^* > 0$):
-$$\Delta q_{i,j} = b \cdot \ln\left(e^{S/b} + \frac{1-P_t}{P_t}(e^{S/b} - 1)\right)$$
+Positive wagers indicate buying YES shares; negative wagers indicate buying NO shares (shorting).
 
-For NO shares ($f^* < 0$):
-$$\Delta q_{i,j} = -b \cdot \ln\left(e^{|S|/b} + \frac{P_t}{1-P_t}(e^{|S|/b} - 1)\right)$$
+#### **4. LMSR Price Update via Simultaneous Batching**
 
-*Note:* This ensures the agent's actual cost matches the Kelly-optimized budget $S$. See Appendix B for a true multi-asset Kelly approach.
+To ensure fairness and prevent "first-mover advantage," all trades within a round are executed simultaneously using a **Batch Wager Clearing** algorithm that perfectly respects the LMSR cost function's path independence.
 
-#### **4. LMSR Price Update**
-
-**The LMSR Mechanism** (detailed math in Appendix A)
-
-For each sentence $\phi$, we maintain an LMSR market with time-varying liquidity parameter $b_t$:
-
-**Cost Function:**
-$$C(q_{yes}, q_{no}) = b_t \cdot \ln(e^{q_{yes}/b_t} + e^{q_{no}/b_t})$$
-
-**Current Price:**
-$$P(\phi) = \frac{e^{q_{yes}/b_t}}{e^{q_{yes}/b_t} + e^{q_{no}/b_t}}$$
-
-**Buying Shares:**
-When agent wants to buy $\Delta q$ shares of YES:
-$$\text{Cost} = C(q_{yes} + \Delta q, q_{no}) - C(q_{yes}, q_{no})$$
-
-Agent's wealth decreases by Cost; market updates: $q_{yes} \leftarrow q_{yes} + \Delta q$
-
-**Shorting:**
-When agent wants to short (equivalent to buying NO shares):
-$$\text{Cost} = C(q_{yes}, q_{no} + \Delta q) - C(q_{yes}, q_{no})$$
-
-Agent's wealth decreases by Cost; market updates: $q_{no} \leftarrow q_{no} + \Delta q$
+**The Clearing Algorithm:**
+For each sentence $\phi$ with current price $P_t$:
+1. **Pool Wagers:** Sum all intended YES wagers ($W_{yes}$) and absolute NO wagers ($W_{no}$) across all agents and the Whale.
+2. **Direct Matching:** Opposing wagers cancel each other out at the current marginal price $P_t$. The market matches the maximum possible wagers without moving the price:
+   - $Q_{match} = \min(W_{yes} / P_t, W_{no} / (1 - P_t))$
+   - This consumes $Q_{match} \cdot P_t$ of the YES budget and $Q_{match} \cdot (1-P_t)$ of the NO budget.
+3. **Curve Pushing:** One side will have leftover wagers ($W_{rem}$). This remaining capital is used to push the LMSR cost curve:
+   - $\Delta Q_{LMSR}$ is calculated using the exact inverse of the LMSR cost function for $W_{rem}$.
+   - The market maker (Whale) absorbs this leftover wager, and the LMSR state ($q_{yes}$ or $q_{no}$) updates by $\Delta Q_{LMSR}$.
+4. **Proportional Distribution:** The total shares created ($Q_{match} + \Delta Q_{LMSR}$) are distributed back to the agents proportionally based on their original $W_i$ contributions.
 
 **Properties:**
-- ✅ **Automatically Zero-Sum:** All payments go to/from LMSR cost function
+- ✅ **First-Mover Fairness:** All agents trade against the exact same market conditions.
+- ✅ **No Overshooting:** Agents never spend more than their calculated Kelly wager.
+- ✅ **Automatically Zero-Sum:** The Whale perfectly balances the net LMSR movement.
 - ✅ **Always Liquid:** Can always trade at current price
 - ✅ **Bounded Loss:** Whale's max loss per round = $0.5 \cdot W_{whale,t}$ (by construction of $b_t$)
 - ✅ **Incentive Compatible:** Truth-revealing (proper scoring rule)
 
 **Execution Order:**
 1. Recalculate $b_t$ based on current Whale wealth and active markets
-2. All bonds execute (locked purchases at current prices)
-3. All agent belief-based trades execute simultaneously
-4. Whale's belief-based trades execute (only for candidate quality)
-5. Prices update to new equilibrium via LMSR formula
+2. Snapshot the current Market State (prices and verifier confidences).
+3. Agents and Whale calculate target Wagers based on the frozen snapshot.
+4. Execute all wagers simultaneously via the Batch Clearing Algorithm.
+5. Prices update to new equilibrium via LMSR formula.
 
 #### **5. Wealth Updates**
 
@@ -310,7 +298,7 @@ When bond unlocks (after $N_{lock}$ ticks):
 
 #### **6. Agent Cleanup**
 
-**Bankruptcy:** If $W_i < T_{inf}$ (can't afford next round's inference tax):
+**Bankruptcy:** If $W_{i, total} \leq T_{inf}$ where $W_{i, total}$ is the agent's total net worth including both liquid wealth ($W_i$) and the current market value of all their locked bonds:
 - Agent is eliminated from market
 - Any locked bonds are liquidated at current prices
 - Wealth transfers to Whale (who took opposite side of their trades)
@@ -544,12 +532,16 @@ $$C_\varphi(q_{yes}, q_{no}) = b_t \cdot \ln\left(\exp(q_{yes}/b_t) + \exp(q_{no
 
 *Purpose:* Determines how much an agent must pay to change share quantities.
 
-**Buying Shares:**
-When agent $a_i$ wants to buy $\Delta q$ YES shares:
-$$\text{Cost}_{i,\varphi}(\Delta q) = C_\varphi(q_{yes,\varphi,t} + \Delta q, q_{no,\varphi,t}) - C_\varphi(q_{yes,\varphi,t}, q_{no,\varphi,t})$$
+**Executing a Target Wager:**
+When an agent $a_i$ wagers amount $W > 0$ on YES shares:
+They acquire $\Delta q_{yes}$ shares such that:
+$$C_\varphi(q_{yes,\varphi,t} + \Delta q_{yes}, q_{no,\varphi,t}) - C_\varphi(q_{yes,\varphi,t}, q_{no,\varphi,t}) = W$$
 
-When agent $a_i$ wants to buy $\Delta q$ NO shares (Shorting):
-$$\text{Cost}_{i,\varphi}(\Delta q) = C_\varphi(q_{yes,\varphi,t}, q_{no,\varphi,t} + \Delta q) - C_\varphi(q_{yes,\varphi,t}, q_{no,\varphi,t})$$
+When agent $a_i$ wagers amount $W > 0$ on NO shares (Shorting):
+They acquire $\Delta q_{no}$ shares such that:
+$$C_\varphi(q_{yes,\varphi,t}, q_{no,\varphi,t} + \Delta q_{no}) - C_\varphi(q_{yes,\varphi,t}, q_{no,\varphi,t}) = W$$
+
+*Note: In the Simultaneous Batch Clearing mechanism, all opposing wagers are first matched at the current price before applying the net remaining wager to push the cost function.*
 
 **Market Update:**
 Update the corresponding $q_{yes}$ or $q_{no}$ based on the trade.
@@ -594,7 +586,7 @@ Each round, agent $a_i$ can perform:
 
 1. **Propose New Asset:** Submit new verifier $V_{new}$ or candidate $C_{new}$
    - Creates new sentence $\varphi_{new}$
-   - Requires bond: force-buy $\Delta q_{bond}$ shares at $P_0 = 0.5$ (prevents spam). Bond size is determined by a Kelly bet with maximal belief $b = 1-\epsilon$.
+   - Requires bond: stake a wager $W_{bond}$ at $P_0 = 0.5$ (prevents spam). Bond size is determined by a Kelly bet with maximal belief $b = 1-\epsilon$.
    - Shares locked for $N_{lock}$ rounds
 
 2. **Update Code:** Submit patch $C_{k} \to C_{k}'$ (no direct cost, but requires inference)
@@ -633,31 +625,28 @@ $$\kappa_i = \frac{1}{\max(1, L_i)}$$
 
 *Purpose:* If total desired exposure (bets + bonds) exceeds 100% of wealth, scale down all positions proportionally.
 
-**Step 4 - Execute Trades:**
-For each sentence $\varphi$ (existing or newly proposed), calculate target cost $S_{i,\varphi} = W_{i, t} \cdot \kappa_i \cdot f_{\varphi}^*$.
-Determine share quantity $\Delta q_{i, \varphi}$ such that:
-$$C_\varphi(q_{yes} + \Delta q_{i, \varphi}, q_{no}) - C_\varphi(q_{yes}, q_{no}) = S_{i,\varphi}$$
-(See Section 2.C.4 for closed-form share calculation).
+**Step 4 - Calculate Target Wagers:**
+For each sentence $\varphi$ (existing or newly proposed), calculate the target wager $W_{i,\varphi} = W_{i, t} \cdot \kappa_i \cdot f_{\varphi}^*$.
 
-Execute LMSR trade: update share count by $\Delta q_{i, \varphi}$ and deduct $S_{i,\varphi}$ from wealth.
-
-**Output:** Set of trades $\{(\varphi, \Delta q_{i,\varphi})\}_{\varphi \in \Phi_t}$
+**Output:** Set of target wagers $\{(\varphi, W_{i,\varphi})\}_{\varphi \in \Phi_t}$
 
 ### E. Wealth Dynamics
 
 **Within-Round Wealth Updates:**
 
-After all agents submit trades in round $t$:
+After all agents submit their wagers in round $t$:
 
 1. **Recalculate Liquidity:** Update $b_t$ based on current $W_{whale,t}$ and $M_{active,t}$
 
-2. **Trade Costs:** For each agent $a_i$ and sentence $\varphi$:
-   $$\text{Cost}_{i,\varphi,t} = C_\varphi(q_{yes} + \Delta q_{i,\varphi}, q_{no}) - C_\varphi(q_{yes}, q_{no})$$
+2. **Simultaneous Batch Clearing:** For each sentence $\varphi$, pool all YES wagers and NO wagers across all participants. Match opposing wagers at current price $P_t$, then apply the remaining wager to push the LMSR curve.
+
+3. **Trade Costs:** Agents are charged exactly their target wagers.
+   $$\text{Cost}_{i,\varphi,t} = |W_{i,\varphi}|$$
    
-3. **Aggregate Wealth Change from Trading:**
+4. **Aggregate Wealth Change from Trading:**
    $$\Delta W_{i,t}^{trade} = -\sum_{\varphi \in \Phi_t} \text{Cost}_{i,\varphi,t}$$
    
-4. **Taxes:**
+5. **Taxes:**
    $$\Delta W_{i,t}^{taxes} = -T_{inf}$$
 
 **End-of-Round Wealth:**
@@ -744,10 +733,10 @@ $$k^* = \arg\min_{k} |F_k|$$
 3. **Whale Belief Update:** Compute $b_{whale,t+1}$ via softmax (only for $\Phi_G$)
 4. **Agent Belief Submission:** Agents submit $b_{i,t}$
 5. **Liquidity Recalculation:** Update $b_t$ based on current Whale wealth
-6. **Trade Conversion:** Convert beliefs to $\Delta q$ via Kelly heuristic
-7. **Trade Execution:** Update LMSR markets, deduct costs from wealth
+6. **Trade Conversion:** Convert beliefs to target Wagers via Kelly heuristic
+7. **Trade Execution:** Execute all wagers simultaneously via Batch Clearing, deduct costs, and update LMSR markets
 8. **Tax Application:** Deduct $T_{inf}$ from agent wealth
-9. **Bankruptcy Check:** Remove agents with $W_i < T_{inf}$
+9. **Bankruptcy Check:** Remove agents with total net worth $\leq T_{inf}$
 10. **Bond Maturation:** Unlock and settle bonds from round $t - N_{lock}$
 11. **Termination Check:** If $\mathcal{T}(t+1)$, terminate and select winner
 
@@ -1285,17 +1274,17 @@ $$p_1 = \frac{\partial C}{\partial q_1} = \frac{e^{q_1/b}}{e^{q_0/b} + e^{q_1/b}
 
 #### Trading Mechanics
 
-**Buying $\Delta q$ YES shares:**
-1. **Calculate cost:** $\text{Cost} = C(q_{yes} + \Delta q, q_{no}) - C(q_{yes}, q_{no})$
-2. **Trader pays:** $\text{Cost}$ to the market maker
-3. **Update state:** $q_{yes} \leftarrow q_{yes} + \Delta q$
+**Executing a Target Wager on YES:**
+1. **Agent specifies Wager:** $W_{yes} > 0$
+2. **Calculate shares acquired:** Find $\Delta q_{yes}$ such that $C(q_{yes} + \Delta q_{yes}, q_{no}) - C(q_{yes}, q_{no}) = W_{yes}$
+3. **Update state:** $q_{yes} \leftarrow q_{yes} + \Delta q_{yes}$
 
-**Shorting (Buying NO shares):**
-1. **Calculate cost:** $\text{Cost} = C(q_{yes}, q_{no} + \Delta q) - C(q_{yes}, q_{no})$
-2. **Trader pays:** $\text{Cost}$ to the market maker
-3. **Update state:** $q_{no} \leftarrow q_{no} + \Delta q$
+**Executing a Target Wager on NO (Shorting):**
+1. **Agent specifies Wager:** $W_{no} > 0$
+2. **Calculate shares acquired:** Find $\Delta q_{no}$ such that $C(q_{yes}, q_{no} + \Delta q_{no}) - C(q_{yes}, q_{no}) = W_{no}$
+3. **Update state:** $q_{no} \leftarrow q_{no} + \Delta q_{no}$
 
-**Note:** In both cases, the trader pays a positive cost up front to take a position. If the outcome they bet on occurs, each share pays out 1 unit. If it does not, the share pays 0. This ensures that the amount risked (the "wager") is exactly the cost paid.
+**Note:** In practice, the system uses Simultaneous Batching to execute all intended wagers for a round concurrently, matching opposing wagers before applying the net remainder to the cost curve (see Section 2.C.4).
 
 #### Final Settlement
 

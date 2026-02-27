@@ -4,17 +4,17 @@ from .lmsr import LMSRMarket
 
 class Strategy:
     """
-    Converts agent beliefs into LMSR trades using a heuristic Kelly criterion.
+    Converts agent beliefs into wagers using a heuristic Kelly criterion.
     """
     
     @staticmethod
-    def beliefs_to_trades(
+    def beliefs_to_wagers(
         beliefs: Dict[str, float],
         wealth: float,
         state: MarketState
     ) -> List[Tuple[str, float]]:
         """
-        Calculates optimal trades given current beliefs and prices.
+        Calculates optimal wagers given current beliefs and prices.
         
         Args:
             beliefs: dict {asset_id: probability} (0.0 to 1.0)
@@ -22,10 +22,9 @@ class Strategy:
             state: Current market state
             
         Returns:
-            List of (asset_id, delta_q)
+            List of (asset_id, wager) where wager > 0 is buying YES, wager < 0 is buying NO
         """
-        trades = []
-        b = state.liquidity_b
+        wagers = []
         
         # 1. Clip beliefs and compute ideal fractions
         epsilon = 0.01
@@ -59,33 +58,13 @@ class Strategy:
         if total_exposure > 1.0:
             scale = 1.0 / total_exposure
             
-        # 3. Calculate delta_q for each trade
+        # 3. Calculate wager for each trade
         for aid, f_star in desired_exposures.items():
             f_final = f_star * scale
             wager = wealth * f_final # Positive (long) or negative (short)
             
-            asset = state.assets[aid]
-            b = state.liquidity_b
+            # Only record meaningful wagers to avoid floating point dust
+            if abs(wager) > 0.001:
+                wagers.append((aid, wager))
             
-            # Use exact inverse cost function to determine shares for wager
-            if wager >= 0:
-                # Buying YES shares
-                delta_q = LMSRMarket.calculate_delta_q(
-                    asset.q_yes, asset.q_no, b, wager, is_yes_share=True
-                )
-            else:
-                # Buying NO shares (Shorting YES)
-                # We spend abs(wager) to buy NO shares
-                delta_q_no = LMSRMarket.calculate_delta_q(
-                    asset.q_yes, asset.q_no, b, abs(wager), is_yes_share=False
-                )
-                # In our convention, delta_q < 0 means buying NO shares
-                delta_q = -delta_q_no
-            
-            # Cap delta_q to avoid moving market too wildly in one go
-            if abs(delta_q) > 1000: 
-                delta_q = 1000 * (1 if delta_q > 0 else -1)
-                
-            trades.append((aid, delta_q))
-            
-        return trades
+        return wagers
