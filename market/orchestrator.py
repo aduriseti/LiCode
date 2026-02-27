@@ -167,6 +167,9 @@ class Orchestrator:
         # All decisions (Kelly bets, Whale logic) will be based on this snapshot.
         frozen_state = self.state.clone()
         
+        # Track starting wealth for delta logging later
+        starting_wealth = {aid: agent.wealth for aid, agent in self.state.agents.items()}
+        
         batch_wagers = [] # List of (trader_id, asset_id, wager)
         
         # Track which assets are new bonds for which agents
@@ -258,10 +261,15 @@ class Orchestrator:
         # 9. INSTANT SETTLEMENT
         self._settle_all_bets()
 
-        # 9. Apply Taxes & Check Bankruptcy
+        # 10. Log Round Summary: Prices
+        price_summary = {aid: f"{self.state.get_asset_price(aid):.3f}" for aid in self.state.assets}
+        logging.info(f"Round {self.state.round_num} Final Prices: {price_summary}")
+
+        # 11. Apply Taxes & Check Bankruptcy
         # An agent is bankrupt if their TOTAL value (Liquid Wealth + Bond Value) <= Tax
         to_remove = []
         for aid, agent in self.state.agents.items():
+            # Calculate current market value of all bonds held by this agent
             bond_value = 0.0
             agent_bonds = [b for b in self.state.bonds if b.agent_id == aid]
             for bond in agent_bonds:
@@ -277,6 +285,11 @@ class Orchestrator:
                 to_remove.append(aid)
             else:
                 agent.wealth -= self.inference_tax
+                
+            # Log Wealth and Delta for this agent
+            start_w = starting_wealth.get(aid, 0.0)
+            delta = agent.wealth - start_w
+            logging.info(f"Agent {aid} Wealth: {agent.wealth:.2f} (Net Worth: {total_net_worth:.2f}, Delta: {delta:+.2f})")
                 
         for aid in to_remove:
             agent = self.state.agents[aid]
