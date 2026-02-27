@@ -172,6 +172,21 @@ class MarketRunner:
         env = os.environ.copy()
         env["HOME"] = agent_home
         
+        # Security & Automation:
+        # - Auto-deny external directory access (fails immediately instead of hanging)
+        # - Auto-allow doom_loop and bash (prevents hanging on long tasks)
+        permissions = {
+            "permission": {
+                "external_directory": "deny",
+                "doom_loop": "allow",
+                "bash": "allow"
+            }
+        }
+        # Use OPENCODE_CONFIG_CONTENT as it has higher precedence in some opencode versions
+        config_json = json.dumps(permissions)
+        env["OPENCODE_PERMISSION"] = config_json
+        env["OPENCODE_CONFIG_CONTENT"] = config_json
+        
         agent_log = os.path.join(agent_dir, "opencode_serve.log")
         log_file = open(agent_log, "w")
         

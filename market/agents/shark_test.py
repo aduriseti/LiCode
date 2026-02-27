@@ -200,9 +200,14 @@ class TestSharkActionParsing(unittest.TestCase):
         shark = Shark("agent_0")
         
         loop = asyncio.new_event_loop()
-        # We expect LLMResponseError (which triggers retry)
+        # We expect LLMResponseError after all self-correction attempts fail
+        async def run_test():
+            # Mock the chat method to consistently return non-JSON content
+            shark._chat_with_network_retry = AsyncMock(return_value=mock_response.text)
+            await shark.get_action(state)
+
         with self.assertRaises(LLMResponseError):
-             loop.run_until_complete(shark.get_action.__wrapped__(shark, state))
+             loop.run_until_complete(run_test())
         loop.close()
 
     @patch('market.agents.shark.AsyncOpencode')

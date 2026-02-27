@@ -311,9 +311,8 @@ class PermissionsTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(os.path.exists(cand_dir))
         
         mode = os.stat(cand_dir).st_mode
-        # Check for 755 (rwxr-xr-x)
-        expected = stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH
-        self.assertEqual(mode & 0o777, 0o755)
+        # Check for 700 (rwx------) - changed from 755 for isolation
+        self.assertEqual(mode & 0o777, 0o700)
 
     async def test_verifier_dir_permissions(self):
         # Create verifier source

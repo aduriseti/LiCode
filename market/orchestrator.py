@@ -30,6 +30,12 @@ class Orchestrator:
         # Ensure directories exist
         os.makedirs(self.worktrees_dir, exist_ok=True)
         os.makedirs(self.verifiers_dir, exist_ok=True)
+        
+        # Set worktrees_dir to 0o711 so that opencode serve (acting as the agent)
+        # can traverse to its assigned directory, while individual directories
+        # are locked down with 0o700.
+        os.chmod(self.worktrees_dir, 0o711)
+        os.chmod(self.verifiers_dir, 0o755)
 
         self.n_agents = n_agents
         self.budget = budget
@@ -114,17 +120,27 @@ class Orchestrator:
             tar_cmd = f"git ls-files -co --exclude-standard -z | tar -c --null -T - | tar -x -C {dest_dir}"
             subprocess.run(tar_cmd, shell=True, check=True, cwd=src, capture_output=True)
 
-            # Fix permissions (git clone/tar might leave them varying)
-            for root, dirs, files in os.walk(dest_dir):
-                # Don't touch .git directory internals as that can break git
-                if ".git" in dirs:
-                    dirs.remove(".git")
-                
-                os.chmod(root, 0o755)
-                for f in files:
-                    # Skip .git files if walk goes into it (though we removed from dirs)
-                    if ".git/" in os.path.join(root, f): continue
-                    os.chmod(os.path.join(root, f), 0o644)
+            # Generate baseline.diff for agent context (BEFORE baseline commit)
+            # Stage changes to include new files in the diff
+            if os.path.exists(dest_dir):
+                subprocess.run(["git", "add", "-N", "."], cwd=dest_dir, check=True, capture_output=True)
+                with open(os.path.join(dest_dir, "baseline.diff"), "w") as f:
+                    subprocess.run(["git", "diff", "HEAD"], cwd=dest_dir, stdout=f, check=True)
+
+                # Fix permissions (git clone/tar might leave them varying)
+                # Restrict to 0o700 (owner only) to enforce isolation
+                for root, dirs, files in os.walk(dest_dir):
+                    # Don't touch .git directory internals as that can break git
+                    if ".git" in dirs:
+                        dirs.remove(".git")
+                    
+                    os.chmod(root, 0o700)
+                    for f in files:
+                        # Skip .git files if walk goes into it (though we removed from dirs)
+                        if ".git/" in os.path.join(root, f): continue
+                        os.chmod(os.path.join(root, f), 0o600)
+            else:
+                logging.warning(f"Skipping baseline.diff and permissions: {dest_dir} not found (mocked clone?)")
 
             # 4. Initialize Shadow Git Config (Needed for baseline commit)
             subprocess.run(["git", "config", "user.email", "market@local"], cwd=dest_dir, check=True, capture_output=True)

@@ -89,15 +89,15 @@ class WorkspaceTest(unittest.TestCase):
         self.assertEqual(diff_output.strip(), "", "Diff should be empty (Baseline captured uncommitted state)")
 
         # 5. Verify Permissions
-        # Check Directory (should be 755)
+        # Check Directory (should be 700)
         # Note: os.walk skips .git in our impl, but we check root
         mode_dir = os.stat(dest_dir).st_mode & 0o777
-        self.assertEqual(mode_dir, 0o755, "Root directory permission should be 755")
+        self.assertEqual(mode_dir, 0o700, "Root directory permission should be 700")
             
-        # Check File (should be 644)
+        # Check File (should be 600)
         sol_path = os.path.join(dest_dir, "solution.py")
         mode_file = os.stat(sol_path).st_mode & 0o777
-        self.assertEqual(mode_file, 0o644, "File permission should be 644")
+        self.assertEqual(mode_file, 0o600, "File permission should be 600")
 
     def test_hybrid_snapshot_overlay(self):
         """Verifies that uncommitted changes and new tracked files are correctly overlaid."""

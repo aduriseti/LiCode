@@ -5,6 +5,7 @@ import asyncio
 import os
 import json
 import textwrap
+import io
 from market.orchestrator import Orchestrator
 from market.runner import MarketRunner
 

@@ -70,7 +70,7 @@ Your Goal: Win the tournament by producing the project that BEST satisfies the U
 Your assigned candidate solution is the ENTIRE worktree "{cid}".
 
 **The Environment:**
-- **Read Access:** You can read files in ANY candidate's worktree to analyze rival solutions.
+- **Read Access:** You can ONLY read files in your own worktree ("{cid}"). You do NOT have direct read/exec access to rival worktrees; instead, you are provided with **Diff Summaries** of their changes in the Market Assets section below to analyze their solutions.
 - **Write Access:** You can ONLY modify your own worktree ("{cid}").
 - **Modifications:** You have direct write access. Use your tools (e.g. `write_file`) to edit your code. Do NOT return file content in your JSON response.
 
@@ -114,20 +114,43 @@ You must output a single JSON object.
 }}
 """
 
-    @retry(
-        retry=retry_if_exception_type((APITimeoutError, LLMResponseError)),
-        stop=stop_after_attempt(5),
-        wait=wait_exponential(multiplier=1, min=4, max=60),
-        reraise=True,
-        before_sleep=log_retry_attempt()
-    )
     async def get_action(self, state: MarketState) -> AgentAction:
         """
         Analyzes the market state and returns an action.
+        Uses a self-correction loop for parsing errors.
         """
         await self.initialize_session()
-        user_prompt = await self._format_state_prompt(state)
         
+        # 1. Generate full state prompt ONCE
+        current_prompt = await self._format_state_prompt(state)
+        
+        # 2. Self-correction loop
+        for attempt in range(3): # Up to 3 attempts at correction
+            try:
+                # Call API with retry only for transient network/timeout errors
+                content = await self._chat_with_network_retry(current_prompt)
+                
+                # 3. Parse and return if successful
+                return self._parse_action_response(content)
+                
+            except LLMResponseError as e:
+                if attempt == 2: # Last attempt failed
+                    raise
+                
+                # 4. Propagate error to agent for self-correction
+                # We send a short error message instead of resending the 10KB state
+                logging.warning(f"Shark {self.agent_id} parsing failed. Sending error back for correction (Attempt {attempt+1}/3)")
+                current_prompt = f"ERROR: Your previous response was invalid: {str(e)}\nPlease provide your updated beliefs and proposals in the correct JSON format."
+
+    @retry(
+        retry=retry_if_exception_type(APITimeoutError), # Only retry transient network/hangs
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=4, max=20),
+        reraise=True,
+        before_sleep=log_retry_attempt()
+    )
+    async def _chat_with_network_retry(self, prompt: str) -> str:
+        """Performs the actual API call with transient error handling."""
         logging.info(f"Shark {self.agent_id} calling API...")
         
         response = await self.client.session.chat(
@@ -135,11 +158,11 @@ You must output a single JSON object.
             model_id=self.model,
             provider_id=self.provider,
             system=self.system_prompt,
-            parts=[{"type": "text", "text": user_prompt}]
+            parts=[{"type": "text", "text": prompt}]
         )
         
-        # Log the raw interaction for debugging
-        self._log_interaction(user_prompt, response)
+        # Log interaction for debugging
+        self._log_interaction(prompt, response)
         
         content = getattr(response, "text", "") or getattr(response, "content", "")
         if not content and hasattr(response, "parts"):
@@ -149,31 +172,29 @@ You must output a single JSON object.
                 if text: extracted_parts.append(text)
             content = "".join(extracted_parts)
 
-        logging.info(f"Shark {self.agent_id} received {len(content)} chars from API.")
-
         if not content:
-            msg = f"Shark {self.agent_id} got empty response. Response object: {response}"
-            sys.stderr.write(msg + "\n")
+            # Empty response is now a Category 1 error (Self-correction)
             if hasattr(response, "info") and "error" in response.info:
-                raise LLMResponseError(f"Shark {self.agent_id} API Error: {response.info['error']}")
-            raise LLMResponseError(f"Shark {self.agent_id} returned empty content.")
+                 # This might be a system error, but we'll try to get the agent to fix/retry
+                 raise LLMResponseError(f"API Error Info: {response.info['error']}")
+            raise LLMResponseError("Received empty response content.")
+            
+        return content
+
+    def _parse_action_response(self, content: str) -> AgentAction:
+        """Helper to parse JSON from LLM content."""
+        logging.info(f"Shark {self.agent_id} received {len(content)} chars from API.")
         
-        # 3. Parse JSON using chompjs and json_repair for maximum robustness
         try:
             from chompjs import parse_js_objects
             from json_repair import loads as repair_loads
             
-            # Find all potential JSON objects
-            # parse_js_objects is very good at extracting objects from noisy text
             candidates = list(parse_js_objects(content))
-            
-            # If no candidates, try repairing the whole string
             if not candidates:
                 repaired = repair_loads(content)
                 if isinstance(repaired, dict):
                     candidates = [repaired]
             
-            # Find the best candidate (usually the last one)
             data = None
             for cand in reversed(candidates):
                 if isinstance(cand, dict) and ("beliefs" in cand or "proposals" in cand):
@@ -181,18 +202,17 @@ You must output a single JSON object.
                     break
             
             if data is None:
-                raise LLMResponseError(f"Shark {self.agent_id} response missing required keys. Content: {content}")
+                raise LLMResponseError(f"Response missing 'beliefs' or 'proposals' keys. Content sample: {content[:100]}...")
                 
+            return AgentAction(
+                agent_id=self.agent_id,
+                beliefs=data.get("beliefs", {}),
+                proposals=data.get("proposals", [])
+            )
         except Exception as e:
             if isinstance(e, LLMResponseError):
                 raise e
-            raise LLMResponseError(f"Shark {self.agent_id} returned invalid JSON: {content}") from e
-        
-        return AgentAction(
-            agent_id=self.agent_id,
-            beliefs=data.get("beliefs", {}),
-            proposals=data.get("proposals", [])
-        )
+            raise LLMResponseError(f"Invalid JSON format: {str(e)}")
 
     async def close(self):
         """Gracefully close the API client."""
@@ -211,13 +231,24 @@ You must output a single JSON object.
         
         lines.append("\n=== Market Assets ===")
         
+        # Determine current agent's candidate ID
+        my_cid = f"cand_{self.agent_id.split('_')[-1]}"
+
         # Group by type
         candidates = []
         verifiers = []
         for aid, asset in state.assets.items():
             price = state.get_asset_price(aid)
-            path_info = f"(Path: {asset.code_path})" if asset.code_path else ""
-            if asset.test_path: path_info = f"(Path: {asset.test_path})"
+            
+            # Privacy: Mask paths. Only tell them their OWN path as "./"
+            if aid == my_cid:
+                path_info = "(Your Workspace: use './' to access files)"
+            else:
+                path_info = "" # Hide paths for rivals
+            
+            if asset.test_path and asset.type == "VERIFIER":
+                # Verifiers are public by design, but we still mask path
+                path_info = "(Verifier Registry)"
             
             line = f"- {aid}: {price:.3f} {path_info} ({asset.description})"
             if asset.type == "CANDIDATE":
@@ -297,7 +328,7 @@ You must output a single JSON object.
                         processed_diff.extend(current_file_diff)
 
                 final_output = "\n".join(processed_diff)
-                return f"--- {aid} Diff ---\n{final_output}\n\n[To view full diff: cd {asset.code_path} && git diff --cached HEAD]"
+                return f"--- {aid} Diff ---\n{final_output}\n"
 
             except Exception as e:
                 return f"--- {aid} Diff ---\n[Error: {e}]"
