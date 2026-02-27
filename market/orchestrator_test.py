@@ -391,5 +391,95 @@ class PermissionsTest(unittest.IsolatedAsyncioTestCase):
         mode_sh = os.stat(run_sh).st_mode
         self.assertEqual(mode_sh & 0o777, 0o755)
 
+class TestNewFeatures(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.orch = Orchestrator("Feature Test", n_agents=2, budget=1000.0, base_dir=self.test_dir)
+        await self.orch.initialize()
+
+    async def asyncTearDown(self):
+        shutil.rmtree(self.test_dir)
+
+    async def test_instant_settlement_preserves_price(self):
+        """Verifies that settlement moves shares to Whale and preserves the market price."""
+        asset_id = "cand_0"
+        # 1. Agent 0 buys shares
+        # We manually simulate a trade
+        agent = self.orch.state.agents["agent_0"]
+        agent.shares[asset_id] = 100.0
+        self.orch.state.assets[asset_id].q_yes += 100.0
+        
+        price_before = self.orch.state.get_asset_price(asset_id)
+        self.assertGreater(price_before, 0.5)
+        
+        # 2. Settle
+        self.orch._settle_all_bets()
+        
+        # 3. Check invariant: Price must be identical
+        price_after = self.orch.state.get_asset_price(asset_id)
+        self.assertEqual(price_before, price_after, "Price must not change during settlement")
+        
+        # 4. Check invariant: Shares moved to Whale
+        self.assertEqual(agent.shares.get(asset_id, 0.0), 0.0)
+        self.assertEqual(self.orch.state.whale_shares.get(asset_id, 0.0), 100.0)
+
+    async def test_logging_includes_round_summary(self):
+        """Verifies that round summary (prices/wealth) is logged."""
+        action = AgentAction("agent_0", beliefs={"cand_0": 0.6})
+        
+        with self.assertLogs('root', level='INFO') as cm:
+            with mock.patch.object(self.orch, '_run_oracle', new_callable=mock.AsyncMock):
+                await self.orch.process_round([action])
+            
+            # Look for round summary indicators
+            self.assertTrue(any("Final Prices:" in line for line in cm.output))
+            self.assertTrue(any("Wealth:" in line and "Delta:" in line for line in cm.output))
+            self.assertTrue(any("Whale Wealth:" in line and "Delta:" in line for line in cm.output))
+
+    def test_robust_hashing(self):
+        """Verifies that changing any file in the verifier directory changes the ID."""
+        cand_dir = os.path.join(self.test_dir, "worktrees", "cand_0")
+        v_src = os.path.join(cand_dir, "v1")
+        os.makedirs(v_src, exist_ok=True)
+        with open(os.path.join(v_src, "run.sh"), "w") as f:
+            f.write("#!/bin/bash\nexit 0")
+        with open(os.path.join(v_src, "test.py"), "w") as f:
+            f.write("print('hello')")
+            
+        vid1 = self.orch._create_verifier_from_path("agent_0", v_src)
+        
+        # Change test.py but KEEP run.sh the same
+        with open(os.path.join(v_src, "test.py"), "w") as f:
+            f.write("print('world')")
+            
+        vid2 = self.orch._create_verifier_from_path("agent_0", v_src)
+        self.assertNotEqual(vid1, vid2, "ID must change if test.py changes, even if run.sh is same")
+
+    async def test_bond_deduplication(self):
+        """Verifies that proposing an existing verifier ID skips the bond creation."""
+        cand_dir = os.path.join(self.test_dir, "worktrees", "cand_0")
+        v_src = os.path.join(cand_dir, "v1")
+        os.makedirs(v_src, exist_ok=True)
+        with open(os.path.join(v_src, "run.sh"), "w") as f:
+            f.write("echo 1")
+            
+        # Round 1: New verifier -> Bond created
+        action = AgentAction("agent_0", proposals=[{"type": "VERIFIER", "path": "v1"}])
+        with mock.patch.object(self.orch, '_run_oracle', new_callable=mock.AsyncMock):
+            await self.orch.process_round([action])
+        
+        self.assertEqual(len(self.orch.state.bonds), 1)
+        
+        # Advance round so bond matures
+        self.orch.state.round_num += 1
+        self.orch._mature_bonds()
+        self.assertEqual(len(self.orch.state.bonds), 0)
+        
+        # Round 2: Same verifier -> NO NEW bond should be created
+        with mock.patch.object(self.orch, '_run_oracle', new_callable=mock.AsyncMock):
+            await self.orch.process_round([action])
+            
+        self.assertEqual(len(self.orch.state.bonds), 0, "Redundant bond should not be created for existing verifier")
+
 if __name__ == '__main__':
     unittest.main()

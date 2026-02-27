@@ -96,19 +96,27 @@ class Whale:
             List of (asset_id, delta_q)
         """
         scores = Whale.compute_survival_scores(state, verifier_prices=verifier_prices)
-        beliefs = Whale.compute_whale_beliefs(scores)
+        active_beliefs = Whale.compute_whale_beliefs(scores)
         
+        # LOGGING ONLY: Compute logical beliefs (softmax) for observability
         if scores:
+            max_s = max(scores.values())
+            exps = {cid: math.exp(s - max_s) for cid, s in scores.items()}
+            total_exp = sum(exps.values())
+            logical_beliefs = {cid: round(v / total_exp, 4) for cid, v in exps.items()}
+            
             logging.info(f"Whale Analysis - Scores: {scores}")
-            logging.info(f"Whale Analysis - Target Beliefs: {beliefs}")
+            logging.info(f"Whale Analysis - Beliefs (Logical): {logical_beliefs}")
+            if not active_beliefs:
+                logging.info(f"Whale Decision: Neutral (No active trades)")
         
-        if not beliefs:
+        if not active_beliefs:
             return []
             
         # The Whale trades using the same Kelly strategy as agents
         # (Design 2.C.2 and 4.C)
         return Strategy.beliefs_to_wagers(
-            beliefs,
+            active_beliefs,
             state.whale_wealth,
             state
         )

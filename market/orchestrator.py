@@ -169,6 +169,7 @@ class Orchestrator:
         
         # Track starting wealth for delta logging later
         starting_wealth = {aid: agent.wealth for aid, agent in self.state.agents.items()}
+        starting_whale_wealth = self.state.whale_wealth
         
         batch_wagers = [] # List of (trader_id, asset_id, wager)
         
@@ -188,18 +189,20 @@ class Orchestrator:
                         if source_path and candidate.code_path:
                             full_source = os.path.join(candidate.code_path, source_path)
                             if os.path.isdir(full_source):
-                                # Register verifier in BOTH active and frozen state
-                                # This allows the Kelly strategy to 'see' the new asset in the frozen state
-                                # while preserving its initial price (0.5).
+                                # 1. Register verifier (Generates deterministic ID)
                                 vid = self._create_verifier_from_path(agent_id, full_source)
-                                if vid:
+                                
+                                # 2. Deduplication Check: Only bond if this vid is NEW to the market
+                                if vid and vid not in frozen_state.assets:
                                     # Manually mirror to frozen state assets for consistent decision mapping
                                     frozen_state.assets[vid] = self.state.assets[vid]
                                     
-                                    logging.info(f"Agent {agent_id} registered new verifier: {vid}")
+                                    logging.info(f"Agent {agent_id} registered NEW verifier: {vid}")
                                     if agent_id not in new_bonds_to_create:
                                         new_bonds_to_create[agent_id] = []
                                     new_bonds_to_create[agent_id].append(vid)
+                                elif vid:
+                                    logging.debug(f"Agent {agent_id} proposed existing verifier {vid} (skipping redundant bond)")
                             else:
                                 logging.warning(f"Agent {agent_id} proposed verifier at non-existent path: {source_path}")
 
@@ -291,6 +294,10 @@ class Orchestrator:
             delta = agent.wealth - start_w
             logging.info(f"Agent {aid} Wealth: {agent.wealth:.2f} (Net Worth: {total_net_worth:.2f}, Delta: {delta:+.2f})")
                 
+        # Log Whale Wealth and Delta
+        whale_delta = self.state.whale_wealth - starting_whale_wealth
+        logging.info(f"Whale Wealth: {self.state.whale_wealth:.2f} (Delta: {whale_delta:+.2f})")
+
         for aid in to_remove:
             agent = self.state.agents[aid]
             agent_bonds = [b for b in self.state.bonds if b.agent_id == aid]
@@ -462,17 +469,30 @@ class Orchestrator:
     def _create_verifier_from_path(self, agent_id: str, source_path: str) -> Optional[str]:
         """Creates a verifier package by copying from agent's worktree."""
         import hashlib
+        import os
         
         if not os.path.exists(os.path.join(source_path, "run.sh")):
             logging.warning(f"Verifier at {source_path} missing run.sh")
             return None
             
-        # Deterministic ID based on content of directory
-        # We'll just hash the run.sh for speed, ideally should hash all
-        with open(os.path.join(source_path, "run.sh"), "rb") as f:
-            content_hash = hashlib.md5(f.read()).hexdigest()[:8]
-            
+        # Deterministic ID based on content of all relevant files in the directory
+        # This prevents collisions when different tests use the same run.sh content.
+        hasher = hashlib.md5()
+        # Sort files to ensure deterministic hashing
+        for root, _, files in os.walk(source_path):
+            for fname in sorted(files):
+                # Include standard test file types
+                if fname.endswith(('.py', '.sh', '.json', '.txt', '.csv')):
+                    fpath = os.path.join(root, fname)
+                    with open(fpath, "rb") as f:
+                        # Update hash with relative path and content
+                        rel_path = os.path.relpath(fpath, source_path)
+                        hasher.update(rel_path.encode())
+                        hasher.update(f.read())
+        
+        content_hash = hasher.hexdigest()[:8]
         vid = f"v_{content_hash}"
+        
         if vid in self.state.assets: return vid 
         
         v_dir = os.path.join(self.verifiers_dir, vid)
