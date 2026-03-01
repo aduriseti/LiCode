@@ -111,6 +111,35 @@ class TestIsolationRegression(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(perms["permission"]["doom_loop"], "allow")
                 self.assertEqual(perms["permission"]["bash"], "allow")
 
+    async def test_runner_config_plumbing(self):
+        """Verifies model_id and provider_id are injected into agent servers."""
+        test_model = "test-model-123"
+        test_provider = "test-provider-456"
+        runner = MarketRunner("test", 1, 1000.0, model=test_model, provider=test_provider)
+        
+        with mock.patch("subprocess.Popen") as mock_popen:
+            mock_proc = mock.MagicMock()
+            mock_proc.poll.return_value = None
+            mock_popen.return_value = mock_proc
+
+            async def mock_connect(*args, **kwargs):
+                return mock.MagicMock(), mock.AsyncMock()
+            
+            with mock.patch("asyncio.open_connection", side_effect=mock_connect):
+                cand_dir = os.path.join(runner.arena_dir, "worktrees", "cand_0")
+                os.makedirs(cand_dir, exist_ok=True)
+                runner._find_free_port = mock.MagicMock(return_value=1234)
+                
+                await runner._start_agent_server("agent_0", 1234)
+                
+                _, kwargs = mock_popen.call_args
+                env = kwargs.get("env", {})
+                self.assertIn("OPENCODE_CONFIG_CONTENT", env)
+                
+                config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+                self.assertEqual(config["model_id"], test_model)
+                self.assertEqual(config["provider_id"], test_provider)
+
     async def test_shark_path_masking(self):
         """Verifies Shark masks absolute paths in the state prompt."""
         shark = Shark("agent_0")

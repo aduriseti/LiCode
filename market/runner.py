@@ -181,6 +181,8 @@ class MarketRunner:
         # - Auto-deny external directory access (fails immediately instead of hanging)
         # - Auto-allow doom_loop and bash (prevents hanging on long tasks)
         permissions = {
+            "model_id": self.model,
+            "provider_id": self.provider,
             "permission": {
                 "external_directory": "deny",
                 "doom_loop": "allow",
