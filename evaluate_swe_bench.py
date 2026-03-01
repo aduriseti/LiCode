@@ -13,7 +13,7 @@ from rich.live import Live
 from rich.table import Table
 from rich.console import Console
 from rich import box
-from market.orchestrator import Orchestrator
+from market.orchestrator import Orchestrator, DEFAULT_EXCLUDE_LIST
 from market.core.state import MarketState
 
 try:
@@ -99,6 +99,13 @@ async def run_market_on_instance(instance, args, semaphore):
                 stderr=asyncio.subprocess.PIPE
             )
             await clone_proc.communicate()
+
+            # Ensure .arenas/ and other critical system dirs are ignored by adding them to git/info/exclude
+            exclude_path = os.path.join(work_dir, ".git", "info", "exclude")
+            if os.path.exists(os.path.dirname(exclude_path)):
+                with open(exclude_path, "a") as f:
+                    for ex in DEFAULT_EXCLUDE_LIST:
+                        f.write(f"\n{ex}/\n")
 
             update_status("Checking Out Commit")
             checkout_proc = await asyncio.create_subprocess_exec(

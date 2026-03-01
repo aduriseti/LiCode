@@ -21,6 +21,8 @@ class AgentAction:
     beliefs: Dict[str, float] = field(default_factory=dict)
     proposals: List[Dict] = field(default_factory=list) # e.g. {"type": "VERIFIER", "path": "..."}
 
+DEFAULT_EXCLUDE_LIST = [".arenas", "swe_bench_results", "eval_workspaces", "node_modules", "__pycache__", ".home"]
+
 class Orchestrator:
     def __init__(self, prompt: str, n_agents: int, budget: float = 1000.0, state: Optional[MarketState] = None, base_dir: str = "/tmp/market"):
         self.base_dir = base_dir
@@ -40,6 +42,7 @@ class Orchestrator:
         self.n_agents = n_agents
         self.budget = budget
         self.prompt = prompt
+        self.exclude_list = DEFAULT_EXCLUDE_LIST
 
         if state:
             self.state = state
@@ -116,8 +119,13 @@ class Orchestrator:
             
             # 3. Overlay Current Work (Modified + Untracked non-ignored files)
             # Use 'git ls-files -co' to find everything we want to sync
+            # Explicitly exclude configured directories to prevent recursive nesting
             logging.info(f"Overlaying uncommitted changes to {dest_dir}")
-            tar_cmd = f"git ls-files -co --exclude-standard -z | tar -c --null -T - | tar -x -C {dest_dir}"
+            
+            exclude_args_git = " ".join([f"--exclude='{ex}'" for i, ex in enumerate(self.exclude_list)])
+            exclude_args_tar = " ".join([f"--exclude='{ex}'" for i, ex in enumerate(self.exclude_list)])
+            
+            tar_cmd = f"git ls-files -co --exclude-standard {exclude_args_git} -z | tar -c --null {exclude_args_tar} -T - | tar -x -C {dest_dir}"
             subprocess.run(tar_cmd, shell=True, check=True, cwd=src, capture_output=True)
 
             # Generate baseline.diff for agent context (BEFORE baseline commit)
