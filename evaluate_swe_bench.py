@@ -5,7 +5,7 @@ import subprocess
 import sys
 import shutil
 import re
-import concurrent.futures
+import asyncio
 import time
 import threading
 import math
@@ -53,31 +53,29 @@ def get_patch_from_winner(work_dir, report, state_dict):
     diff_res = subprocess.run(["git", "diff", "--cached", "HEAD"], cwd=code_path, capture_output=True, text=True)
     return diff_res.stdout
 
-def run_market_on_instance(instance, args):
+async def run_market_on_instance(instance, args, semaphore):
     instance_id = instance['instance_id']
     repo = instance['repo']
     base_commit = instance['base_commit']
     problem_statement = instance['problem_statement']
 
-    # Initialize status entry
+    # Initialize status entry (should already exist from main, but safety first)
     with status_lock:
-        status_map[instance_id] = {
-            "status": "Initializing",
-            "start_time": time.time(),
-            "stages": []
-        }
+        if instance_id not in status_map:
+            status_map[instance_id] = {
+                "status": "Initializing",
+                "start_time": time.time(),
+                "stages": []
+            }
 
     def update_status(new_status):
         with status_lock:
             info = status_map[instance_id]
-            # Record previous stage's duration
             now = time.time()
             if info["stages"]:
-                # Last stage duration
                 last_stage = info["stages"][-1]
                 last_stage["duration"] = now - last_stage["start_time"]
             
-            # Start new stage
             info["status"] = new_status
             info["stages"].append({
                 "name": new_status,
@@ -85,105 +83,128 @@ def run_market_on_instance(instance, args):
                 "duration": 0
             })
 
-    update_status("Cloning Repository")
-    work_dir = os.path.abspath(f"./eval_workspaces/{instance_id}")
-    if os.path.exists(work_dir):
-        shutil.rmtree(work_dir)
-    os.makedirs(work_dir, exist_ok=True)
+    async with semaphore:
+        try:
+            update_status("Cloning Repository")
+            run_dir = os.path.dirname(os.path.abspath(args.output))
+            work_dir = os.path.join(run_dir, "workspaces", instance_id)
+            if os.path.exists(work_dir):
+                await asyncio.to_thread(shutil.rmtree, work_dir)
+            os.makedirs(work_dir, exist_ok=True)
 
-    try:
-        repo_url = f"https://github.com/{repo}.git"
-        subprocess.run(["git", "clone", repo_url, work_dir], check=True, capture_output=True)
-        update_status("Checking Out Commit")
-        subprocess.run(["git", "checkout", base_commit], cwd=work_dir, check=True, capture_output=True)
-        
-        # Save problem statement
-        problem_path = os.path.join(work_dir, "problem.md")
-        with open(problem_path, "w") as f:
-            f.write(problem_statement)
+            repo_url = f"https://github.com/{repo}.git"
+            clone_proc = await asyncio.create_subprocess_exec(
+                "git", "clone", repo_url, work_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await clone_proc.communicate()
 
-        if args.dummy:
-            update_status("Dummy Mode: Returning Empty Patch")
-            time.sleep(1) # simulate brief delay
-            res = {
-                "instance_id": instance_id,
-                "model_patch": "",
-                "model_name_or_path": "dummy-test-agent"
-            }
+            update_status("Checking Out Commit")
+            checkout_proc = await asyncio.create_subprocess_exec(
+                "git", "checkout", base_commit,
+                cwd=work_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await checkout_proc.communicate()
+            
+            # Save problem statement
+            problem_path = os.path.join(work_dir, "problem.md")
+            with open(problem_path, "w") as f:
+                f.write(problem_statement)
+
+            if args.dummy:
+                update_status("Dummy Mode: Returning Empty Patch")
+                await asyncio.sleep(1)
+                res = {
+                    "instance_id": instance_id,
+                    "model_patch": "",
+                    "model_name_or_path": "dummy-test-agent"
+                }
+                update_status("Complete")
+                return res
+
+            update_status("Setting Up Market")
+            log_dir = os.path.join(run_dir, "logs")
+            os.makedirs(log_dir, exist_ok=True)
+            log_file_path = os.path.join(log_dir, f"{instance_id}.log")
+
+            market_cmd = [
+                sys.executable, "-m", "market.cli", "run",
+                "--prompt", f"Fix the bug described in problem.md.",
+                "--agents", str(args.agents),
+                "--rounds", str(args.rounds),
+                "--json-logs"
+            ]
+
+            if args.provider:
+                market_cmd.extend(["--provider", args.provider])
+            if args.model:
+                market_cmd.extend(["--model", args.model])
+
+            env = os.environ.copy()
+            env["PYTHONPATH"] = os.path.abspath(".") 
+
+            data = None
+            with open(log_file_path, "w") as log_file:
+                process = await asyncio.create_subprocess_exec(
+                    *market_cmd,
+                    cwd=work_dir,
+                    env=env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+
+                while True:
+                    line_bytes = await process.stdout.readline()
+                    if not line_bytes:
+                        break
+                    line = line_bytes.decode('utf-8', errors='replace')
+                    log_file.write(line)
+                    log_file.flush()
+                    
+                    if not line.strip():
+                        continue
+                    try:
+                        msg = json.loads(line)
+                        if msg.get("type") == "log":
+                            text = msg.get("message", "")
+                            if "Starting Round" in text:
+                                update_status(text)
+                            elif "Convergence reached" in text:
+                                update_status("Convergence Detected")
+                        elif msg.get("type") == "final_result":
+                            data = msg
+                    except json.JSONDecodeError:
+                        continue
+
+                await process.wait()
+                if process.returncode != 0:
+                    update_status(f"Market Failed (Code {process.returncode})")
+                    return None
+
+            if not data:
+                update_status("Extraction Failed: No Final Output")
+                return None
+
+            update_status("Extracting Patch from Winner")
+            # FS ops are quick but we can offload if needed. Git diff is in get_patch_from_winner.
+            patch = await asyncio.to_thread(get_patch_from_winner, work_dir, data.get("report", ""), data.get("state", {}))
+            if patch is None:
+                update_status("Patch Extraction Failed")
+                return None
+
             update_status("Complete")
-            return res
+            return {
+                "instance_id": instance_id,
+                "model_patch": patch,
+                "model_name_or_path": f"opencode-market-a{args.agents}-r{args.rounds}"
+            }
 
-        update_status("Setting Up Market")
-        market_cmd = [
-            sys.executable, "-m", "market.cli", "run",
-            "--prompt", f"Fix the bug described in problem.md.",
-            "--agents", str(args.agents),
-            "--rounds", str(args.rounds),
-            "--json-logs"
-        ]
-
-        if args.provider:
-            market_cmd.extend(["--provider", args.provider])
-        if args.model:
-            market_cmd.extend(["--model", args.model])
-
-        env = os.environ.copy()
-        env["PYTHONPATH"] = os.path.abspath(".") 
-
-        # Execute market.cli and monitor stdout
-        process = subprocess.Popen(
-            market_cmd, 
-            cwd=work_dir, 
-            env=env, 
-            stdout=subprocess.PIPE, 
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1
-        )
-
-        data = None
-        for line in process.stdout:
-            if not line.strip():
-                continue
-            try:
-                msg = json.loads(line)
-                if msg.get("type") == "log":
-                    text = msg.get("message", "")
-                    if "Starting Round" in text:
-                        update_status(text)
-                    elif "Convergence reached" in text:
-                        update_status("Convergence Detected")
-                elif msg.get("type") == "final_result":
-                    data = msg
-            except json.JSONDecodeError:
-                continue
-
-        process.wait()
-        if process.returncode != 0:
-            err = process.stderr.read()
-            update_status(f"Market Failed (Code {process.returncode})")
+        except Exception as e:
+            update_status(f"Error: {str(e)}")
             return None
-
-        if not data:
-            update_status("Extraction Failed: No Final Output")
-            return None
-
-        update_status("Extracting Patch from Winner")
-        patch = get_patch_from_winner(work_dir, data.get("report", ""), data.get("state", {}))
-        if patch is None:
-            update_status("Patch Extraction Failed")
-            return None
-
-        update_status("Complete")
-        return {
-            "instance_id": instance_id,
-            "model_patch": patch,
-            "model_name_or_path": f"opencode-market-a{args.agents}-r{args.rounds}"
-        }
-
-    except Exception as e:
-        update_status(f"Error: {str(e)}")
-        return None
 
 def generate_table():
     table = Table(title="OpenCode Market: SWE-bench Evaluation", box=box.ROUNDED)
@@ -197,11 +218,9 @@ def generate_table():
             now = time.time()
             total_time = now - info["start_time"]
             
-            # Construct timeline string
             timeline = []
             for stage in info["stages"]:
                 name = stage["name"]
-                # Abbreviate long round messages
                 name = name.replace("Starting Round", "R")
                 dur = stage["duration"] if stage["duration"] > 0 else (now - stage["start_time"])
                 timeline.append(f"[bold]{name}[/bold]({dur:.1f}s)")
@@ -214,7 +233,7 @@ def generate_table():
             )
     return table
 
-def main():
+async def async_main():
     parser = argparse.ArgumentParser(description="Evaluate OpenCode Market on SWE-bench Verified")
     parser.add_argument("--repo", type=str, default="pallets/flask", help="Filter by repo to test a subset (e.g., pallets/flask)")
     parser.add_argument("--limit", type=int, default=3, help="Max instances to evaluate")
@@ -231,24 +250,20 @@ def main():
     
     args = parser.parse_args()
 
-    # Generate a run_id if not provided
     if not args.run_id:
         mode = "dummy" if args.dummy else "market"
         args.run_id = f"{mode}_{int(time.time())}"
 
-    # Set default output path within the run-specific subfolder
     if not args.output:
         args.output = f"swe_bench_results/{args.run_id}/predictions.jsonl"
 
-    # Ensure output directory exists
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
 
-    # Clear output file if it exists to avoid appending to old runs
     if os.path.exists(args.output):
         os.remove(args.output)
 
     console.print(f"[bold green]Loading SWE-bench Verified dataset...[/bold green]")
-    ds = load_dataset("princeton-nlp/SWE-bench_Verified", split="test")
+    ds = await asyncio.to_thread(load_dataset, "princeton-nlp/SWE-bench_Verified", split="test")
     
     if args.repo:
         instances = [i for i in ds if args.repo in i['repo']]
@@ -258,28 +273,27 @@ def main():
     instances = instances[:args.limit]
     console.print(f"Found {len(instances)} instances to evaluate. Running with parallelism {args.parallel}")
 
+    with status_lock:
+        for inst in instances:
+            iid = inst['instance_id']
+            status_map[iid] = {
+                "status": "Queued",
+                "start_time": time.time(),
+                "stages": []
+            }
+
+    semaphore = asyncio.Semaphore(args.parallel)
     results = []
     
-    with Live(generate_table(), refresh_per_second=4) as live:
-        def process_instance(instance):
-            res = run_market_on_instance(instance, args)
-            live.update(generate_table())
-            return res
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=args.parallel) as executor:
-            future_to_instance = {executor.submit(process_instance, inst): inst for inst in instances}
-            
-            for future in concurrent.futures.as_completed(future_to_instance):
-                inst = future_to_instance[future]
-                try:
-                    res = future.result()
-                    if res:
-                        results.append(res)
-                        with open(args.output, "a") as f:
-                            f.write(json.dumps(res) + "\n")
-                    live.update(generate_table())
-                except Exception as exc:
-                    print(f"\n[red]{inst['instance_id']} generated an exception: {exc}[/red]")
+    with Live(get_renderable=generate_table, refresh_per_second=4) as live:
+        tasks = [run_market_on_instance(inst, args, semaphore) for inst in instances]
+        
+        for coro in asyncio.as_completed(tasks):
+            res = await coro
+            if res:
+                results.append(res)
+                with open(args.output, "a") as f:
+                    f.write(json.dumps(res) + "\n")
                 
     console.print(f"\n[bold green]Done! Wrote {len(results)} predictions to {args.output}[/bold green]")
     
@@ -292,13 +306,17 @@ def main():
             "--predictions_path", os.path.abspath(args.output),
             "--max_workers", str(args.eval_workers),
             "--run_id", args.run_id,
-            "--report_dir", "." # Already inside output_dir
+            "--report_dir", "."
         ]
         console.print(f"Executing: {' '.join(eval_cmd)}")
-        subprocess.run(eval_cmd, cwd=output_dir)
+        eval_proc = await asyncio.create_subprocess_exec(
+            *eval_cmd,
+            cwd=output_dir
+        )
+        await eval_proc.wait()
     else:
         console.print(f"\n[bold yellow]To evaluate manually, run the SWE-bench harness:[/bold yellow]")
         console.print(f"python -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Verified --predictions_path {os.path.abspath(args.output)} --max_workers {args.eval_workers} --run_id {args.run_id} --report_dir {os.path.dirname(os.path.abspath(args.output))}")
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(async_main())

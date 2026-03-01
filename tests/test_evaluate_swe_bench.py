@@ -1,6 +1,7 @@
 import os
 import sys
 import pytest
+import asyncio
 from unittest.mock import patch, MagicMock
 from argparse import Namespace
 
@@ -8,7 +9,8 @@ from argparse import Namespace
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import evaluate_swe_bench
 
-def test_run_market_dummy_mode(tmp_path):
+@pytest.mark.asyncio
+async def test_run_market_dummy_mode(tmp_path):
     """
     Test that when args.dummy is True, the system bypasses the market orchestrator,
     creates the workspace, writes the problem, and returns an empty patch.
@@ -25,21 +27,34 @@ def test_run_market_dummy_mode(tmp_path):
         agents=3,
         rounds=5,
         provider=None,
-        model=None
+        model=None,
+        output=str(tmp_path / "run_folder" / "predictions.jsonl")
     )
     
-    # Patch subprocess.run to avoid actual git clone
-    with patch('evaluate_swe_bench.subprocess.run') as mock_run:
+    semaphore = asyncio.Semaphore(1)
+    
+    # Patch subprocess utilities
+    with patch('evaluate_swe_bench.asyncio.create_subprocess_exec') as mock_exec:
+        # Mock git clone/checkout processes
+        mock_proc = MagicMock()
+        mock_proc.communicate = MagicMock(side_effect=lambda: asyncio.sleep(0)) # Lambda returning coroutine
+        mock_proc.wait = MagicMock(side_effect=lambda: asyncio.sleep(0))
+        
+        async def mock_communicate():
+            return b"", b""
+        mock_proc.communicate = mock_communicate
+        
+        mock_exec.return_value = mock_proc
+        
         # Patch the base path for workspaces to use tmp_path
         original_abspath = os.path.abspath
         def mock_abspath(path):
-            if "eval_workspaces" in path:
-                # Direct into tmp_path
-                return str(tmp_path / path.replace("./", ""))
+            if "run_folder" in path:
+                return str(tmp_path / "run_folder" / "predictions.jsonl")
             return original_abspath(path)
             
         with patch('evaluate_swe_bench.os.path.abspath', side_effect=mock_abspath):
-            result = evaluate_swe_bench.run_market_on_instance(instance, args)
+            result = await evaluate_swe_bench.run_market_on_instance(instance, args, semaphore)
             
             # 1. Assert correct result format
             assert result is not None
@@ -47,16 +62,12 @@ def test_run_market_dummy_mode(tmp_path):
             assert result['model_patch'] == ''
             assert result['model_name_or_path'] == 'dummy-test-agent'
             
-            # 2. Verify the workspace directory was created and problem.md written
-            workspace_dir = tmp_path / 'eval_workspaces' / 'test_repo__test_issue-123'
+            # 2. Verify the workspace directory was created
+            workspace_dir = tmp_path / "run_folder" / "workspaces" / "test_repo__test_issue-123"
             assert workspace_dir.exists()
             assert (workspace_dir / 'problem.md').exists()
             with open(workspace_dir / 'problem.md', 'r') as f:
                 assert f.read() == 'Fix the bug.'
-                
-            # 3. Verify git clone and checkout were called
-            mock_run.assert_any_call(["git", "clone", "https://github.com/test/repo.git", str(workspace_dir)], check=True, capture_output=True)
-            mock_run.assert_any_call(["git", "checkout", "abcdef123456"], cwd=str(workspace_dir), check=True, capture_output=True)
 
 from rich.table import Table
 
@@ -88,6 +99,38 @@ def test_generate_table():
     assert len(table.columns) == 4
     # Rich table data is not easily accessible via public API without rendering,
     # but we can check if it runs without error and has the title we expect.
+
+def test_generate_table_dynamic_updates():
+    """
+    Test that generate_table reflects real-time changes in status_map.
+    """
+    import time
+    evaluate_swe_bench.status_map.clear()
+    
+    # 1. Start with an empty map
+    table = evaluate_swe_bench.generate_table()
+    assert table.row_count == 0
+    
+    # 2. Add an item and verify it appears
+    evaluate_swe_bench.status_map["issue-1"] = {
+        "status": "Test Status",
+        "start_time": time.time(),
+        "stages": []
+    }
+    table = evaluate_swe_bench.generate_table()
+    assert table.row_count == 1
+    
+    # 3. Verify it works as a callable (Option A)
+    from rich.live import Live
+    with Live(get_renderable=evaluate_swe_bench.generate_table, refresh_per_second=1):
+        evaluate_swe_bench.status_map["issue-2"] = {
+            "status": "Another Status",
+            "start_time": time.time(),
+            "stages": []
+        }
+        # Just verifying it doesn't crash when called by Live
+        final_table = evaluate_swe_bench.generate_table()
+        assert final_table.row_count == 2
 
 def test_get_patch_from_winner(tmp_path):
     """

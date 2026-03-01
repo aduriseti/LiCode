@@ -31,8 +31,11 @@ def test_swe_bench_dummy_pipeline_e2e(tmp_path):
     # 1. Assert script return code (should be 0)
     assert result.returncode == 0, f"evaluate_swe_bench.py failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
     
-    # 2. Verify the prediction file was created correctly
+    # 2. Verify the folder structure and prediction file
     assert prediction_file.exists(), "Prediction file was not created."
+    run_dir = prediction_file.parent
+    assert (run_dir / "workspaces").exists(), "Workspaces directory was not created inside the run folder."
+    
     with open(prediction_file, "r") as f:
         data = json.loads(f.readline().strip())
         assert data["model_patch"] == ""
