@@ -88,6 +88,10 @@ class MarketState:
         """Returns a deep copy of the current state."""
         return MarketState.from_json(self.to_json())
 
+    def get_prices(self) -> Dict[str, float]:
+        """Returns a dictionary of all current asset prices."""
+        return {aid: self.get_asset_price(aid) for aid in self.assets}
+
     @staticmethod
     def from_json(json_str: str):
         data = json.loads(json_str)

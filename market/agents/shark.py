@@ -135,12 +135,16 @@ You must output a single JSON object.
                 
             except LLMResponseError as e:
                 if attempt == 2: # Last attempt failed
-                    raise
+                    logging.error(f"Shark {self.agent_id} failed after 3 attempts: {e}")
+                    # Return empty action as fallback
+                    return AgentAction(agent_id=self.agent_id)
                 
                 # 4. Propagate error to agent for self-correction
                 # We send a short error message instead of resending the 10KB state
                 logging.warning(f"Shark {self.agent_id} parsing failed. Sending error back for correction (Attempt {attempt+1}/3)")
                 current_prompt = f"ERROR: Your previous response was invalid: {str(e)}\nPlease provide your updated beliefs and proposals in the correct JSON format."
+        
+        return AgentAction(agent_id=self.agent_id) # Final fallback
 
     @retry(
         retry=retry_if_exception_type(APITimeoutError), # Only retry transient network/hangs
@@ -153,6 +157,9 @@ You must output a single JSON object.
         """Performs the actual API call with transient error handling."""
         logging.info(f"Shark {self.agent_id} calling API...")
         
+        if not self.session:
+            raise RuntimeError("Session not initialized")
+
         response = await self.client.session.chat(
             id=self.session.id,
             model_id=self.model,
@@ -165,18 +172,21 @@ You must output a single JSON object.
         self._log_interaction(prompt, response)
         
         content = getattr(response, "text", "") or getattr(response, "content", "")
-        if not content and hasattr(response, "parts"):
-            extracted_parts = []
-            for p in response.parts:
-                text = p.get("text") if isinstance(p, dict) else getattr(p, "text", None)
-                if text: extracted_parts.append(text)
-            content = "".join(extracted_parts)
+        # Handle cases where response is not as expected
+        if not content:
+            parts = getattr(response, "parts", [])
+            if parts:
+                extracted_parts = []
+                for p in parts: # type: ignore
+                    text = p.get("text") if isinstance(p, dict) else getattr(p, "text", None)
+                    if text: extracted_parts.append(text)
+                content = "".join(extracted_parts)
 
         if not content:
             # Empty response is now a Category 1 error (Self-correction)
-            if hasattr(response, "info") and "error" in response.info:
-                 # This might be a system error, but we'll try to get the agent to fix/retry
-                 raise LLMResponseError(f"API Error Info: {response.info['error']}")
+            info = getattr(response, "info", {})
+            if isinstance(info, dict) and "error" in info:
+                 raise LLMResponseError(f"API Error Info: {info['error']}")
             raise LLMResponseError("Received empty response content.")
             
         return content
@@ -265,6 +275,14 @@ You must output a single JSON object.
         lines.append("\n-- Verifiers (Price = Probability this test is VALID) --")
         if verifiers:
             lines.extend(verifiers)
+        else:
+            lines.append("(None)")
+
+        lines.append("\n=== Test Failures ===")
+        if state.test_failures:
+            for fail_key, failed in state.test_failures.items():
+                if failed:
+                    lines.append(f"- {fail_key}")
         else:
             lines.append("(None)")
 

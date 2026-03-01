@@ -80,6 +80,7 @@ class Oracle:
         if not temp_dir:
             return "ERROR"
         
+        process = None
         try:
             # 4. Run the verifier
             cmd = ["./run.sh"]
@@ -103,18 +104,19 @@ class Oracle:
                 else:
                     return "FAIL"
             except asyncio.TimeoutError:
-                try:
-                    process.kill()
-                    await process.wait()
-                except ProcessLookupError:
-                    pass
+                if process:
+                    try:
+                        process.kill()
+                        await process.wait()
+                    except ProcessLookupError:
+                        pass
                 return "TIMEOUT"
                 
         except Exception as e:
             import logging
             logging.error(f"Oracle Execution Error: {e}")
             # Ensure process is reaped if it was created
-            if 'process' in locals() and process.returncode is None:
+            if process:
                 try:
                     process.kill()
                     await process.wait()

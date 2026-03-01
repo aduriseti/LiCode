@@ -237,8 +237,14 @@ class Orchestrator:
         await self._run_oracle()
 
         # 6. Whale Logic
-        # Whale computes target beliefs and wagers using frozen state context.
-        whale_wagers = Whale.generate_trades(frozen_state, verifier_prices=None) 
+        # Whale computes target beliefs based on the LATEST failures (self.state)
+        # but uses frozen_state for wealth and prices to stay in sync with other traders.
+        whale_wagers = Whale.generate_trades(
+            self.state, 
+            verifier_prices=frozen_state.get_prices(), 
+            trader_wealth=frozen_state.whale_wealth,
+            market_context=frozen_state
+        ) 
         for aid, wager in whale_wagers:
             batch_wagers.append(("whale", aid, wager))
             
@@ -443,9 +449,9 @@ class Orchestrator:
                 
                 # Wealth transfer: Agents pay the pool (Whale)
                 if trader_id != "whale":
-                    trader_obj = self.state.agents.get(trader_id)
-                    if trader_obj:
-                        trader_obj.wealth -= abs(wager)
+                    trader_agent = self.state.agents.get(trader_id)
+                    if trader_agent is not None:
+                        trader_agent.wealth -= abs(wager)
                         self.state.whale_wealth += abs(wager)
                 
                 if wager > 0:
@@ -454,14 +460,18 @@ class Orchestrator:
                     if trader_id == "whale":
                         self.state.whale_shares[asset_id] = self.state.whale_shares.get(asset_id, 0.0) + shares_won
                     else:
-                        trader_obj.shares[asset_id] = trader_obj.shares.get(asset_id, 0.0) + shares_won
+                        trader_agent = self.state.agents.get(trader_id)
+                        if trader_agent is not None:
+                            trader_agent.shares[asset_id] = trader_agent.shares.get(asset_id, 0.0) + shares_won
                 else:
                     portion = abs(wager) / w_no if w_no > 0 else 0
                     shares_won = total_no_created * portion
                     if trader_id == "whale":
                         self.state.whale_shares[asset_id] = self.state.whale_shares.get(asset_id, 0.0) - shares_won
                     else:
-                        trader_obj.shares[asset_id] = trader_obj.shares.get(asset_id, 0.0) - shares_won
+                        trader_agent = self.state.agents.get(trader_id)
+                        if trader_agent is not None:
+                            trader_agent.shares[asset_id] = trader_agent.shares.get(asset_id, 0.0) - shares_won
             
             p_after = self.state.get_asset_price(asset_id)
             logging.info(f"Batch Executed [{asset_id}]: W_yes={w_yes:.2f}, W_no={w_no:.2f}, Q_match={q_match:.2f}, P_after={p_after:.4f}")

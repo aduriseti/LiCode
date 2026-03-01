@@ -111,7 +111,7 @@ class LMSRMarket:
             diff = term2 - term1
             if diff >= 0:
                  # This would mean the purchase is impossible (infinite price)
-                 return 1000.0 # Return cap
+                 return 20.0 * b # Significant move cap
             
             new_q_over_b = term1 + math.log(1.0 - math.exp(diff))
             new_q = new_q_over_b * b

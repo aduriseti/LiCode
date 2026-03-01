@@ -60,9 +60,11 @@ class Strategy:
             scale = 1.0 / total_exposure
             
         # 3. Calculate wager for each trade
+        # Prevent betting with negative wealth
+        betting_wealth = max(0.0, wealth)
         for aid, f_star in desired_exposures.items():
             f_final = f_star * scale
-            wager = wealth * f_final # Positive (long) or negative (short)
+            wager = betting_wealth * f_final # Positive (long) or negative (short)
             
             # Only record meaningful wagers to avoid floating point dust
             if abs(wager) > 0.001:

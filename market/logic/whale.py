@@ -74,12 +74,8 @@ class Whale:
         if not scores:
             return {}
             
-        # If all scores are 0, it means no failures have occurred yet.
-        # In this case, the Whale should NOT have an active opinion/belief,
-        # allowing the market to be driven by inductive agents initially.
-        if all(s == 0.0 for s in scores.values()):
-            return {}
-            
+        # Design 2.C.179: Softmax over scores. If all scores are 0, this naturally 
+        # results in a neutral 1/N distribution.
         max_s = max(scores.values())
         exps = {cid: math.exp(s - max_s) for cid, s in scores.items()}
         total_exp = sum(exps.values())
@@ -87,7 +83,12 @@ class Whale:
         return {cid: v / total_exp for cid, v in exps.items()}
 
     @staticmethod
-    def generate_trades(state: MarketState, verifier_prices: Optional[Dict[str, float]] = None) -> List[Tuple[str, float]]:
+    def generate_trades(
+        state: MarketState, 
+        verifier_prices: Optional[Dict[str, float]] = None, 
+        trader_wealth: Optional[float] = None,
+        market_context: Optional[MarketState] = None
+    ) -> List[Tuple[str, float]]:
         """
         Determines what trades the Whale should make to enforce logic.
         Uses the Kelly Strategy for active trading.
@@ -113,10 +114,13 @@ class Whale:
         if not active_beliefs:
             return []
             
+        wealth = trader_wealth if trader_wealth is not None else state.whale_wealth
+        context = market_context if market_context is not None else state
+            
         # The Whale trades using the same Kelly strategy as agents
         # (Design 2.C.2 and 4.C)
         return Strategy.beliefs_to_wagers(
             active_beliefs,
-            state.whale_wealth,
-            state
+            wealth,
+            context
         )

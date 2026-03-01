@@ -95,7 +95,12 @@ class MarketRunner:
             
             # 3. Create Session
             await shark.initialize_session()
-            session_id = shark.session.id
+            session_id = None
+            if shark.session is not None and hasattr(shark.session, "id"):
+                session_id = str(shark.session.id)
+            
+            if session_id is None:
+                raise RuntimeError(f"Failed to initialize session for {aid}")
             
             if not json_logs:
                 logging.info(f"Session for {aid} initialized: {session_id}")
