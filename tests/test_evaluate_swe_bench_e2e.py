@@ -1,0 +1,52 @@
+import os
+import subprocess
+import json
+import pytest
+
+@pytest.mark.timeout(600)  # Give it up to 10 minutes to pull docker images and run
+def test_swe_bench_dummy_pipeline_e2e(tmp_path):
+    """
+    End-to-end integration test that verifies the full SWE-bench pipeline works.
+    This runs the evaluate_swe_bench.py script in dummy mode with the --run-eval flag.
+    It verifies that the script can generate a prediction and successfully trigger the
+    SWE-bench evaluation harness.
+    """
+    prediction_file = tmp_path / "swe_bench_results" / "e2e_test_run" / "predictions.jsonl"
+    
+    # Run the generation AND evaluation in one command
+    cmd = [
+        "python", "evaluate_swe_bench.py",
+        "--repo", "pallets/flask",
+        "--limit", "1",
+        "--dummy",
+        "--run-id", "e2e_test_run",
+        "--output", str(prediction_file),
+        "--run-eval",
+        "--eval-workers", "1"
+    ]
+    
+    print(f"Running full pipeline: {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    
+    # 1. Assert script return code (should be 0)
+    assert result.returncode == 0, f"evaluate_swe_bench.py failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+    
+    # 2. Verify the prediction file was created correctly
+    assert prediction_file.exists(), "Prediction file was not created."
+    with open(prediction_file, "r") as f:
+        data = json.loads(f.readline().strip())
+        assert data["model_patch"] == ""
+        assert data["model_name_or_path"] == "dummy-test-agent"
+        assert "pallets__flask" in data["instance_id"]
+        
+    # 3. Verify the dashboard displayed the correct stages
+    # We look for the stage names in the captured output
+    print("Capturing dashboard stages...")
+    assert "Cloning Repository" in result.stdout
+    assert "Checking Out Commit" in result.stdout
+    assert "Dummy Mode: Returning Empty Patch" in result.stdout
+    assert "Complete" in result.stdout
+
+    # 4. Verify the evaluation harness was triggered and produced output
+    # The output should contain the final statistics from the harness
+    assert "Total instances:" in result.stdout or "Report written to" in result.stdout, f"Evaluation harness output not found in STDOUT:\n{result.stdout}"

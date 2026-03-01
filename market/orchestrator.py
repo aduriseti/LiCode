@@ -664,12 +664,11 @@ class Orchestrator:
         lines.append("-" * 30)
         return "\n".join(lines)
 
-    def get_final_report(self) -> str:
-        """Generates a markdown report of the tournament results."""
-        # 1. Determine Winner (Design 2.D.WinnerSelection)
+    def get_winner_id(self) -> Optional[str]:
+        """Identifies the winning candidate ID based on market price and test failure tiebreakers."""
         candidates = [a for a in self.state.assets.values() if a.type == "CANDIDATE"]
         if not candidates:
-            return "Tournament concluded with no candidates."
+            return None
             
         # Get prices and sort
         cand_prices = []
@@ -695,7 +694,7 @@ class Orchestrator:
             
             for cid in tied_candidates:
                 failures = 0
-                for vid in valid_verifiers:
+                for vid in valid_vids if 'valid_vids' in locals() else valid_verifiers:
                     if self.state.test_failures.get(f"{vid}:{cid}"):
                         failures += 1
                 
@@ -710,7 +709,17 @@ class Orchestrator:
                         best_cid = cid
             
             winner_id = best_cid
-            max_price = next(p for cid_p, p in cand_prices if cid_p == winner_id)
+        
+        return winner_id
+
+    def get_final_report(self) -> str:
+        """Generates a markdown report of the tournament results."""
+        # 1. Determine Winner (Design 2.D.WinnerSelection)
+        winner_id = self.get_winner_id()
+        if not winner_id:
+            return "Tournament concluded with no candidates."
+        
+        max_price = self.state.get_asset_price(winner_id)
 
         lines = [f"## Tournament Complete"]
         lines.append(f"**Winner:** {winner_id} (Market Confidence: {max_price:.1%})\n")
