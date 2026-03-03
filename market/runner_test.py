@@ -96,6 +96,9 @@ class TestMarketRunner(unittest.IsolatedAsyncioTestCase):
         shark_instance.session.id = "ses_mock"
         
         runner = MarketRunner("Test", n_agents=1, budget=100.0, api_url="http://127.0.0.1")
+        runner.orchestrator.initialize = AsyncMock() # Avoid real git clones
+        from market.core.state import AgentPortfolio
+        runner.orchestrator.state.agents["agent_0"] = AgentPortfolio(agent_id="agent_0", wealth=100.0)
         await runner.initialize()
         
         # Check Popen calls
@@ -111,6 +114,40 @@ class TestMarketRunner(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(env)
         self.assertEqual(env["HOME"], home_dir)
         self.assertEqual(kwargs.get('cwd'), cand_dir)
+
+    @patch('market.runner.Shark')
+    @patch('market.runner.asyncio.open_connection')
+    @patch('market.runner.subprocess.Popen')
+    async def test_server_snapshot_disabled(self, MockPopen, MockAsyncSocket, MockShark):
+        """Verify that snapshot=False is passed in OpenCode configuration."""
+        import json
+        mock_writer = MagicMock()
+        mock_writer.wait_closed = AsyncMock()
+        MockAsyncSocket.return_value = (MagicMock(), mock_writer)
+        
+        MockPopen.return_value.poll.return_value = None
+        
+        shark_instance = MockShark.return_value
+        shark_instance.initialize_session = AsyncMock()
+        shark_instance.session.id = "ses_mock"
+        
+        runner = MarketRunner("Test", n_agents=1, budget=100.0, api_url="http://127.0.0.1")
+        runner.orchestrator.initialize = AsyncMock() # Avoid real git clones
+        from market.core.state import AgentPortfolio
+        runner.orchestrator.state.agents["agent_0"] = AgentPortfolio(agent_id="agent_0", wealth=100.0)
+        await runner.initialize()
+        
+        # Check Popen call arguments
+        self.assertTrue(MockPopen.called)
+        _, kwargs = MockPopen.call_args
+        env = kwargs.get('env')
+        self.assertIsNotNone(env)
+        
+        # Verify snapshot is disabled in both env vars
+        for var in ["OPENCODE_CONFIG_CONTENT", "OPENCODE_PERMISSION"]:
+            config_data = json.loads(env.get(var))
+            self.assertIn("snapshot", config_data)
+            self.assertFalse(config_data["snapshot"], f"Snapshot should be False in {var}")
 
 if __name__ == '__main__':
     unittest.main()

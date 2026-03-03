@@ -180,17 +180,22 @@ class MarketRunner:
         # Security & Automation:
         # - Auto-deny external directory access (fails immediately instead of hanging)
         # - Auto-allow doom_loop and bash (prevents hanging on long tasks)
-        permissions = {
-            "model_id": self.model,
-            "provider_id": self.provider,
+        # - Disable snapshotting to prevent massive disk usage
+        # - Use library method to validate the config structure
+        from opencode_ai.types import Config
+        config_data = {
+            "model": f"{self.provider}/{self.model}",
+            "snapshot": False,
             "permission": {
                 "external_directory": "deny",
                 "doom_loop": "allow",
                 "bash": "allow"
             }
         }
+        config_obj = Config(**config_data)
+        config_json = config_obj.model_dump_json(exclude_none=True) if hasattr(config_obj, 'model_dump_json') else config_obj.json(exclude_none=True)
+
         # Use OPENCODE_CONFIG_CONTENT as it has higher precedence in some opencode versions
-        config_json = json.dumps(permissions)
         env["OPENCODE_PERMISSION"] = config_json
         env["OPENCODE_CONFIG_CONTENT"] = config_json
         
@@ -209,7 +214,7 @@ class MarketRunner:
         start_time = time.time()
         while time.time() - start_time < 10:
             if proc.poll() is not None:
-                raise RuntimeError(f"Server for {agent_id} failed to start.")
+                raise RuntimeError(f"Server for {agent_id} failed to start. See {agent_log}")
             try:
                 # Async check for connection
                 _, writer = await asyncio.open_connection("127.0.0.1", port)

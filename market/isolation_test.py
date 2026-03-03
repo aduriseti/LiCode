@@ -137,8 +137,43 @@ class TestIsolationRegression(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("OPENCODE_CONFIG_CONTENT", env)
                 
                 config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
-                self.assertEqual(config["model_id"], test_model)
-                self.assertEqual(config["provider_id"], test_provider)
+                self.assertEqual(config["model"], f"{test_provider}/{test_model}")
+
+    async def test_runner_config_validation(self):
+        """Verifies that the generated OPENCODE_CONFIG_CONTENT is a valid Config object."""
+        from opencode_ai.types import Config
+        runner = MarketRunner("test", 1, 1000.0, model="gemini", provider="google")
+        
+        with mock.patch("subprocess.Popen") as mock_popen:
+            mock_proc = mock.MagicMock()
+            mock_proc.poll.return_value = None
+            mock_popen.return_value = mock_proc
+
+            async def mock_connect(*args, **kwargs):
+                return mock.MagicMock(), mock.AsyncMock()
+            
+            with mock.patch("asyncio.open_connection", side_effect=mock_connect):
+                cand_dir = os.path.join(runner.arena_dir, "worktrees", "cand_0")
+                os.makedirs(cand_dir, exist_ok=True)
+                runner._find_free_port = mock.MagicMock(return_value=1234)
+                
+                await runner._start_agent_server("agent_0", 1234)
+                
+                _, kwargs = mock_popen.call_args
+                env = kwargs.get("env", {})
+                config_json = env["OPENCODE_CONFIG_CONTENT"]
+                
+                # This will raise an exception if the JSON is invalid according to the schema
+                try:
+                    if hasattr(Config, "model_validate_json"):
+                        config_obj = Config.model_validate_json(config_json)
+                    else:
+                        config_obj = Config.parse_raw(config_json)
+                    self.assertIsInstance(config_obj, Config)
+                    # Check field directly (handles both model_extra and model_fields)
+                    self.assertEqual(getattr(config_obj, "model", None), "google/gemini")
+                except Exception as e:
+                    self.fail(f"Config validation failed for JSON: {config_json}. Error: {e}")
 
     async def test_shark_path_masking(self):
         """Verifies Shark masks absolute paths in the state prompt."""
