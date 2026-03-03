@@ -96,7 +96,7 @@ def test_generate_table():
     assert table.title == "OpenCode Market: SWE-bench Evaluation"
     
     # 2. Verify columns and presence of data
-    assert len(table.columns) == 4
+    assert len(table.columns) == 5
     # Rich table data is not easily accessible via public API without rendering,
     # but we can check if it runs without error and has the title we expect.
 

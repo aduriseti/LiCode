@@ -149,6 +149,8 @@ async def run_market_on_instance(instance, args, semaphore):
                 market_cmd.extend(["--provider", args.provider])
             if args.model:
                 market_cmd.extend(["--model", args.model])
+            if getattr(args, 'dashboard', False):
+                market_cmd.append("--dashboard")
 
             env = os.environ.copy()
             env["PYTHONPATH"] = os.path.abspath(".") 
@@ -177,7 +179,10 @@ async def run_market_on_instance(instance, args, semaphore):
                         msg = json.loads(line)
                         if msg.get("type") == "log":
                             text = msg.get("message", "")
-                            if "Starting Round" in text:
+                            if text.startswith("Dashboard active at "):
+                                with status_lock:
+                                    status_map[instance_id]["dashboard_url"] = text.replace("Dashboard active at ", "").strip()
+                            elif "Starting Round" in text:
                                 update_status(text)
                             elif "Convergence reached" in text:
                                 update_status("Convergence Detected")
@@ -218,6 +223,7 @@ def generate_table():
     table.add_column("Instance ID", justify="left", style="cyan", no_wrap=True)
     table.add_column("Current Status", style="magenta")
     table.add_column("Elapsed", justify="right", style="green")
+    table.add_column("Dashboard", style="blue")
     table.add_column("Timeline", style="white", ratio=1)
 
     with status_lock:
@@ -232,10 +238,15 @@ def generate_table():
                 dur = stage["duration"] if stage["duration"] > 0 else (now - stage["start_time"])
                 timeline.append(f"[bold]{name}[/bold]({dur:.1f}s)")
             
+            dash_url = info.get("dashboard_url", "N/A")
+            if dash_url != "N/A":
+                dash_url = f"[link={dash_url}]{dash_url}[/link]"
+            
             table.add_row(
                 iid,
                 info["status"],
                 f"{total_time:.1f}s",
+                dash_url,
                 " ⮕ ".join(timeline)
             )
     return table
@@ -250,6 +261,7 @@ async def async_main():
     parser.add_argument("--model", type=str, help="LLM Model")
     parser.add_argument("--output", type=str, help="Output JSONL file (defaults to swe_bench_results/<run_id>/predictions.jsonl)")
     parser.add_argument("--dummy", action="store_true", help="Run a dummy evaluation returning empty patches without invoking agents.")
+    parser.add_argument("--dashboard", action="store_true", help="Launch and show dashboard URLs for each instance.")
     parser.add_argument("--parallel", type=int, default=3, help="Number of instances to evaluate in parallel during generation.")
     parser.add_argument("--run-eval", action="store_true", help="Automatically run the SWE-bench evaluation harness after generation.")
     parser.add_argument("--eval-workers", type=int, default=2, help="Number of workers for the evaluation harness (Docker containers).")

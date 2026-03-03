@@ -55,8 +55,22 @@ class UnbufferedStreamHandler(logging.StreamHandler):
         except Exception:
             self.handleError(record)
 
+class MarketArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        """Custom error handler to return structured feedback without TUI corruption."""
+        use_json = "--json-logs" in sys.argv
+        error_msg = f"CLI Argument Error: {message}"
+        if use_json:
+            # Clean single-line JSON to stdout for the plugin to parse
+            print(json.dumps({"type": "error", "message": error_msg}))
+            sys.stdout.flush()
+        else:
+            # Fallback for manual CLI usage (stderr is safer than stdout for TUI)
+            sys.stderr.write(f"{error_msg}\n")
+        sys.exit(2)
+
 def main():
-    parser = argparse.ArgumentParser(description="Logical Induction Market CLI")
+    parser = MarketArgumentParser(description="Logical Induction Market CLI")
     parser.add_argument("--log-level", type=lambda x: x.upper(), default=os.environ.get("LOG_LEVEL", "INFO"), 
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         help="Set logging level (default: INFO or $LOG_LEVEL)")
@@ -68,6 +82,9 @@ def main():
     init_parser.add_argument("--prompt", type=str, required=True)
     init_parser.add_argument("--agents", type=int, default=3)
     init_parser.add_argument("--budget", type=float, default=1000.0)
+    init_parser.add_argument("--log-level", type=lambda x: x.upper(), 
+                            choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                            help="Set logging level")
     
     # RUN (Full Auto)
     run_parser = subparsers.add_parser("run")
@@ -80,11 +97,30 @@ def main():
     run_parser.add_argument("--model", type=str, default="gemini-3-flash")
     run_parser.add_argument("--provider", type=str, default="opencode")
     run_parser.add_argument("--json-logs", action="store_true", help="Output JSON logs to stdout instead of TUI")
+    run_parser.add_argument("--dashboard", action="store_true", help="Launch and log to the local web dashboard")
+    run_parser.add_argument("--log-level", type=lambda x: x.upper(), 
+                            choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                            help="Set logging level")
     
     args = parser.parse_args()
 
     # Configure Logging
-    log_level_name = args.log_level.upper()
+    # Prioritize subparser arg, then top-level arg, then env
+    # Because of how argparse handles shadowing, we may need to check the raw sys.argv 
+    # if it's not set in the subparser but was passed as a global.
+    log_level_name = None
+    if getattr(args, 'log_level', None):
+        log_level_name = args.log_level.upper()
+    else:
+        # Check if --log-level was passed globally (before subcommand)
+        for i, arg in enumerate(sys.argv):
+            if arg == "--log-level" and i + 1 < len(sys.argv):
+                log_level_name = sys.argv[i+1].upper()
+                break
+    
+    if not log_level_name:
+        log_level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
+        
     log_level = getattr(logging, log_level_name, logging.ERROR)
     
     # Use custom handler and formatter
@@ -92,12 +128,15 @@ def main():
     formatter = WrappingFormatter(fmt='%(asctime)s - %(levelname)s - %(message)s', width=100)
     handler.setFormatter(formatter)
     
-    root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
+    logger = logging.getLogger("market")
+    logger.setLevel(log_level)
     # Remove existing handlers to avoid duplicates if re-initialized
-    if root_logger.hasHandlers():
-        root_logger.handlers.clear()
-    root_logger.addHandler(handler)
+    if logger.hasHandlers():
+        logger.handlers.clear()
+    logger.addHandler(handler)
+    
+    # Also set as root for any other libs if needed, but primarily use 'market'
+    # logging.getLogger().setLevel(log_level) 
     
     if args.command == "init":
         orch = Orchestrator(args.prompt, args.agents, args.budget)
@@ -111,7 +150,8 @@ def main():
             args.api_url, 
             model=args.model, 
             provider=args.provider, 
-            agent_timeout=args.timeout
+            agent_timeout=args.timeout,
+            dashboard=args.dashboard
         )
         
         async def run_tournament():

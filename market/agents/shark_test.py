@@ -200,14 +200,16 @@ class TestSharkActionParsing(unittest.TestCase):
         shark = Shark("agent_0")
         
         loop = asyncio.new_event_loop()
-        # We expect LLMResponseError after all self-correction attempts fail
+        # We expect fallback Action after all self-correction attempts fail
         async def run_test():
             # Mock the chat method to consistently return non-JSON content
             shark._chat_with_network_retry = AsyncMock(return_value=mock_response.text)
-            await shark.get_action(state)
-
-        with self.assertRaises(LLMResponseError):
-             loop.run_until_complete(run_test())
+            action = await shark.get_action(state)
+            self.assertEqual(action.agent_id, "agent_0")
+            self.assertEqual(action.beliefs, {})
+            self.assertEqual(action.proposals, [])
+    
+        loop.run_until_complete(run_test())
         loop.close()
 
     @patch('market.agents.shark.AsyncOpencode')

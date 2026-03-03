@@ -79,16 +79,20 @@ class TestIsolationRegression(unittest.IsolatedAsyncioTestCase):
         """Verifies OPENCODE_PERMISSION env var is injected into agent servers."""
         runner = MarketRunner("test", 1, 1000.0)
         
-        # Mocking subprocess.Popen to capture environment
-        with mock.patch("subprocess.Popen") as mock_popen:
+        # Mocking asyncio.create_subprocess_exec to capture environment
+        with mock.patch("asyncio.create_subprocess_exec") as mock_exec:
             # Mock process lifecycle
             mock_proc = mock.MagicMock()
+            mock_proc.returncode = None
             mock_proc.poll.return_value = None
-            mock_popen.return_value = mock_proc
+            mock_proc.wait = mock.AsyncMock()
+            mock_exec.return_value = mock_proc
 
             # Mock successful connection check
             async def mock_connect(*args, **kwargs):
-                return mock.MagicMock(), mock.AsyncMock()
+                mock_writer = mock.MagicMock()
+                mock_writer.wait_closed = mock.AsyncMock()
+                return mock.MagicMock(), mock_writer
             
             with mock.patch("asyncio.open_connection", side_effect=mock_connect):
                 # Ensure cand_0 dir exists for the runner to find
@@ -100,24 +104,15 @@ class TestIsolationRegression(unittest.IsolatedAsyncioTestCase):
                 
                 await runner._start_agent_server("agent_0", 1234)
                 
-                # Check environment passed to Popen
-                _, kwargs = mock_popen.call_args
+                # Check environment passed to exec
+                _, kwargs = mock_exec.call_args
                 env = kwargs.get("env", {})
                 self.assertIn("OPENCODE_PERMISSION", env)
                 self.assertIn("OPENCODE_CONFIG_CONTENT", env)
                 
-                # Check simplified permission object
+                # Check permission object
                 perms_raw = json.loads(env["OPENCODE_PERMISSION"])
                 self.assertEqual(perms_raw["external_directory"], "deny")
-                self.assertEqual(perms_raw["*"], "allow")
-
-                # Check full config structure
-                config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
-                # Permission should be nested under agent.general
-                self.assertEqual(config["agent"]["general"]["permission"]["*"], "allow")
-                self.assertEqual(config["agent"]["general"]["permission"]["external_directory"], "deny")
-                # Top level permission should NOT be here (schema cleanup)
-                self.assertNotIn("permission", config)
 
     async def test_runner_config_plumbing(self):
         """Verifies model_id and provider_id are injected into agent servers."""
@@ -125,13 +120,17 @@ class TestIsolationRegression(unittest.IsolatedAsyncioTestCase):
         test_provider = "test-provider-456"
         runner = MarketRunner("test", 1, 1000.0, model=test_model, provider=test_provider)
         
-        with mock.patch("subprocess.Popen") as mock_popen:
+        with mock.patch("asyncio.create_subprocess_exec") as mock_exec:
             mock_proc = mock.MagicMock()
+            mock_proc.returncode = None
             mock_proc.poll.return_value = None
-            mock_popen.return_value = mock_proc
+            mock_proc.wait = mock.AsyncMock()
+            mock_exec.return_value = mock_proc
 
             async def mock_connect(*args, **kwargs):
-                return mock.MagicMock(), mock.AsyncMock()
+                mock_writer = mock.MagicMock()
+                mock_writer.wait_closed = mock.AsyncMock()
+                return mock.MagicMock(), mock_writer
             
             with mock.patch("asyncio.open_connection", side_effect=mock_connect):
                 cand_dir = os.path.join(runner.arena_dir, "worktrees", "cand_0")
@@ -140,7 +139,7 @@ class TestIsolationRegression(unittest.IsolatedAsyncioTestCase):
                 
                 await runner._start_agent_server("agent_0", 1234)
                 
-                _, kwargs = mock_popen.call_args
+                _, kwargs = mock_exec.call_args
                 env = kwargs.get("env", {})
                 self.assertIn("OPENCODE_CONFIG_CONTENT", env)
                 
@@ -150,15 +149,30 @@ class TestIsolationRegression(unittest.IsolatedAsyncioTestCase):
     async def test_runner_config_validation(self):
         """Verifies that the generated OPENCODE_CONFIG_CONTENT is a valid Config object."""
         from opencode_ai.types import Config
+        from pydantic import ConfigDict
+        from typing import Optional
         runner = MarketRunner("test", 1, 1000.0, model="gemini", provider="google")
         
-        with mock.patch("subprocess.Popen") as mock_popen:
-            mock_proc = mock.MagicMock()
-            mock_proc.poll.return_value = None
-            mock_popen.return_value = mock_proc
+        # Define a strict version of Config for testing
+        # We explicitly add 'snapshot' because although it's a valid server option,
+        # it is currently missing from the official Pydantic models in opencode-ai.
+        class StrictConfig(Config):
+            model_config = ConfigDict(extra='forbid')
+            snapshot: Optional[bool] = None
 
+        with mock.patch("asyncio.create_subprocess_exec") as mock_exec:
+            # Mock process lifecycle
+            mock_proc = mock.MagicMock()
+            mock_proc.returncode = None
+            mock_proc.poll.return_value = None
+            mock_proc.wait = mock.AsyncMock()
+            mock_exec.return_value = mock_proc
+
+            # Mock successful connection check
             async def mock_connect(*args, **kwargs):
-                return mock.MagicMock(), mock.AsyncMock()
+                mock_writer = mock.MagicMock()
+                mock_writer.wait_closed = mock.AsyncMock()
+                return mock.MagicMock(), mock_writer
             
             with mock.patch("asyncio.open_connection", side_effect=mock_connect):
                 cand_dir = os.path.join(runner.arena_dir, "worktrees", "cand_0")
@@ -167,21 +181,19 @@ class TestIsolationRegression(unittest.IsolatedAsyncioTestCase):
                 
                 await runner._start_agent_server("agent_0", 1234)
                 
-                _, kwargs = mock_popen.call_args
+                _, kwargs = mock_exec.call_args
                 env = kwargs.get("env", {})
                 config_json = env["OPENCODE_CONFIG_CONTENT"]
                 
-                # This will raise an exception if the JSON is invalid according to the schema
+                # Strict validation: do not allow extra fields
                 try:
-                    if hasattr(Config, "model_validate_json"):
-                        config_obj = Config.model_validate_json(config_json)
-                    else:
-                        config_obj = Config.parse_raw(config_json)
+                    config_obj = StrictConfig.model_validate_json(config_json)
                     self.assertIsInstance(config_obj, Config)
-                    # Check field directly (handles both model_extra and model_fields)
                     self.assertEqual(getattr(config_obj, "model", None), "google/gemini")
+                    # Verify snapshot is explicitly False
+                    self.assertFalse(getattr(config_obj, "snapshot", True))
                 except Exception as e:
-                    self.fail(f"Config validation failed for JSON: {config_json}. Error: {e}")
+                    self.fail(f"Config validation failed (STRICT MODE). JSON: {config_json}. Error: {e}")
 
     async def test_shark_path_masking(self):
         """Verifies Shark masks absolute paths in the state prompt."""

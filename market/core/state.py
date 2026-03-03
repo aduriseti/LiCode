@@ -71,8 +71,8 @@ class MarketState:
     # (verifier_id, candidate_id) -> bool (True = failed)
     test_failures: Dict[str, bool] = field(default_factory=dict)
 
-    def to_json(self) -> str:
-        return json.dumps({
+    def to_dict(self) -> dict:
+        return {
             "round_num": self.round_num,
             "liquidity_b": self.liquidity_b,
             "prompt": self.prompt,
@@ -82,7 +82,12 @@ class MarketState:
             "agents": {k: v.to_dict() for k, v in self.agents.items()},
             "test_failures": self.test_failures,
             "bonds": [b.to_dict() for b in self.bonds]
-        }, indent=2)
+        }
+
+    def to_json(self) -> str:
+        data = self.to_dict()
+        data["type"] = "state"
+        return json.dumps(data)
 
     def clone(self):
         """Returns a deep copy of the current state."""

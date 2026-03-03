@@ -77,8 +77,8 @@ class Orchestrator:
             cand_dir = os.path.join(self.worktrees_dir, cid)
             
             async def setup_cand(c_dir, c_id, a_id):
-                # Run blocking shutil in a thread to not block the event loop
-                await asyncio.to_thread(self._clone_workspace, c_dir)
+                # Run async cloning
+                await self._clone_workspace(c_dir)
                 
                 # Initial Price: 1/N for candidates (Design 2.B.3)
                 import math
