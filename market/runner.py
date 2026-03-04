@@ -182,21 +182,32 @@ class MarketRunner:
         # - Auto-allow doom_loop and bash (prevents hanging on long tasks)
         # - Disable snapshotting to prevent massive disk usage
         # - Use library method to validate the config structure
+        #   "$schema": "https://opencode.ai/config.json",
         from opencode_ai.types import Config
+        permission_data = {
+            "external_directory": "deny",
+            "doom_loop": "allow",
+            "*": "allow",
+        }
         config_data = {
             "model": f"{self.provider}/{self.model}",
             "snapshot": False,
-            "permission": {
-                "external_directory": "deny",
-                "doom_loop": "allow",
-                "bash": "allow"
+            "agent": {
+                "general": {
+                    "description": "General settings",
+                    "permission": permission_data
+                },
             }
         }
+        
+        # Validate and serialize configuration
         config_obj = Config(**config_data)
-        config_json = config_obj.model_dump_json(exclude_none=True) if hasattr(config_obj, 'model_dump_json') else config_obj.json(exclude_none=True)
+        # Use model_dump to avoid Pydantic v2 serialization issues with Mocks in tests
+        config_json = json.dumps(config_obj.model_dump(exclude_none=True, by_alias=True))
 
         # Use OPENCODE_CONFIG_CONTENT as it has higher precedence in some opencode versions
-        env["OPENCODE_PERMISSION"] = config_json
+        # OPENCODE_PERMISSION should be the JSON string of the permission object
+        env["OPENCODE_PERMISSION"] = json.dumps(permission_data)
         env["OPENCODE_CONFIG_CONTENT"] = config_json
         
         agent_log = os.path.join(agent_dir, "opencode_serve.log")

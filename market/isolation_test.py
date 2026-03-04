@@ -106,10 +106,18 @@ class TestIsolationRegression(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("OPENCODE_PERMISSION", env)
                 self.assertIn("OPENCODE_CONFIG_CONTENT", env)
                 
-                perms = json.loads(env["OPENCODE_CONFIG_CONTENT"])
-                self.assertEqual(perms["permission"]["external_directory"], "deny")
-                self.assertEqual(perms["permission"]["doom_loop"], "allow")
-                self.assertEqual(perms["permission"]["bash"], "allow")
+                # Check simplified permission object
+                perms_raw = json.loads(env["OPENCODE_PERMISSION"])
+                self.assertEqual(perms_raw["external_directory"], "deny")
+                self.assertEqual(perms_raw["*"], "allow")
+
+                # Check full config structure
+                config = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+                # Permission should be nested under agent.general
+                self.assertEqual(config["agent"]["general"]["permission"]["*"], "allow")
+                self.assertEqual(config["agent"]["general"]["permission"]["external_directory"], "deny")
+                # Top level permission should NOT be here (schema cleanup)
+                self.assertNotIn("permission", config)
 
     async def test_runner_config_plumbing(self):
         """Verifies model_id and provider_id are injected into agent servers."""
