@@ -21,7 +21,7 @@ class AgentAction:
     beliefs: Dict[str, float] = field(default_factory=dict)
     proposals: List[Dict] = field(default_factory=list) # e.g. {"type": "VERIFIER", "path": "..."}
 
-DEFAULT_EXCLUDE_LIST = [".arenas", "swe_bench_results", "eval_workspaces", "node_modules", "__pycache__", ".home"]
+DEFAULT_EXCLUDE_LIST = [".arenas"]
 
 class Orchestrator:
     def __init__(self, prompt: str, n_agents: int, budget: float = 1000.0, state: Optional[MarketState] = None, base_dir: str = "/tmp/market"):
@@ -101,21 +101,32 @@ class Orchestrator:
         if tasks:
             await asyncio.gather(*tasks)
 
-    def _clone_workspace(self, dest_dir: str):
+    async def _clone_workspace(self, dest_dir: str):
         """Clones the project workspace using Hybrid Snapshot Strategy (Clone + Tar Overlay)."""
         src = os.getcwd()
-        os.makedirs(os.path.dirname(dest_dir), exist_ok=True)
-        if os.path.exists(dest_dir):
-            shutil.rmtree(dest_dir)
+        await asyncio.to_thread(os.makedirs, os.path.dirname(dest_dir), exist_ok=True)
+        if await asyncio.to_thread(os.path.exists, dest_dir):
+            await asyncio.to_thread(shutil.rmtree, dest_dir)
             
         try:
             # 1. Clean Baseline from Git (Only committed files)
             # --no-hardlinks ensures full isolation (safer for untrusted agents)
             logging.info(f"Cloning workspace from {src} to {dest_dir}")
-            subprocess.run(["git", "clone", "--local", "--no-hardlinks", src, dest_dir], check=True, capture_output=True)
+            proc = await asyncio.create_subprocess_exec(
+                "git", "clone", "--local", "--no-hardlinks", src, dest_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await proc.communicate()
             
             # 2. Safety: Remove origin
-            subprocess.run(["git", "remote", "remove", "origin"], cwd=dest_dir, check=True, capture_output=True)
+            proc = await asyncio.create_subprocess_exec(
+                "git", "remote", "remove", "origin",
+                cwd=dest_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await proc.communicate()
             
             # 3. Overlay Current Work (Modified + Untracked non-ignored files)
             # Use 'git ls-files -co' to find everything we want to sync
@@ -126,41 +137,88 @@ class Orchestrator:
             exclude_args_tar = " ".join([f"--exclude='{ex}'" for i, ex in enumerate(self.exclude_list)])
             
             tar_cmd = f"git ls-files -co --exclude-standard {exclude_args_git} -z | tar -c --null {exclude_args_tar} -T - | tar -x -C {dest_dir}"
-            subprocess.run(tar_cmd, shell=True, check=True, cwd=src, capture_output=True)
+            proc = await asyncio.create_subprocess_shell(
+                tar_cmd,
+                cwd=src,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await proc.communicate()
 
             # Generate baseline.diff for agent context (BEFORE baseline commit)
             # Stage changes to include new files in the diff
-            if os.path.exists(dest_dir):
-                subprocess.run(["git", "add", "-N", "."], cwd=dest_dir, check=True, capture_output=True)
+            if await asyncio.to_thread(os.path.exists, dest_dir):
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "add", "-N", ".",
+                    cwd=dest_dir,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                await proc.communicate()
+                
                 with open(os.path.join(dest_dir, "baseline.diff"), "w") as f:
-                    subprocess.run(["git", "diff", "HEAD"], cwd=dest_dir, stdout=f, check=True)
+                    proc = await asyncio.create_subprocess_exec(
+                        "git", "diff", "HEAD",
+                        cwd=dest_dir,
+                        stdout=f,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    await proc.communicate()
 
                 # Fix permissions (git clone/tar might leave them varying)
                 # Restrict to 0o700 (owner only) to enforce isolation
-                for root, dirs, files in os.walk(dest_dir):
-                    # Don't touch .git directory internals as that can break git
-                    if ".git" in dirs:
-                        dirs.remove(".git")
-                    
-                    os.chmod(root, 0o700)
-                    for f in files:
-                        # Skip .git files if walk goes into it (though we removed from dirs)
-                        if ".git/" in os.path.join(root, f): continue
-                        os.chmod(os.path.join(root, f), 0o600)
+                def fix_permissions():
+                    for root, dirs, files in os.walk(dest_dir):
+                        # Don't touch .git directory internals as that can break git
+                        if ".git" in dirs:
+                            dirs.remove(".git")
+                        
+                        os.chmod(root, 0o700)
+                        for f in files:
+                            # Skip .git files if walk goes into it (though we removed from dirs)
+                            if ".git/" in os.path.join(root, f): continue
+                            os.chmod(os.path.join(root, f), 0o600)
+                await asyncio.to_thread(fix_permissions)
             else:
                 logging.warning(f"Skipping baseline.diff and permissions: {dest_dir} not found (mocked clone?)")
 
             # 4. Initialize Shadow Git Config (Needed for baseline commit)
-            subprocess.run(["git", "config", "user.email", "market@local"], cwd=dest_dir, check=True, capture_output=True)
-            subprocess.run(["git", "config", "user.name", "Market Oracle"], cwd=dest_dir, check=True, capture_output=True)
+            proc = await asyncio.create_subprocess_exec(
+                "git", "config", "user.email", "market@local",
+                cwd=dest_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await proc.communicate()
+            
+            proc = await asyncio.create_subprocess_exec(
+                "git", "config", "user.name", "Market Oracle",
+                cwd=dest_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await proc.communicate()
             
             # 5. Commit Baseline (Captures uncommitted work as starting point)
-            subprocess.run(["git", "add", "."], cwd=dest_dir, check=True, capture_output=True)
-            subprocess.run(["git", "commit", "--allow-empty", "-m", "Initial Baseline"], cwd=dest_dir, check=True, capture_output=True)
+            proc = await asyncio.create_subprocess_exec(
+                "git", "add", ".",
+                cwd=dest_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await proc.communicate()
+            
+            proc = await asyncio.create_subprocess_exec(
+                "git", "commit", "--allow-empty", "-m", "Initial Baseline",
+                cwd=dest_dir,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await proc.communicate()
             logging.info(f"Workspace setup complete for {dest_dir}")
 
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Hybrid Clone failed: {e.stderr.decode() if e.stderr else e}")
+        except Exception as e:
+            logging.error(f"Hybrid Clone failed: {e}")
             raise
 
     async def process_round(self, actions: List[AgentAction]):

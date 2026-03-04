@@ -1,10 +1,7 @@
-.arenas/
-__pycache__/
-*.pyc
-node_modules
-*.log
 
 # Python
+*.pyc
+__pycache__/
 *.pyo
 *.pyd
 .Python
@@ -14,6 +11,9 @@ venv/
 dist/
 build/
 *.egg-info/
+
+# JS
+node_modules
 
 # Testing
 .pytest_cache/
@@ -31,6 +31,8 @@ htmlcov/
 Thumbs.db
 
 # Project Specific
+*.log
+.arenas/
 .home/
 worktrees/
 verifiers/
