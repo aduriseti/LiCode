@@ -1,10 +1,11 @@
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 from market.cli import main
 import sys
 import io
 import logging
 import os
+import json
 
 class TestCLI(unittest.TestCase):
     
@@ -88,7 +89,7 @@ class TestCLI(unittest.TestCase):
             with patch.object(sys, 'argv', test_args):
                 with patch('sys.stderr', new=io.StringIO()):
                     main()
-                self.assertEqual(logging.getLogger("market").level, logging.DEBUG)
+                self.assertEqual(logging.getLogger().level, logging.DEBUG)
 
     @patch('market.cli.MarketRunner')
     def test_log_level_before_subcommand(self, MockRunner):
@@ -105,7 +106,50 @@ class TestCLI(unittest.TestCase):
             with patch.object(sys, 'argv', test_args):
                 with patch('sys.stderr', new=io.StringIO()):
                     main()
-                self.assertEqual(logging.getLogger("market").level, logging.ERROR)
+                self.assertEqual(logging.getLogger().level, logging.ERROR)
+
+    @patch('market.cli.MarketRunner')
+    def test_dashboard_url_dual_output(self, MockRunner):
+        """Verifies that Dashboard URL hits both stdout (JSON) and stderr (Text) when json_logs=True."""
+        mock_runner_instance = MockRunner.return_value
+        mock_runner_instance.run_loop = AsyncMock()
+        
+        # Define a side effect for initialize that logs the URL
+        async def mock_initialize(json_logs=False):
+            url = "http://127.0.0.1:1234"
+            logging.info(f"Dashboard active at {url}")
+            sys.stderr.write(f"Dashboard active at {url}\n")
+            if json_logs:
+                print(json.dumps({"type": "log", "message": f"Dashboard active at {url}"}))
+        
+        mock_runner_instance.initialize.side_effect = mock_initialize
+        mock_runner_instance.orchestrator.state.to_json.return_value = "{}"
+        mock_runner_instance.orchestrator.get_final_report.return_value = "Report"
+
+        test_args = ["cli.py", "run", "--prompt", "test", "--json-logs"]
+        stderr_capture = io.StringIO()
+        stdout_capture = io.StringIO()
+        
+        with patch.object(sys, 'argv', test_args):
+            with patch('sys.stderr', stderr_capture):
+                with patch('sys.stdout', stdout_capture):
+                    main()
+                
+        stderr_out = stderr_capture.getvalue()
+        stdout_out = stdout_capture.getvalue()
+        
+        # Verify Human Readable on Stderr
+        self.assertIn("Dashboard active at http://127.0.0.1:1234", stderr_out)
+        
+        # Verify JSON on Stdout
+        found_json = False
+        for line in stdout_out.splitlines():
+            try:
+                data = json.loads(line)
+                if data.get("type") == "log" and "Dashboard active at http://127.0.0.1:1234" in data.get("message"):
+                    found_json = True
+            except: continue
+        self.assertTrue(found_json, "Expected JSON log with dashboard URL on stdout")
 
 if __name__ == '__main__':
     unittest.main()

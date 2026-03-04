@@ -9,6 +9,7 @@ import asyncio
 import time
 import threading
 import math
+import webbrowser
 from rich.live import Live
 from rich.table import Table
 from rich.console import Console
@@ -180,8 +181,13 @@ async def run_market_on_instance(instance, args, semaphore):
                         if msg.get("type") == "log":
                             text = msg.get("message", "")
                             if text.startswith("Dashboard active at "):
+                                url = text.replace("Dashboard active at ", "").strip()
                                 with status_lock:
-                                    status_map[instance_id]["dashboard_url"] = text.replace("Dashboard active at ", "").strip()
+                                    status_map[instance_id]["dashboard_url"] = url
+                                
+                                # Re-issue the official signal back to the parent terminal.
+                                sys.stderr.write(f"\nDashboard active at {url}\n")
+                                sys.stderr.flush()
                             elif "Starting Round" in text:
                                 update_status(text)
                             elif "Convergence reached" in text:

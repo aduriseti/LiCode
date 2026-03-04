@@ -144,21 +144,60 @@ class MarketRunner:
 
         if self.dashboard:
             port = self._find_free_port()
-            self.dashboard_url = f"http://127.0.0.1:{port}"
-            dashboard_script = os.path.abspath(".opencode/lib/dashboard-server.ts")
+            self.dashboard_url = f"http://localhost:{port}"
+            
+            # Use __file__ to reliably find the script regardless of CWD
+            market_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(market_dir)
+            dashboard_script = os.path.join(project_root, ".opencode", "lib", "dashboard-server.ts")
             
             env = os.environ.copy()
             env["DASHBOARD_PORT"] = str(port)
             
+            dash_log_path = os.path.join(self.arena_dir, "dashboard_server.log")
+            self.dash_log_file = open(dash_log_path, "w")
+
             self.dashboard_proc = await asyncio.create_subprocess_exec(
                 "bun", dashboard_script,
                 env=env,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
+                stdout=self.dash_log_file,
+                stderr=asyncio.subprocess.PIPE, # Capture stderr for diagnosis
+                stdin=asyncio.subprocess.PIPE
             )
             
-            # Wait for ready
-            for _ in range(50):
+            # Start a background task to proxy dashboard stderr for diagnosis
+            async def proxy_dash_stderr():
+                while self.dashboard_proc and self.dashboard_proc.returncode is None:
+                    try:
+                        line = await self.dashboard_proc.stderr.readline()
+                        if not line: break
+                        sys.stderr.write(f"[DASHBOARD ERROR] {line.decode('utf-8')}")
+                        sys.stderr.flush()
+                    except: break
+            
+            if self.main_loop and self.main_loop.is_running():
+                self.main_loop.create_task(proxy_dash_stderr())
+            
+            # Start Heartbeat Task to keep stdin pipe alive
+            async def dashboard_heartbeat():
+                while self.dashboard_proc and self.dashboard_proc.returncode is None:
+                    try:
+                        if self.dashboard_proc.stdin and not self.dashboard_proc.stdin.is_closing():
+                            self.dashboard_proc.stdin.write(b"heartbeat\n")
+                            await self.dashboard_proc.stdin.drain()
+                        else:
+                            break
+                    except (ConnectionResetError, BrokenPipeError):
+                        break
+                    except Exception:
+                        break
+                    await asyncio.sleep(2.0)
+            
+            if self.main_loop and self.main_loop.is_running():
+                self.main_loop.create_task(dashboard_heartbeat())
+            
+            # Wait for ready (Increased to 150 attempts @ 0.1s = 15s)
+            for _ in range(150):
                 try:
                     _, writer = await asyncio.open_connection("127.0.0.1", port)
                     writer.close()
@@ -177,6 +216,8 @@ class MarketRunner:
                 sys.stdout.flush()
             
             logging.info(f"Dashboard active at {self.dashboard_url}")
+            sys.stderr.write(f"Dashboard active at {self.dashboard_url}\n")
+            sys.stderr.flush()
 
         logging.info(f"Initializing tournament for run_id: {self.run_id}")
             
@@ -194,6 +235,8 @@ class MarketRunner:
             self.agent_servers[aid] = server_proc
             
             logging.info(f"Server for {aid} started on port {port}. Initializing Shark...")
+            sys.stderr.write(f"Server for {aid} started on port {port}. Initializing Shark...\n")
+            sys.stderr.flush()
 
             # 2. Initialize Shark
             log_path = os.path.join(self.sessions_dir, f"{aid}.log")
@@ -210,6 +253,8 @@ class MarketRunner:
                 raise RuntimeError(f"Failed to initialize session for {aid}")
             
             logging.info(f"Session for {aid} initialized: {session_id}")
+            sys.stderr.write(f"Session for {aid} initialized: {session_id}\n")
+            sys.stderr.flush()
 
             # Emit init event for dashboard
             event = {
@@ -286,6 +331,7 @@ class MarketRunner:
         
         env = os.environ.copy()
         env["HOME"] = agent_home
+        env["PORT"] = str(port)
         
         # Security & Automation:
         # - Auto-deny external directory access (fails immediately instead of hanging)
@@ -321,6 +367,7 @@ class MarketRunner:
         env["OPENCODE_CONFIG_CONTENT"] = config_json
         
         agent_log = os.path.join(agent_dir, "opencode_serve.log")
+        
         with open(agent_log, "w") as f:
             proc = await asyncio.create_subprocess_exec(
                 "opencode", "serve", "--port", str(port), "--hostname=127.0.0.1",
@@ -372,12 +419,10 @@ class MarketRunner:
         try:
             for i in range(max_rounds):
                 # 1. Collect Actions in Parallel
-                msg_collecting = {"type": "log", "message": f"Round {i+1}: Collecting agent actions..."}
+                logging.info(f"Round {i+1}: Collecting agent actions...")
                 if json_logs:
-                    print(json.dumps(msg_collecting))
-                    await self._send_to_dashboard("/api/log", msg_collecting)
-                else:
-                    logging.info(msg_collecting["message"])
+                    print(json.dumps({"type": "log", "message": f"Starting Round {i+1}"}))
+                    sys.stdout.flush()
                 
                 tasks = []
                 for aid, shark in self.sharks.items():
@@ -388,47 +433,35 @@ class MarketRunner:
                 
                 for action in actions:
                     if action.beliefs:
-                        msg_belief = {
-                            "type": "log", 
-                            "message": f"Agent {action.agent_id} Beliefs: {action.beliefs}"
-                        }
-                        if json_logs:
-                            print(json.dumps(msg_belief))
-                            await self._send_to_dashboard("/api/log", msg_belief)
-                        else:
-                            logging.info(msg_belief["message"])
+                        logging.info(f"Agent {action.agent_id} Beliefs: {action.beliefs}")
                 
-                msg_decided = {"type": "log", "message": f"Round {i+1}: All agents decided."}
-                if json_logs:
-                    print(json.dumps(msg_decided))
-                    await self._send_to_dashboard("/api/log", msg_decided)
-                else:
-                    logging.info(msg_decided["message"])
+                logging.info(f"Round {i+1}: All agents decided.")
                 
                 # 2. Step Market
                 await self.orchestrator.process_round(list(actions))
                 
-                # 3. Update UI (Text Only)
+                # 3. Update UI
+                # Always send pretty summary to stderr for readability in bench logs
+                sys.stderr.write(self.orchestrator.get_pretty_summary() + "\n")
+                sys.stderr.flush()
+                
                 if not json_logs:
                     print(self.orchestrator.get_pretty_summary())
-                elif json_logs:
-                    # Output full state for dashboard
+                
+                # Report state to dashboard via HTTP
+                if self.dashboard_url:
                     state_msg = {
                         "type": "state",
                         **json.loads(self.orchestrator.state.to_json())
                     }
-                    print(json.dumps(state_msg))
-                    sys.stdout.flush()
                     await self._send_to_dashboard("/api/log", state_msg)
                     
                 # 4. Check Convergence
                 if self.check_convergence():
-                    msg_converged = {"type": "log", "message": f"Convergence reached at round {i+1}"}
+                    logging.info(f"Convergence reached at round {i+1}")
                     if json_logs:
-                        print(json.dumps(msg_converged))
-                        await self._send_to_dashboard("/api/log", msg_converged)
-                    else:
-                        logging.info(msg_converged["message"])
+                        print(json.dumps({"type": "log", "message": f"Convergence reached at round {i+1}"}))
+                        sys.stdout.flush()
                     break
         finally:
             # 1. Shutdown Sharks (Abort sessions to stop token usage, but keep servers alive)
@@ -457,6 +490,7 @@ class MarketRunner:
     async def close(self):
         """Cleanly shutdown all remaining resources."""
         self._stop_servers()
+        
         if self.dashboard_proc:
             try:
                 self.dashboard_proc.terminate()
@@ -465,6 +499,10 @@ class MarketRunner:
                 if self.dashboard_proc:
                     try: self.dashboard_proc.kill()
                     except: pass
+            
+            if hasattr(self, "dash_log_file") and self.dash_log_file:
+                try: self.dash_log_file.close()
+                except: pass
         
         if self._http_session:
             await self._http_session.close()

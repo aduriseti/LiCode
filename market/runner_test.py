@@ -174,6 +174,64 @@ class TestMarketRunner(unittest.IsolatedAsyncioTestCase):
     @patch('market.runner.asyncio.create_subprocess_exec')
     @patch('market.runner.asyncio.open_connection')
     @patch('market.runner.Shark')
+    async def test_dashboard_script_path_resolution(self, MockShark, MockAsyncSocket, MockExec, MockClientSession):
+        """Regression test to ensure dashboard path doesn't mangle when CWD changes."""
+        mock_writer = MagicMock()
+        mock_writer.close = MagicMock()
+        mock_writer.wait_closed = AsyncMock()
+        MockAsyncSocket.return_value = (MagicMock(), mock_writer)
+        
+        mock_proc = MagicMock()
+        mock_proc.returncode = None
+        mock_proc.poll.return_value = None
+        mock_proc.wait = AsyncMock()
+        MockExec.return_value = mock_proc
+        
+        shark_instance = MockShark.return_value
+        shark_instance.initialize_session = AsyncMock()
+        shark_instance.session.id = "ses_mock"
+        
+        original_cwd = os.getcwd()
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp_dir:
+            os.chdir(temp_dir)
+            try:
+                runner = MarketRunner("Test", n_agents=1, budget=100.0, api_url="http://127.0.0.1", dashboard=True)
+                runner.orchestrator.initialize = AsyncMock()
+                from market.core.state import AgentPortfolio
+                runner.orchestrator.state.agents["agent_0"] = AgentPortfolio(agent_id="agent_0", wealth=100.0)
+                
+                # Mock candidates dir creation since initialize() checks for it
+                cand_dir = os.path.join(runner.arena_dir, "worktrees", "cand_0")
+                os.makedirs(cand_dir, exist_ok=True)
+                
+                await runner.initialize()
+                
+                # Check exec calls
+                self.assertTrue(MockExec.called)
+                
+                # Find the call that started the dashboard
+                dash_call = None
+                for call in MockExec.call_args_list:
+                    args, kwargs = call
+                    if args[0] == "bun":
+                        dash_call = args
+                        break
+                        
+                self.assertIsNotNone(dash_call, "Dashboard process was not spawned")
+                
+                # The script path should be absolute and contain .opencode/lib/dashboard-server.ts
+                dash_script = dash_call[1]
+                self.assertTrue(os.path.isabs(dash_script))
+                self.assertTrue(dash_script.endswith(os.path.join(".opencode", "lib", "dashboard-server.ts")))
+                self.assertFalse(dash_script.startswith(temp_dir), "Dashboard path was incorrectly resolved relative to CWD")
+            finally:
+                os.chdir(original_cwd)
+
+    @patch('aiohttp.ClientSession')
+    @patch('market.runner.asyncio.create_subprocess_exec')
+    @patch('market.runner.asyncio.open_connection')
+    @patch('market.runner.Shark')
     async def test_dashboard_agent_registration(self, MockShark, MockAsyncSocket, MockSubprocess, MockClientSession):
         """Verify agent_init triggers a post to /api/agent"""
         mock_writer = MagicMock()

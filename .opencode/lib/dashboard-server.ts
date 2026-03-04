@@ -75,14 +75,37 @@ const cleanup = () => {
 process.on('SIGINT', cleanup);
 process.on('SIGTERM', cleanup);
 
+// Parent Liveness Monitoring
+let isParentAlive = true;
+// Resume stdin so it stays open and emits 'end' when the pipe closes
+process.stdin.resume();
+process.stdin.on('data', (chunk) => {
+    // Keep-alive heartbeat from parent, just consume it
+});
+process.stdin.on('end', () => {
+    log("info", "Parent process exited (stdin closed). Starting 60s inactivity timer...");
+    isParentAlive = false;
+    // Start a 60s grace period for human inspection after parent exits
+    setTimeout(() => {
+        if (io.engine.clientsCount === 0) {
+            log("info", "No clients connected after 60s grace period. Shutting down.");
+            cleanup();
+        }
+    }, 60000);
+});
+
 // Auto-shutdown when clients disconnect
 io.on('connection', (socket) => {
     socket.on('disconnect', () => {
         setTimeout(() => {
-            if (io.engine.clientsCount === 0) {
+            // Only consider auto-shutdown if:
+            // 1. Parent is dead (tournament finished)
+            // 2. No browser clients are currently connected
+            if (!isParentAlive && io.engine.clientsCount === 0) {
+                log("info", "Inactivity detected after tournament end. Shutting down.");
                 cleanup();
             }
-        }, 5000);
+        }, 10000); // 10s wait after last disconnect
     });
 });
 

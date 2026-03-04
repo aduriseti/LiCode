@@ -13,7 +13,7 @@ build/
 *.egg-info/
 
 # JS
-node_modules
+node_modules/
 
 # Testing
 .pytest_cache/

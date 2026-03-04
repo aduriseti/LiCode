@@ -128,15 +128,14 @@ def main():
     formatter = WrappingFormatter(fmt='%(asctime)s - %(levelname)s - %(message)s', width=100)
     handler.setFormatter(formatter)
     
-    logger = logging.getLogger("market")
-    logger.setLevel(log_level)
-    # Remove existing handlers to avoid duplicates if re-initialized
-    if logger.hasHandlers():
-        logger.handlers.clear()
-    logger.addHandler(handler)
+    # Configure the root logger so all logging calls in the project are captured
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
     
-    # Also set as root for any other libs if needed, but primarily use 'market'
-    # logging.getLogger().setLevel(log_level) 
+    # Remove existing handlers to avoid duplicates
+    if root_logger.hasHandlers():
+        root_logger.handlers.clear()
+    root_logger.addHandler(handler)
     
     if args.command == "init":
         orch = Orchestrator(args.prompt, args.agents, args.budget)
