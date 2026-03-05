@@ -113,7 +113,7 @@ class Orchestrator:
             # --no-hardlinks ensures full isolation (safer for untrusted agents)
             logging.info(f"Cloning workspace from {src} to {dest_dir}")
             proc = await asyncio.create_subprocess_exec(
-                "git", "clone", "--local", "--no-hardlinks", src, dest_dir,
+                "git", "clone", "--depth", "1", "--single-branch", "--no-hardlinks", f"file://{src}", dest_dir,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
