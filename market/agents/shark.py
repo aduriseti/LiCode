@@ -5,7 +5,7 @@ import sys
 import subprocess
 import asyncio
 from typing import Dict, Any, Optional
-from opencode_ai import AsyncOpencode, APITimeoutError
+from opencode_ai import AsyncOpencode, APITimeoutError, APIConnectionError
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log
 
 from ..core.state import MarketState
@@ -119,35 +119,39 @@ You must output a single JSON object.
         Analyzes the market state and returns an action.
         Uses a self-correction loop for parsing errors.
         """
-        await self.initialize_session()
-        
-        # 1. Generate full state prompt ONCE
-        current_prompt = await self._format_state_prompt(state)
-        
-        # 2. Self-correction loop
-        for attempt in range(3): # Up to 3 attempts at correction
-            try:
-                # Call API with retry only for transient network/timeout errors
-                content = await self._chat_with_network_retry(current_prompt)
-                
-                # 3. Parse and return if successful
-                return self._parse_action_response(content)
-                
-            except LLMResponseError as e:
-                if attempt == 2: # Last attempt failed
-                    logging.error(f"Shark {self.agent_id} failed after 3 attempts: {e}")
-                    # Return empty action as fallback
-                    return AgentAction(agent_id=self.agent_id)
-                
-                # 4. Propagate error to agent for self-correction
-                # We send a short error message instead of resending the 10KB state
-                logging.warning(f"Shark {self.agent_id} parsing failed. Sending error back for correction (Attempt {attempt+1}/3)")
-                current_prompt = f"ERROR: Your previous response was invalid: {str(e)}\nPlease provide your updated beliefs and proposals in the correct JSON format."
-        
-        return AgentAction(agent_id=self.agent_id) # Final fallback
+        try:
+            await self.initialize_session()
+            
+            # 1. Generate full state prompt ONCE
+            current_prompt = await self._format_state_prompt(state)
+            
+            # 2. Self-correction loop
+            for attempt in range(3): # Up to 3 attempts at correction
+                try:
+                    # Call API with retry only for transient network/timeout errors
+                    content = await self._chat_with_network_retry(current_prompt)
+                    
+                    # 3. Parse and return if successful
+                    return self._parse_action_response(content)
+                    
+                except LLMResponseError as e:
+                    if attempt == 2: # Last attempt failed
+                        logging.error(f"Shark {self.agent_id} failed after 3 attempts: {e}")
+                        # Return empty action as fallback
+                        return AgentAction(agent_id=self.agent_id)
+                    
+                    # 4. Propagate error to agent for self-correction
+                    # We send a short error message instead of resending the 10KB state
+                    logging.warning(f"Shark {self.agent_id} parsing failed. Sending error back for correction (Attempt {attempt+1}/3)")
+                    current_prompt = f"ERROR: Your previous response was invalid: {str(e)}\nPlease provide your updated beliefs and proposals in the correct JSON format."
+            
+            return AgentAction(agent_id=self.agent_id) # Final fallback
+        except Exception as e:
+            logging.error(f"Shark {self.agent_id} failed to get action: {e}")
+            return AgentAction(agent_id=self.agent_id)
 
     @retry(
-        retry=retry_if_exception_type(APITimeoutError), # Only retry transient network/hangs
+        retry=retry_if_exception_type((APITimeoutError, APIConnectionError)), # Only retry transient network/hangs
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=4, max=20),
         reraise=True,

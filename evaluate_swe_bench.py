@@ -347,9 +347,15 @@ async def async_main():
             "--report_dir", "."
         ]
         log_print(f"Executing: {' '.join(eval_cmd)}")
+        
+        env = os.environ.copy()
+        env["FORCE_COLOR"] = "1"
+        env["TERM"] = "xterm-256color"
+        
         eval_proc = await asyncio.create_subprocess_exec(
             *eval_cmd,
             cwd=output_dir,
+            env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT
         )

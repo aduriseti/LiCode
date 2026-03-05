@@ -21,7 +21,7 @@ class AgentAction:
     beliefs: Dict[str, float] = field(default_factory=dict)
     proposals: List[Dict] = field(default_factory=list) # e.g. {"type": "VERIFIER", "path": "..."}
 
-DEFAULT_EXCLUDE_LIST = [".arenas"]
+DEFAULT_EXCLUDE_LIST = [".arenas", ".home"]
 
 class Orchestrator:
     def __init__(self, prompt: str, n_agents: int, budget: float = 1000.0, state: Optional[MarketState] = None, base_dir: str = "/tmp/market"):
@@ -127,6 +127,15 @@ class Orchestrator:
                 stderr=asyncio.subprocess.PIPE
             )
             await proc.communicate()
+            
+            # 2.5 Ensure exclude_list directories do not pollute agent diffs
+            def update_git_exclude():
+                exclude_path = os.path.join(dest_dir, ".git", "info", "exclude")
+                if os.path.exists(exclude_path):
+                    with open(exclude_path, "a") as f:
+                        for item in self.exclude_list:
+                            f.write(f"\n{item}\n")
+            await asyncio.to_thread(update_git_exclude)
             
             # 3. Overlay Current Work (Modified + Untracked non-ignored files)
             # Use 'git ls-files -co' to find everything we want to sync

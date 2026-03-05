@@ -232,3 +232,25 @@ class TestSharkActionParsing(unittest.TestCase):
         action = loop.run_until_complete(shark.get_action(state))
         loop.close()
         self.assertEqual(action.beliefs["cand_0"], 0.5)
+
+    @patch('market.agents.shark.AsyncOpencode')
+    def test_get_action_fallback_on_exception(self, MockClient):
+        # Mock successful session creation but chat raises an Exception
+        mock_session = MagicMock()
+        mock_session.id = "ses_123"
+        
+        mock_client_instance = MockClient.return_value
+        mock_client_instance.session.create = AsyncMock(return_value=mock_session)
+        mock_client_instance.session.chat = AsyncMock(side_effect=Exception("Random unhandled crash"))
+
+        state = MarketState(round_num=1, liquidity_b=100.0)
+        shark = Shark("agent_0")
+        
+        loop = asyncio.new_event_loop()
+        action = loop.run_until_complete(shark.get_action(state))
+        loop.close()
+        
+        # Verify it falls back to an empty action without bubbling the exception
+        self.assertEqual(action.agent_id, "agent_0")
+        self.assertEqual(action.beliefs, {})
+        self.assertEqual(action.proposals, [])
