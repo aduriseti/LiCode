@@ -7,3 +7,5 @@ json_repair
 pytest
 pytest-timeout
 
+playwright
+pytest-playwright

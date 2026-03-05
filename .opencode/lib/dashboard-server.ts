@@ -43,6 +43,8 @@ setupTerminalProxy(terminalManager);
 const activeStreams = new Map<string, EventSource>();
 const sessionToAgent = new Map<string, string>();
 const agentServerPorts = new Set<number>();
+const eventHistory: any[] = [];
+const MAX_HISTORY = 10000;
 
 // Cleanup Logic
 let dashboardClosed = false;
@@ -96,6 +98,11 @@ process.stdin.on('end', () => {
 
 // Auto-shutdown when clients disconnect
 io.on('connection', (socket) => {
+    // Replay event history to new client
+    for (const event of eventHistory) {
+        socket.emit('log', event);
+    }
+
     socket.on('disconnect', () => {
         setTimeout(() => {
             // Only consider auto-shutdown if:
@@ -117,9 +124,13 @@ app.post('/api/log', (req, res) => {
     // Support batched logs
     if (data.type === 'batch' && Array.isArray(data.events)) {
         for (const event of data.events) {
+            if (eventHistory.length >= MAX_HISTORY) eventHistory.shift();
+            eventHistory.push(event);
             io.emit('log', event);
         }
     } else {
+        if (eventHistory.length >= MAX_HISTORY) eventHistory.shift();
+        eventHistory.push(data);
         io.emit('log', data);
     }
     res.sendStatus(200);
