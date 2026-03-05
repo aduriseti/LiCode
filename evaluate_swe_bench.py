@@ -164,6 +164,7 @@ async def run_market_on_instance(instance, args, semaphore):
                     env=env,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
+                    limit=1024 * 1024 * 32,
                 )
 
                 while True:
@@ -184,7 +185,7 @@ async def run_market_on_instance(instance, args, semaphore):
                                 url = text.replace("Dashboard active at ", "").strip()
                                 with status_lock:
                                     status_map[instance_id]["dashboard_url"] = url
-                                
+
                                 # Re-issue the official signal back to the parent terminal.
                                 sys.stderr.write(f"\nDashboard active at {url}\n")
                                 sys.stderr.flush()
@@ -192,7 +193,7 @@ async def run_market_on_instance(instance, args, semaphore):
                                 update_status(text)
                             elif "Convergence reached" in text:
                                 update_status("Convergence Detected")
-                        elif msg.get("type") == "final_result":
+                        elif msg.get("type") == "final_result" or ("state" in msg and "report" in msg):
                             data = msg
                     except json.JSONDecodeError:
                         continue
@@ -282,12 +283,24 @@ async def async_main():
     if not args.output:
         args.output = f"swe_bench_results/{args.run_id}/predictions.jsonl"
 
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
+    run_dir = os.path.dirname(os.path.abspath(args.output))
+    os.makedirs(run_dir, exist_ok=True)
+    
+    main_log_path = os.path.join(run_dir, "main.log")
+    main_log = open(main_log_path, "a")
+
+    def log_print(msg, style=None):
+        if style:
+            console.print(msg, style=style)
+        else:
+            console.print(msg)
+        main_log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {msg}\n")
+        main_log.flush()
 
     if os.path.exists(args.output):
         os.remove(args.output)
 
-    console.print(f"[bold green]Loading SWE-bench Verified dataset...[/bold green]")
+    log_print(f"Loading SWE-bench Verified dataset...", style="bold green")
     ds = await asyncio.to_thread(load_dataset, "princeton-nlp/SWE-bench_Verified", split="test")
     
     if args.repo:
@@ -296,7 +309,7 @@ async def async_main():
         instances = list(ds)
         
     instances = instances[:args.limit]
-    console.print(f"Found {len(instances)} instances to evaluate. Running with parallelism {args.parallel}")
+    log_print(f"Found {len(instances)} instances to evaluate. Running with parallelism {args.parallel}")
 
     with status_lock:
         for inst in instances:
@@ -320,10 +333,10 @@ async def async_main():
                 with open(args.output, "a") as f:
                     f.write(json.dumps(res) + "\n")
                 
-    console.print(f"\n[bold green]Done! Wrote {len(results)} predictions to {args.output}[/bold green]")
+    log_print(f"\nDone! Wrote {len(results)} predictions to {args.output}", style="bold green")
     
     if args.run_eval and results:
-        console.print(f"\n[bold blue]Starting automatic evaluation...[/bold blue]")
+        log_print(f"\nStarting automatic evaluation...", style="bold blue")
         output_dir = os.path.dirname(os.path.abspath(args.output))
         eval_cmd = [
             sys.executable, "-m", "swebench.harness.run_evaluation",
@@ -333,15 +346,30 @@ async def async_main():
             "--run_id", args.run_id,
             "--report_dir", "."
         ]
-        console.print(f"Executing: {' '.join(eval_cmd)}")
+        log_print(f"Executing: {' '.join(eval_cmd)}")
         eval_proc = await asyncio.create_subprocess_exec(
             *eval_cmd,
-            cwd=output_dir
+            cwd=output_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT
         )
+        
+        while True:
+            line_bytes = await eval_proc.stdout.readline()
+            if not line_bytes:
+                break
+            line = line_bytes.decode('utf-8', errors='replace')
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            main_log.write(line)
+            main_log.flush()
+
         await eval_proc.wait()
     else:
-        console.print(f"\n[bold yellow]To evaluate manually, run the SWE-bench harness:[/bold yellow]")
-        console.print(f"python -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Verified --predictions_path {os.path.abspath(args.output)} --max_workers {args.eval_workers} --run_id {args.run_id} --report_dir {os.path.dirname(os.path.abspath(args.output))}")
+        log_print(f"\nTo evaluate manually, run the SWE-bench harness:", style="bold yellow")
+        log_print(f"python -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Verified --predictions_path {os.path.abspath(args.output)} --max_workers {args.eval_workers} --run_id {args.run_id} --report_dir {os.path.dirname(os.path.abspath(args.output))}")
+
+    main_log.close()
 
 if __name__ == "__main__":
     asyncio.run(async_main())

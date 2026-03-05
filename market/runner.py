@@ -162,7 +162,8 @@ class MarketRunner:
                 env=env,
                 stdout=self.dash_log_file,
                 stderr=asyncio.subprocess.PIPE, # Capture stderr for diagnosis
-                stdin=asyncio.subprocess.PIPE
+                stdin=asyncio.subprocess.PIPE,
+                limit=1024 * 1024 * 32,
             )
             
             # Start a background task to proxy dashboard stderr for diagnosis
@@ -214,10 +215,11 @@ class MarketRunner:
             if json_logs:
                 print(json.dumps({"type": "log", "message": f"Dashboard active at {self.dashboard_url}"}))
                 sys.stdout.flush()
+            else:
+                sys.stderr.write(f"Dashboard active at {self.dashboard_url}\n")
+                sys.stderr.flush()
             
             logging.info(f"Dashboard active at {self.dashboard_url}")
-            sys.stderr.write(f"Dashboard active at {self.dashboard_url}\n")
-            sys.stderr.flush()
 
         logging.info(f"Initializing tournament for run_id: {self.run_id}")
             
@@ -299,6 +301,17 @@ class MarketRunner:
 
     def _find_free_port(self) -> int:
         import socket
+        import random
+        # Try 100 times to find a random free port to prevent parallel collision
+        for _ in range(100):
+            port = random.randint(40000, 60000)
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try:
+                    s.bind(('', port))
+                    return port
+                except OSError:
+                    continue
+        # Fallback to OS assigned
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.bind(('', 0))
             return s.getsockname()[1]
@@ -471,6 +484,7 @@ class MarketRunner:
             
             # 2. Construct and Print Final Output
             output = {
+                "type": "final_result",
                 "state": self.orchestrator.state.to_dict(),
                 "report": self.orchestrator.get_final_report()
             }

@@ -167,3 +167,85 @@ def test_get_patch_from_winner(tmp_path):
         mock_run.assert_any_call(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
         mock_run.assert_any_call(["git", "reset", "problem.md"], cwd=str(tmp_path), capture_output=True)
         mock_run.assert_any_call(["git", "diff", "--cached", "HEAD"], cwd=str(tmp_path), capture_output=True, text=True)
+
+import json
+
+@pytest.mark.asyncio
+async def test_run_market_protocol_fix(tmp_path):
+    """
+    Test that run_market_on_instance correctly extracts the final result
+    even if the "type": "final_result" tag is missing, as long as "state" and "report" are present.
+    """
+    instance = {
+        'instance_id': 'test_repo__test_issue-456',
+        'repo': 'test/repo',
+        'base_commit': 'abcdef123456',
+        'problem_statement': 'Fix the bug.'
+    }
+    
+    args = Namespace(
+        dummy=False,
+        agents=1,
+        rounds=1,
+        provider='test-provider',
+        model='test-model',
+        output=str(tmp_path / "run_folder" / "predictions.jsonl"),
+        dashboard=False
+    )
+    
+    semaphore = asyncio.Semaphore(1)
+    
+    # Mock data with the "state" and "report" but NO "type": "final_result" tag
+    mock_output = {
+        "state": {"round_num": 1, "assets": {"winner": {"type": "CANDIDATE", "code_path": "/tmp"}}},
+        "report": "**Winner:** winner"
+    }
+    
+    with patch('evaluate_swe_bench.asyncio.create_subprocess_exec') as mock_exec, \
+         patch('evaluate_swe_bench.get_patch_from_winner', return_value="fake-patch"):
+        
+        # We need three mocks for clone, checkout, and market run
+        async def mock_async_none():
+            return None
+        
+        mock_clone = MagicMock()
+        mock_clone.communicate = mock_async_none
+        mock_clone.wait = mock_async_none
+        mock_clone.returncode = 0
+        
+        mock_checkout = MagicMock()
+        mock_checkout.communicate = mock_async_none
+        mock_checkout.wait = mock_async_none
+        mock_checkout.returncode = 0
+        
+        mock_market = MagicMock()
+        mock_market.wait = mock_async_none
+        mock_market.returncode = 0
+        
+        # Setup market stdout
+        mock_stdout = MagicMock()
+        lines = [
+            json.dumps({"type": "log", "message": "Starting Round 1"}).encode() + b"\n",
+            json.dumps(mock_output).encode() + b"\n",
+            b"" # EOF
+        ]
+        
+        async def mock_readline():
+            if not lines:
+                return b""
+            return lines.pop(0)
+        
+        mock_stdout.readline = mock_readline
+        mock_market.stdout = mock_stdout
+        
+        mock_exec.side_effect = [mock_clone, mock_checkout, mock_market]
+        
+        # Patch directory operations
+        with patch('evaluate_swe_bench.os.makedirs'), \
+             patch('evaluate_swe_bench.open', MagicMock()):
+            
+            result = await evaluate_swe_bench.run_market_on_instance(instance, args, semaphore)
+            
+            assert result is not None
+            assert result['instance_id'] == 'test_repo__test_issue-456'
+            assert result['model_patch'] == 'fake-patch'
