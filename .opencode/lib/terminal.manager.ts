@@ -73,7 +73,7 @@ export class TerminalManager {
         const startTime = Date.now();
 
         const child = spawn("node", [helperPath, opencodeBin, targetUrl, meta.session_id, meta.arena_dir || process.cwd()], {
-            stdio: ["ignore", "pipe", "pipe"],
+            stdio: ["ignore", "pipe", "pipe", "ipc"],
             detached: true,
             env: { ...process.env, TERM: "xterm-256color", COLORTERM: "truecolor" }
         });

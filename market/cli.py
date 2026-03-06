@@ -154,8 +154,12 @@ def main():
         )
         
         async def run_tournament():
-            await runner.initialize(json_logs=args.json_logs)
-            await runner.run_loop(args.rounds, stream_ui=not args.json_logs, json_logs=args.json_logs)
+            try:
+                await runner.initialize(json_logs=args.json_logs)
+                await runner.run_loop(args.rounds, stream_ui=not args.json_logs, json_logs=args.json_logs)
+            finally:
+                if not args.dashboard:
+                    await runner.close()
 
         asyncio.run(run_tournament())
         

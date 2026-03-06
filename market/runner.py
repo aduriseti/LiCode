@@ -9,6 +9,7 @@ import shutil
 import asyncio
 import json
 import glob
+import signal
 from typing import List, Dict, Optional
 from collections import deque
 
@@ -387,7 +388,8 @@ class MarketRunner:
                 stdout=f,
                 stderr=f,
                 cwd=agent_dir,
-                env=env
+                env=env,
+                start_new_session=True
             )
             
             # Wait for port to open
@@ -410,9 +412,12 @@ class MarketRunner:
         for aid, proc in self.agent_servers.items():
             logging.info(f"Stopping server for {aid}...")
             try:
-                proc.terminate()
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
             except:
-                pass
+                try:
+                    proc.terminate()
+                except:
+                    pass
         self.agent_servers.clear()
 
     async def run_loop(self, max_rounds: int, stream_ui: bool = True, json_logs: bool = False):
