@@ -261,6 +261,8 @@ def generate_table():
 async def async_main():
     parser = argparse.ArgumentParser(description="Evaluate OpenCode Market on SWE-bench Verified")
     parser.add_argument("--repo", type=str, default="pallets/flask", help="Filter by repo to test a subset (e.g., pallets/flask)")
+    parser.add_argument("--task-ids", type=str, help="Comma-separated list of SWE-bench task IDs to evaluate")
+    parser.add_argument("--dataset", type=str, default="princeton-nlp/SWE-bench_Verified", help="SWE-bench dataset to use (e.g., princeton-nlp/SWE-bench_Verified, princeton-nlp/SWE-bench_Lite)")
     parser.add_argument("--limit", type=int, default=3, help="Max instances to evaluate")
     parser.add_argument("--agents", type=int, default=3, help="Number of market agents")
     parser.add_argument("--rounds", type=int, default=5, help="Number of market rounds")
@@ -300,15 +302,18 @@ async def async_main():
     if os.path.exists(args.output):
         os.remove(args.output)
 
-    log_print(f"Loading SWE-bench Verified dataset...", style="bold green")
-    ds = await asyncio.to_thread(load_dataset, "princeton-nlp/SWE-bench_Verified", split="test")
+    log_print(f"Loading {args.dataset} dataset...", style="bold green")
+    ds = await asyncio.to_thread(load_dataset, args.dataset, split="test")
     
-    if args.repo:
+    if args.task_ids:
+        target_ids = set(id.strip() for id in args.task_ids.split(","))
+        instances = [i for i in ds if i['instance_id'] in target_ids]
+    elif args.repo:
         instances = [i for i in ds if args.repo in i['repo']]
+        instances = instances[:args.limit]
     else:
-        instances = list(ds)
+        instances = list(ds)[:args.limit]
         
-    instances = instances[:args.limit]
     log_print(f"Found {len(instances)} instances to evaluate. Running with parallelism {args.parallel}")
 
     with status_lock:
