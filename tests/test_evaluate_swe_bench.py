@@ -155,18 +155,27 @@ def test_get_patch_from_winner(tmp_path):
     }
     
     with patch('evaluate_swe_bench.subprocess.run') as mock_run:
-        mock_run_result = MagicMock()
-        mock_run_result.stdout = "diff --git a/test.py b/test.py\n+print('fixed')"
-        mock_run.return_value = mock_run_result
+        def mock_run_side_effect(cmd, **kwargs):
+            m = MagicMock()
+            if cmd[1] == "log":
+                m.stdout = "abc123baseline"
+            elif cmd[1] == "diff":
+                m.stdout = "diff --git a/test.py b/test.py\n+print('fixed')"
+            else:
+                m.stdout = ""
+            return m
+            
+        mock_run.side_effect = mock_run_side_effect
         
         patch_text = evaluate_swe_bench.get_patch_from_winner(str(tmp_path), report, state)
         
         assert patch_text == "diff --git a/test.py b/test.py\n+print('fixed')"
         
         # Verify the correct git commands were called
+        mock_run.assert_any_call(["git", "log", "--grep=Initial Baseline", "--format=%H", "-n", "1"], cwd=str(tmp_path), capture_output=True, text=True)
         mock_run.assert_any_call(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
-        mock_run.assert_any_call(["git", "reset", "problem.md"], cwd=str(tmp_path), capture_output=True)
-        mock_run.assert_any_call(["git", "diff", "--cached", "HEAD"], cwd=str(tmp_path), capture_output=True, text=True)
+        mock_run.assert_any_call(["git", "reset", "abc123baseline", "problem.md"], cwd=str(tmp_path), capture_output=True)
+        mock_run.assert_any_call(["git", "diff", "--cached", "abc123baseline"], cwd=str(tmp_path), capture_output=True, text=True)
 
 import json
 

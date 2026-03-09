@@ -19,6 +19,7 @@ class TestCLI(unittest.TestCase):
         from unittest.mock import AsyncMock
         mock_runner_instance.run_loop = AsyncMock()
         mock_runner_instance.initialize = AsyncMock()
+        mock_runner_instance.close = AsyncMock()
         
         mock_runner_instance.orchestrator.state.to_json.return_value = "{}"
         mock_runner_instance.orchestrator.get_final_report.return_value = "Report"
@@ -81,6 +82,7 @@ class TestCLI(unittest.TestCase):
         mock_runner_instance = MockRunner.return_value
         mock_runner_instance.run_loop = AsyncMock()
         mock_runner_instance.initialize = AsyncMock()
+        mock_runner_instance.close = AsyncMock()
         mock_runner_instance.orchestrator.state.to_json.return_value = "{}"
         mock_runner_instance.orchestrator.get_final_report.return_value = "Report"
         
@@ -98,6 +100,7 @@ class TestCLI(unittest.TestCase):
         mock_runner_instance = MockRunner.return_value
         mock_runner_instance.run_loop = AsyncMock()
         mock_runner_instance.initialize = AsyncMock()
+        mock_runner_instance.close = AsyncMock()
         mock_runner_instance.orchestrator.state.to_json.return_value = "{}"
         mock_runner_instance.orchestrator.get_final_report.return_value = "Report"
         
@@ -113,6 +116,7 @@ class TestCLI(unittest.TestCase):
         """Verifies that Dashboard URL hits both stdout (JSON) and stderr (Text) when json_logs=True."""
         mock_runner_instance = MockRunner.return_value
         mock_runner_instance.run_loop = AsyncMock()
+        mock_runner_instance.close = AsyncMock()
         
         # Define a side effect for initialize that logs the URL
         async def mock_initialize(json_logs=False):

@@ -46,12 +46,21 @@ def get_patch_from_winner(work_dir, report, state_dict):
     max_price = state.get_asset_price(winner_id)
     print(f"Winner identified from state: {winner_id} (Price: {max_price:.1%})")
         
+    # Find the "Initial Baseline" commit
+    res = subprocess.run(
+        ["git", "log", "--grep=Initial Baseline", "--format=%H", "-n", "1"],
+        cwd=code_path, capture_output=True, text=True
+    )
+    baseline_commit = res.stdout.strip()
+    if not baseline_commit:
+        raise Exception("Fatal: Could not find 'Initial Baseline' commit for diff generation.")
+
     # Get the patch
     subprocess.run(["git", "add", "."], cwd=code_path, capture_output=True)
     # Remove problem.md from staging so it's not in the diff
-    subprocess.run(["git", "reset", "problem.md"], cwd=code_path, capture_output=True)
+    subprocess.run(["git", "reset", baseline_commit, "problem.md"], cwd=code_path, capture_output=True)
     
-    diff_res = subprocess.run(["git", "diff", "--cached", "HEAD"], cwd=code_path, capture_output=True, text=True)
+    diff_res = subprocess.run(["git", "diff", "--cached", baseline_commit], cwd=code_path, capture_output=True, text=True)
     return diff_res.stdout
 
 async def run_market_on_instance(instance, args, semaphore):
