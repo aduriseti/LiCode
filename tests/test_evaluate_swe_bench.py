@@ -36,16 +36,29 @@ async def test_run_market_dummy_mode(tmp_path):
     
     semaphore = asyncio.Semaphore(1)
     
-    # Patch subprocess utilities
-    with patch('evaluate_swe_bench.asyncio.create_subprocess_exec') as mock_exec:
-        # Mock git clone/checkout processes
-        mock_proc = MagicMock()
-        mock_proc.communicate = MagicMock(side_effect=lambda: asyncio.sleep(0)) # Lambda returning coroutine
-        mock_proc.wait = MagicMock(side_effect=lambda: asyncio.sleep(0))
+    # Patch subprocess utilities and docker
+    with patch('evaluate_swe_bench.asyncio.create_subprocess_exec') as mock_exec, \
+         patch('evaluate_swe_bench.docker') as mock_docker:
         
-        async def mock_communicate():
-            return b"", b""
-        mock_proc.communicate = mock_communicate
+        # Mock docker methods
+        mock_docker.get_image_name.return_value = "test_image"
+        mock_docker.pull_image = MagicMock(side_effect=lambda x: asyncio.sleep(0))
+        mock_docker.start_container = MagicMock(side_effect=lambda *args: asyncio.sleep(0, result="test_container_id"))
+        
+        async def mock_async_docker_start(*args, **kwargs):
+            return "test_container_id"
+        mock_docker.start_container = mock_async_docker_start
+        
+        async def mock_async_none(*args, **kwargs):
+            return None
+        mock_docker.pull_image = mock_async_none
+        mock_docker.stop_container = mock_async_none
+
+        # Mock git clone/checkout/bootstrap processes
+        mock_proc = MagicMock()
+        mock_proc.communicate = mock_async_none
+        mock_proc.wait = mock_async_none
+        mock_proc.returncode = 0
         
         mock_exec.return_value = mock_proc
         
@@ -216,11 +229,28 @@ async def test_run_market_protocol_fix(tmp_path):
     }
     
     with patch('evaluate_swe_bench.asyncio.create_subprocess_exec') as mock_exec, \
-         patch('evaluate_swe_bench.get_patch_from_winner', return_value="fake-patch"):
+         patch('evaluate_swe_bench.get_patch_from_winner', return_value="fake-patch"), \
+         patch('evaluate_swe_bench.docker') as mock_docker:
         
-        # We need three mocks for clone, checkout, and market run
-        async def mock_async_none():
+        # Mock docker
+        async def mock_async_val(val):
+            return val
+        async def mock_async_none(*args, **kwargs):
             return None
+            
+        mock_docker.get_image_name.return_value = "test_image"
+        mock_docker.pull_image = mock_async_none
+        mock_docker.start_container = MagicMock(side_effect=lambda *args: mock_async_val("test_container_id"))
+        mock_docker.stop_container = mock_async_none
+    
+        # We need mocks for clone, checkout, git-safe, bootstrap, market run, and chown
+        # Order in evaluate_swe_bench.py:
+        # 1. git clone
+        # 2. git checkout
+        # 3. git config safe.directory (git_safe_proc)
+        # 4. pip install (bootstrap_proc)
+        # 5. market.cli (process)
+        # 6. chown (chown_proc)
         
         mock_clone = MagicMock()
         mock_clone.communicate = mock_async_none
@@ -231,10 +261,22 @@ async def test_run_market_protocol_fix(tmp_path):
         mock_checkout.communicate = mock_async_none
         mock_checkout.wait = mock_async_none
         mock_checkout.returncode = 0
+
+        mock_git_safe = MagicMock()
+        mock_git_safe.communicate = mock_async_none
+        mock_git_safe.returncode = 0
+
+        mock_bootstrap = MagicMock()
+        mock_bootstrap.communicate = mock_async_none
+        mock_bootstrap.returncode = 0
         
         mock_market = MagicMock()
         mock_market.wait = mock_async_none
         mock_market.returncode = 0
+
+        mock_chown = MagicMock()
+        mock_chown.communicate = mock_async_none
+        mock_chown.returncode = 0
         
         # Setup market stdout
         mock_stdout = MagicMock()
@@ -252,7 +294,7 @@ async def test_run_market_protocol_fix(tmp_path):
         mock_stdout.readline = mock_readline
         mock_market.stdout = mock_stdout
         
-        mock_exec.side_effect = [mock_clone, mock_checkout, mock_market]
+        mock_exec.side_effect = [mock_clone, mock_checkout, mock_git_safe, mock_bootstrap, mock_market, mock_chown]
         
         # Patch directory operations
         with patch('evaluate_swe_bench.os.makedirs'), \
