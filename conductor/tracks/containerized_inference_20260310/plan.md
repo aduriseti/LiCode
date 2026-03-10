@@ -8,7 +8,7 @@
     - [x] Implement Docker lifecycle wrappers using `subprocess`
 - [x] Task: Conductor - User Manual Verification 'Docker Infrastructure' (Protocol in workflow.md)
 
-#### Phase 2: Orchestration Refactor
+#### Phase 2: Orchestration Refactor [checkpoint: 48c9545]
 - [x] Task: Update `evaluate_swe_bench.py` to manage containerized tournaments f3e45d3
     - [x] Write integration test for container lifecycle in evaluation flow
     - [x] Integrate container start/stop into the `run_market_on_instance` loop
