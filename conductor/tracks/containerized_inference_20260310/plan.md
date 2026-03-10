@@ -1,7 +1,7 @@
 ### Implementation Plan: Containerized Inference for SWE-bench
 
 #### Phase 1: Docker Infrastructure
-- [ ] Task: Implement `market/core/docker.py` for image resolution and container management
+- [x] Task: Implement `market/core/docker.py` for image resolution and container management b78a59a
     - [ ] Create unit tests for `get_image_name` (strict x86_64 resolution)
     - [ ] Implement image resolution using Epoch research GHCR pattern
     - [ ] Create tests for container start/stop/exec wrappers
