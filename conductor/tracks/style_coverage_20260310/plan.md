@@ -25,20 +25,22 @@
     - [ ] Manually fix any remaining errors.
 - [x] **Task: Conductor - User Manual Verification 'Phase 2: Linting & Formatting Alignment' (Protocol in workflow.md)** d69dcbd
 
-## Phase 3: Coverage Expansion (Python)
-- [ ] **Task: Identify low-coverage areas in `market/` core logic**
-    - [ ] Run initial coverage report for `market/`.
-    - [ ] Document modules with coverage <80%.
-- [ ] **Task: Write tests for `market/core/lmsr.py`**
-    - [ ] Implement TDD: Write failing tests for key LMSR functions (cost, price, wagers).
-    - [ ] Ensure all LMSR edge cases (high confidence, low budget) are covered.
-- [ ] **Task: Write tests for `market/orchestrator.py`**
-    - [ ] Implement TDD: Write failing tests for round processing and state transitions.
-    - [ ] Verify correct wealth conservation.
-- [ ] **Task: Write tests for `market/runner.py`**
-    - [ ] Implement TDD: Write failing tests for agent initialization and dashboard integration.
-    - [ ] Verify correct server process management.
-- [ ] **Task: Conductor - User Manual Verification 'Phase 3: Coverage Expansion (Python)' (Protocol in workflow.md)**
+## Phase 3: Coverage Expansion (Python) [checkpoint: e4f05b5]
+- [x] **Task: Identify low-coverage areas in `market/` core logic**
+    - [x] Run initial coverage report for `market/`.
+    - [x] Document modules with coverage <80%.
+    - [x] Coverage identified: market/runner.py (8%), market/orchestrator.py (30%), market/agents/shark.py (69%), market/core/lmsr.py (68%).
+- [x] **Task: Write tests for `market/core/lmsr.py`**
+    - [x] Implement TDD: Write failing tests for key LMSR functions (cost, price, wagers).
+    - [x] Ensure all LMSR edge cases (high confidence, low budget) are covered.
+- [x] **Task: Write tests for `market/orchestrator.py`**
+    - [x] Implement TDD: Write failing tests for round processing and state transitions.
+    - [x] Verify correct wealth conservation.
+- [x] **Task: Write tests for `market/runner.py`**
+    - [x] Implement TDD: Write failing tests for agent initialization and dashboard integration.
+    - [x] Verify correct server process management.
+- [x] **Task: Conductor - User Manual Verification 'Phase 3: Coverage Expansion (Python)' (Protocol in workflow.md)** e4f05b5
+
 
 ## Phase 4: Coverage Expansion (TypeScript)
 - [ ] **Task: Identify low-coverage areas in `.opencode/lib/`**
