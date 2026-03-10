@@ -14,16 +14,16 @@
     - [ ] Update `vitest.config.ts` to include coverage reporting using `v8`.
 - [x] **Task: Conductor - User Manual Verification 'Phase 1: Tooling Configuration' (Protocol in workflow.md)** 82e1ac9
 
-## Phase 2: Linting & Formatting Alignment
-- [~] **Task: Apply Ruff auto-fixes and manual corrections to Python codebase**
+## Phase 2: Linting & Formatting Alignment [checkpoint: d69dcbd]
+- [x] **Task: Apply Ruff auto-fixes and manual corrections to Python codebase** 8d99846
     - [ ] Run `ruff check --fix` on `market/`.
     - [ ] Manually fix any remaining errors.
     - [ ] Run `ruff format` on `market/`.
-- [ ] **Task: Apply Prettier and ESLint fixes to TypeScript codebase**
+- [x] **Task: Apply Prettier and ESLint fixes to TypeScript codebase** c10d3df
     - [ ] Run `npx prettier --write .` in `.opencode/`.
     - [ ] Run `npx eslint --fix .` in `.opencode/`.
     - [ ] Manually fix any remaining errors.
-- [ ] **Task: Conductor - User Manual Verification 'Phase 2: Linting & Formatting Alignment' (Protocol in workflow.md)**
+- [x] **Task: Conductor - User Manual Verification 'Phase 2: Linting & Formatting Alignment' (Protocol in workflow.md)** d69dcbd
 
 ## Phase 3: Coverage Expansion (Python)
 - [ ] **Task: Identify low-coverage areas in `market/` core logic**
