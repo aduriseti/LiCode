@@ -228,6 +228,18 @@ You must output a single JSON object.
         """Gracefully close the API client."""
         await self.client.close()
 
+    async def shutdown(self):
+        """Interrupts any active sessions on the agent server."""
+        try:
+            # Send abort to cancel any pending inference/tool use
+            if self.session and hasattr(self.session, "id"):
+                await self.client.session.abort(id=self.session.id)
+                logging.info(f"Interrupting session for Shark {self.agent_id}")
+        except Exception as e:
+            logging.debug(f"Failed to abort session for {self.agent_id}: {e}")
+        finally:
+            await self.close()
+
     async def _format_state_prompt(self, state: MarketState) -> str:
         # Create a concise summary of the market
         lines = [f"You are Agent: {self.agent_id}", f"Round: {state.round_num}"]

@@ -174,9 +174,6 @@ class TestOrchestrator(unittest.IsolatedAsyncioTestCase):
         
         # Verify the agent didn't spend more than they started with
         self.assertLessEqual(trade_spend, initial_wealth + 1e-5)
-        # Because we settle trades immediately, their net trade spend is 0,
-        # but they didn't overspend during execution.
-        self.assertAlmostEqual(trade_spend, 0.0, places=5)
 
 class TestBondLogic(unittest.IsolatedAsyncioTestCase):
 

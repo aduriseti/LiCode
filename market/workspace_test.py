@@ -11,7 +11,7 @@ from market.orchestrator import Orchestrator
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 
-class WorkspaceTest(unittest.TestCase):
+class WorkspaceTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.test_dir = "/tmp/test_workspace_regression"
         if os.path.exists(self.test_dir):
@@ -29,7 +29,7 @@ class WorkspaceTest(unittest.TestCase):
         
         # Create an initial commit so clone/commit works
         with open(os.path.join(self.project_root, "README.md"), "w") as f:
-            f.write("# Test Project\\n")
+            f.write("# Test Project\n")
         subprocess.run(["git", "add", "README.md"], cwd=self.project_root, check=True, stdout=subprocess.DEVNULL)
         subprocess.run(["git", "commit", "-m", "Initial Root Commit"], cwd=self.project_root, check=True, stdout=subprocess.DEVNULL)
         
@@ -40,13 +40,13 @@ class WorkspaceTest(unittest.TestCase):
         os.chdir(self.original_cwd)
         # shutil.rmtree(self.test_dir) # Keep for inspection on failure
 
-    def test_hybrid_snapshot_cleanliness_and_safety(self):
+    async def test_hybrid_snapshot_cleanliness_and_safety(self):
         """Verifies that the workspace is cloned cleanly, origin is removed, and permissions are correct."""
         
         # 1. Setup Source State
         # A. Add .gitignore
         with open(".gitignore", "w") as f:
-            f.write("__pycache__/\\n*.log\\n")
+            f.write("__pycache__/\n*.log\n")
         subprocess.run(["git", "add", ".gitignore"], check=True, stdout=subprocess.DEVNULL)
         subprocess.run(["git", "commit", "-m", "Initial Commit"], check=True, stdout=subprocess.DEVNULL)
         
@@ -61,13 +61,13 @@ class WorkspaceTest(unittest.TestCase):
 
         # C. Create Valid Uncommitted Work
         with open("solution.py", "w") as f:
-            f.write("print('solution')\\n")
+            f.write("print('solution')\n")
 
         # 2. Run _clone_workspace
         orch = Orchestrator("test", 1, base_dir=self.test_dir)
         dest_dir = os.path.join(self.test_dir, "agent_workspace_clean")
         
-        orch._clone_workspace(dest_dir)
+        await orch._clone_workspace(dest_dir)
         
         # 3. Verify Origin Removal
         remotes = subprocess.run(["git", "remote"], cwd=dest_dir, capture_output=True, text=True).stdout.strip()
@@ -99,28 +99,28 @@ class WorkspaceTest(unittest.TestCase):
         mode_file = os.stat(sol_path).st_mode & 0o777
         self.assertEqual(mode_file, 0o600, "File permission should be 600")
 
-    def test_hybrid_snapshot_overlay(self):
+    async def test_hybrid_snapshot_overlay(self):
         """Verifies that uncommitted changes and new tracked files are correctly overlaid."""
         
         # 1. Setup Source State
         with open("committed.py", "w") as f:
-            f.write("print('I am committed')\\n")
+            f.write("print('I am committed')\n")
         subprocess.run(["git", "add", "committed.py"], check=True, stdout=subprocess.DEVNULL)
         subprocess.run(["git", "commit", "-m", "Add committed file"], check=True, stdout=subprocess.DEVNULL)
         
         # Modify committed file
         with open("committed.py", "a") as f:
-            f.write("print('I am modified')\\n")
+            f.write("print('I am modified')\n")
             
         # Add new untracked file
         with open("new_file.py", "w") as f:
-            f.write("# New untracked file\\n")
+            f.write("# New untracked file\n")
             
         # 2. Run _clone_workspace
         orch = Orchestrator("test", 1, base_dir=self.test_dir)
         dest_dir = os.path.join(self.test_dir, "agent_workspace_overlay")
         
-        orch._clone_workspace(dest_dir)
+        await orch._clone_workspace(dest_dir)
         
         # 3. Verify Content
         with open(os.path.join(dest_dir, "committed.py"), "r") as f:
@@ -133,13 +133,13 @@ class WorkspaceTest(unittest.TestCase):
         log = subprocess.run(["git", "log", "--oneline"], cwd=dest_dir, capture_output=True, text=True).stdout
         self.assertIn("Initial Baseline", log, "Initial Baseline commit should be present")
 
-    def test_diff_truncation(self):
+    async def test_diff_truncation(self):
         """Verifies that diffs are truncated at 100 lines per file."""
         
         # 1. Setup
         orch = Orchestrator("test", 1, base_dir=self.test_dir)
         dest_dir = os.path.join(self.test_dir, "agent_workspace_truncation")
-        orch._clone_workspace(dest_dir)
+        await orch._clone_workspace(dest_dir)
         
         # 2. Create Large Change
         large_file = os.path.join(dest_dir, "large.py")

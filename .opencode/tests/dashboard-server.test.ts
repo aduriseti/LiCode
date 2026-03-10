@@ -8,7 +8,10 @@ const mocks = vi.hoisted(() => ({
         get: vi.fn(),
     },
     server: {
-        listen: vi.fn((port, cb) => cb && cb()),
+        listen: vi.fn((...args) => {
+            const cb = args.find(a => typeof a === 'function');
+            if (cb) cb();
+        }),
         address: vi.fn(() => ({ port: 8080 })),
         close: vi.fn((cb) => { if(cb) cb(); }),
         on: vi.fn(),
@@ -178,34 +181,39 @@ describe("Dashboard Server Logic", () => {
         expect(res.sendStatus).toHaveBeenCalledWith(200);
     });
 
-    it("should trigger cleanup when all clients disconnect using bulk kill", async () => {
+    it("should trigger cleanup when all clients disconnect AFTER parent exits", async () => {
         vi.useFakeTimers();
+        
+        // Mock stdin.on to capture the 'end' handler
+        const stdinOnMock = vi.spyOn(process.stdin, 'on');
+        
         await import("../lib/dashboard-server");
 
-        // Register two fake agents
-        const handler = getHandler("/api/agent");
-        if (handler) {
-            mocks.EventSource.mockImplementation(function() { return { close: vi.fn() }; });
-            
-            handler({ body: { api_url: "http://localhost:5000", agent_id: "a1", session_id: "s1" } }, { sendStatus: vi.fn() });
-            handler({ body: { api_url: "http://localhost:5001", agent_id: "a2", session_id: "s2" } }, { sendStatus: vi.fn() });
-        }
+        // 1. Get the 'end' handler for stdin
+        const endCall = stdinOnMock.mock.calls.find(c => c[0] === 'end');
+        const endHandler = endCall![1];
 
+        // 2. Setup socket.io disconnect handler
         const connectionCall = mocks.io.on.mock.calls.find((c: any[]) => c[0] === 'connection');
         const connectionHandler = connectionCall[1];
-        
         const mockSocket = { on: vi.fn() };
         connectionHandler(mockSocket);
-        
         const disconnectHandler = mockSocket.on.mock.calls.find((c: any[]) => c[0] === 'disconnect')![1];
         
+        // 3. Disconnect while parent is ALIVE
         mocks.io.engine.clientsCount = 0;
-        
         disconnectHandler();
-        vi.advanceTimersByTime(5000);
+        vi.advanceTimersByTime(15000);
+        
+        // Should NOT be closed yet
+        expect(mocks.server.close).not.toHaveBeenCalled();
 
-        // Bulk cleanup should use comma-separated ports
-        expect(mocks.exec).toHaveBeenCalledWith(expect.stringContaining("lsof -ti :5000,5001"), expect.any(Function));
+        // 4. Simulate Parent Exit
+        endHandler();
+        
+        // 5. Trigger disconnect or wait for the 60s timer
+        vi.advanceTimersByTime(65000);
+
         expect(mocks.terminalManager.close).toHaveBeenCalled();
         expect(mocks.server.close).toHaveBeenCalled();
         expect(mocks.processExit).toHaveBeenCalledWith(0);

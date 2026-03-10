@@ -77,8 +77,8 @@ class Orchestrator:
             cand_dir = os.path.join(self.worktrees_dir, cid)
             
             async def setup_cand(c_dir, c_id, a_id):
-                # Run blocking shutil in a thread to not block the event loop
-                await asyncio.to_thread(self._clone_workspace, c_dir)
+                # Run async cloning
+                await self._clone_workspace(c_dir)
                 
                 # Initial Price: 1/N for candidates (Design 2.B.3)
                 import math
@@ -113,7 +113,7 @@ class Orchestrator:
             # --no-hardlinks ensures full isolation (safer for untrusted agents)
             logging.info(f"Cloning workspace from {src} to {dest_dir}")
             proc = await asyncio.create_subprocess_exec(
-                "git", "clone", "--local", "--no-hardlinks", src, dest_dir,
+                "git", "clone", "--depth", "1", "--single-branch", "--no-hardlinks", f"file://{src}", dest_dir,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )

@@ -9,6 +9,7 @@ import asyncio
 import time
 import threading
 import math
+import webbrowser
 from rich.live import Live
 from rich.table import Table
 from rich.console import Console
@@ -149,6 +150,8 @@ async def run_market_on_instance(instance, args, semaphore):
                 market_cmd.extend(["--provider", args.provider])
             if args.model:
                 market_cmd.extend(["--model", args.model])
+            if getattr(args, 'dashboard', False):
+                market_cmd.append("--dashboard")
 
             env = os.environ.copy()
             env["PYTHONPATH"] = os.path.abspath(".") 
@@ -161,6 +164,7 @@ async def run_market_on_instance(instance, args, semaphore):
                     env=env,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
+                    limit=1024 * 1024 * 32,
                 )
 
                 while True:
@@ -177,11 +181,19 @@ async def run_market_on_instance(instance, args, semaphore):
                         msg = json.loads(line)
                         if msg.get("type") == "log":
                             text = msg.get("message", "")
-                            if "Starting Round" in text:
+                            if text.startswith("Dashboard active at "):
+                                url = text.replace("Dashboard active at ", "").strip()
+                                with status_lock:
+                                    status_map[instance_id]["dashboard_url"] = url
+
+                                # Re-issue the official signal back to the parent terminal.
+                                sys.stderr.write(f"\nDashboard active at {url}\n")
+                                sys.stderr.flush()
+                            elif "Starting Round" in text:
                                 update_status(text)
                             elif "Convergence reached" in text:
                                 update_status("Convergence Detected")
-                        elif msg.get("type") == "final_result":
+                        elif msg.get("type") == "final_result" or ("state" in msg and "report" in msg):
                             data = msg
                     except json.JSONDecodeError:
                         continue
@@ -218,6 +230,7 @@ def generate_table():
     table.add_column("Instance ID", justify="left", style="cyan", no_wrap=True)
     table.add_column("Current Status", style="magenta")
     table.add_column("Elapsed", justify="right", style="green")
+    table.add_column("Dashboard", style="blue")
     table.add_column("Timeline", style="white", ratio=1)
 
     with status_lock:
@@ -232,10 +245,15 @@ def generate_table():
                 dur = stage["duration"] if stage["duration"] > 0 else (now - stage["start_time"])
                 timeline.append(f"[bold]{name}[/bold]({dur:.1f}s)")
             
+            dash_url = info.get("dashboard_url", "N/A")
+            if dash_url != "N/A":
+                dash_url = f"[link={dash_url}]{dash_url}[/link]"
+            
             table.add_row(
                 iid,
                 info["status"],
                 f"{total_time:.1f}s",
+                dash_url,
                 " ⮕ ".join(timeline)
             )
     return table
@@ -250,6 +268,7 @@ async def async_main():
     parser.add_argument("--model", type=str, help="LLM Model")
     parser.add_argument("--output", type=str, help="Output JSONL file (defaults to swe_bench_results/<run_id>/predictions.jsonl)")
     parser.add_argument("--dummy", action="store_true", help="Run a dummy evaluation returning empty patches without invoking agents.")
+    parser.add_argument("--dashboard", action="store_true", help="Launch and show dashboard URLs for each instance.")
     parser.add_argument("--parallel", type=int, default=3, help="Number of instances to evaluate in parallel during generation.")
     parser.add_argument("--run-eval", action="store_true", help="Automatically run the SWE-bench evaluation harness after generation.")
     parser.add_argument("--eval-workers", type=int, default=2, help="Number of workers for the evaluation harness (Docker containers).")
@@ -264,12 +283,24 @@ async def async_main():
     if not args.output:
         args.output = f"swe_bench_results/{args.run_id}/predictions.jsonl"
 
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
+    run_dir = os.path.dirname(os.path.abspath(args.output))
+    os.makedirs(run_dir, exist_ok=True)
+    
+    main_log_path = os.path.join(run_dir, "main.log")
+    main_log = open(main_log_path, "a")
+
+    def log_print(msg, style=None):
+        if style:
+            console.print(msg, style=style)
+        else:
+            console.print(msg)
+        main_log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {msg}\n")
+        main_log.flush()
 
     if os.path.exists(args.output):
         os.remove(args.output)
 
-    console.print(f"[bold green]Loading SWE-bench Verified dataset...[/bold green]")
+    log_print(f"Loading SWE-bench Verified dataset...", style="bold green")
     ds = await asyncio.to_thread(load_dataset, "princeton-nlp/SWE-bench_Verified", split="test")
     
     if args.repo:
@@ -278,7 +309,7 @@ async def async_main():
         instances = list(ds)
         
     instances = instances[:args.limit]
-    console.print(f"Found {len(instances)} instances to evaluate. Running with parallelism {args.parallel}")
+    log_print(f"Found {len(instances)} instances to evaluate. Running with parallelism {args.parallel}")
 
     with status_lock:
         for inst in instances:
@@ -302,10 +333,10 @@ async def async_main():
                 with open(args.output, "a") as f:
                     f.write(json.dumps(res) + "\n")
                 
-    console.print(f"\n[bold green]Done! Wrote {len(results)} predictions to {args.output}[/bold green]")
+    log_print(f"\nDone! Wrote {len(results)} predictions to {args.output}", style="bold green")
     
     if args.run_eval and results:
-        console.print(f"\n[bold blue]Starting automatic evaluation...[/bold blue]")
+        log_print(f"\nStarting automatic evaluation...", style="bold blue")
         output_dir = os.path.dirname(os.path.abspath(args.output))
         eval_cmd = [
             sys.executable, "-m", "swebench.harness.run_evaluation",
@@ -315,15 +346,30 @@ async def async_main():
             "--run_id", args.run_id,
             "--report_dir", "."
         ]
-        console.print(f"Executing: {' '.join(eval_cmd)}")
+        log_print(f"Executing: {' '.join(eval_cmd)}")
         eval_proc = await asyncio.create_subprocess_exec(
             *eval_cmd,
-            cwd=output_dir
+            cwd=output_dir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT
         )
+        
+        while True:
+            line_bytes = await eval_proc.stdout.readline()
+            if not line_bytes:
+                break
+            line = line_bytes.decode('utf-8', errors='replace')
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            main_log.write(line)
+            main_log.flush()
+
         await eval_proc.wait()
     else:
-        console.print(f"\n[bold yellow]To evaluate manually, run the SWE-bench harness:[/bold yellow]")
-        console.print(f"python -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Verified --predictions_path {os.path.abspath(args.output)} --max_workers {args.eval_workers} --run_id {args.run_id} --report_dir {os.path.dirname(os.path.abspath(args.output))}")
+        log_print(f"\nTo evaluate manually, run the SWE-bench harness:", style="bold yellow")
+        log_print(f"python -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Verified --predictions_path {os.path.abspath(args.output)} --max_workers {args.eval_workers} --run_id {args.run_id} --report_dir {os.path.dirname(os.path.abspath(args.output))}")
+
+    main_log.close()
 
 if __name__ == "__main__":
     asyncio.run(async_main())

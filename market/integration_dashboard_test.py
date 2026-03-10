@@ -27,26 +27,29 @@ class IntegrationDashboardTest(unittest.IsolatedAsyncioTestCase):
     @patch('market.runner.Shark')
     @patch('market.runner.socket.create_connection')
     @patch('market.runner.asyncio.open_connection')
-    @patch('market.runner.subprocess.Popen')
+    @patch('market.runner.asyncio.create_subprocess_exec')
     @patch('market.orchestrator.Orchestrator._clone_workspace')
     @patch('market.logic.oracle.Oracle.run_test', return_value="PASS")
-    async def test_integration_flow_with_json_logs(self, MockOracle, MockClone, MockPopen, MockAsyncSocket, MockSocket, MockShark):
+    async def test_integration_flow_with_json_logs(self, MockOracle, MockClone, MockExec, MockAsyncSocket, MockSocket, MockShark):
         """
         Tests the integration between MarketRunner and the Dashboard's expected input (JSON logs).
         Mocks LLM (Shark) and OpenCode server.
         """
         # 1. Setup Mock Server
         mock_writer = MagicMock()
+        mock_writer.close = MagicMock()
         mock_writer.wait_closed = AsyncMock()
         MockAsyncSocket.return_value = (MagicMock(), mock_writer)
         
         MockSocket.return_value.__enter__.return_value = MagicMock()
-        MockPopen.return_value.poll.return_value = None
-        MockPopen.return_value.__enter__.return_value.poll.return_value = None
-        MockPopen.return_value.__enter__.return_value.communicate.return_value = (b"", b"")
+        mock_proc = MagicMock()
+        mock_proc.returncode = None
+        mock_proc.poll.return_value = None
+        mock_proc.wait = AsyncMock()
+        MockExec.return_value = mock_proc
         
         # Mock Clone to just create the dir so checks pass
-        def side_effect_clone(dest):
+        async def side_effect_clone(dest):
             os.makedirs(dest, exist_ok=True)
         MockClone.side_effect = side_effect_clone
         
@@ -73,6 +76,7 @@ class IntegrationDashboardTest(unittest.IsolatedAsyncioTestCase):
         shark_0.session = MagicMock()
         shark_0.session.id = "ses_mock_0"
         shark_0.close = AsyncMock()
+        shark_0.shutdown = AsyncMock()
 
         shark_1 = MagicMock()
         shark_1.get_action = AsyncMock(return_value=agent_1_action)
@@ -81,20 +85,20 @@ class IntegrationDashboardTest(unittest.IsolatedAsyncioTestCase):
         shark_1.session = MagicMock()
         shark_1.session.id = "ses_mock_1"
         shark_1.close = AsyncMock()
-
+        shark_1.shutdown = AsyncMock()
         # MockShark side_effect to return our mocks
         MockShark.side_effect = [shark_0, shark_1]
 
-        # 3. Run the Tournament
-        runner = MarketRunner(
-            prompt="Implement Fibonacci",
-            n_agents=2,
-            budget=100.0,
-            api_url="http://127.0.0.1"
-        )
-
         # Intercept stdout to capture JSON logs
         with patch('sys.stdout', new_callable=io.StringIO) as mock_stdout:
+            # 3. Run the Tournament
+            runner = MarketRunner(
+                prompt="Implement Fibonacci",
+                n_agents=2,
+                budget=100.0,
+                api_url="http://127.0.0.1"
+            )
+            
             await runner.initialize(json_logs=True)
             
             # Setup verifier files in cand_0 worktree (since agent_0 proposes it)
