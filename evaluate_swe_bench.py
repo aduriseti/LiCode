@@ -132,6 +132,34 @@ async def run_market_on_instance(instance, args, semaphore):
             with open(problem_path, "w") as f:
                 f.write(problem_statement)
 
+            update_status("Resolving Docker Image")
+            image_name = docker.get_image_name(instance_id)
+            await docker.pull_image(image_name)
+            
+            update_status("Starting Container")
+            # Mount the current LiCode root to /licode
+            licode_host_path = os.path.abspath(".")
+            opencode_host_path = os.path.expanduser("~/.opencode")
+            container_id = await docker.start_container(image_name, work_dir, licode_host_path, opencode_host_path)
+
+            update_status("Bootstrapping Dependencies")
+            # 1. Fix Git Ownership (Necessary for cloning mounted volumes)
+            # Use '*' to allow all mounted directories to be treated as safe
+            git_safe_proc = await asyncio.create_subprocess_exec(
+                "docker", "exec", container_id, "git", "config", "--global", "--add", "safe.directory", "*",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await git_safe_proc.communicate()
+
+            # 2. Install LiCode Deps
+            bootstrap_proc = await asyncio.create_subprocess_exec(
+                "docker", "exec", container_id, "/opt/miniconda3/envs/testbed/bin/pip", "install", "-r", "/licode/requirements.txt",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await bootstrap_proc.communicate()
+
             if args.dummy:
                 update_status("Dummy Mode: Returning Empty Patch")
                 await asyncio.sleep(1)
@@ -143,23 +171,6 @@ async def run_market_on_instance(instance, args, semaphore):
                 update_status("Complete")
                 return res
 
-            update_status("Resolving Docker Image")
-            image_name = docker.get_image_name(instance_id)
-            await docker.pull_image(image_name)
-            
-            update_status("Starting Container")
-            # Mount the current LiCode root to /licode
-            licode_host_path = os.path.abspath(".")
-            container_id = await docker.start_container(image_name, work_dir, licode_host_path)
-
-            update_status("Bootstrapping Dependencies")
-            bootstrap_proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", container_id, "pip", "install", "-r", "/licode/requirements.txt",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            await bootstrap_proc.communicate()
-
             update_status("Setting Up Market")
             log_dir = os.path.join(run_dir, "logs")
             os.makedirs(log_dir, exist_ok=True)
@@ -168,11 +179,12 @@ async def run_market_on_instance(instance, args, semaphore):
             market_cmd = [
                 "docker", "exec", "-w", "/testbed",
                 "-e", "PYTHONPATH=/licode",
+                "-e", "PATH=/.opencode/bin:/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 "-e", f"OPENAI_API_KEY={os.environ.get('OPENAI_API_KEY', '')}",
                 "-e", f"ANTHROPIC_API_KEY={os.environ.get('ANTHROPIC_API_KEY', '')}",
                 "-e", f"GEMINI_API_KEY={os.environ.get('GEMINI_API_KEY', '')}",
                 container_id,
-                "python3", "-m", "market.cli", "run",
+                "/opt/miniconda3/envs/testbed/bin/python3", "-m", "market.cli", "run",
                 "--prompt", f"Fix the bug described in problem.md.",
                 "--agents", str(args.agents),
                 "--rounds", str(args.rounds),

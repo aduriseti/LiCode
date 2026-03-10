@@ -23,7 +23,7 @@ async def pull_image(image_name: str) -> None:
         raise RuntimeError(f"Failed to pull image {image_name}:\n{stderr.decode()}")
     logging.info(f"Successfully pulled {image_name}")
 
-async def start_container(image_name: str, workspace_host_path: str, licode_host_path: str = None) -> str:
+async def start_container(image_name: str, workspace_host_path: str, licode_host_path: str = None, opencode_host_path: str = None) -> str:
     """
     Starts a background Docker container tailored for SWE-bench execution.
     Returns the running container ID.
@@ -37,6 +37,9 @@ async def start_container(image_name: str, workspace_host_path: str, licode_host
 
     if licode_host_path:
         args.extend(["-v", f"{licode_host_path}:/licode"])
+    
+    if opencode_host_path:
+        args.extend(["-v", f"{opencode_host_path}:/.opencode"])
         
     # We want a sleep command to keep it alive indefinitely until we kill it
     args.extend([image_name, "tail", "-f", "/dev/null"])

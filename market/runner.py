@@ -359,6 +359,12 @@ class MarketRunner:
                     pass
         
         env = os.environ.copy()
+        
+        # Ensure /.opencode/bin is in the PATH if we are in a container
+        if "/.opencode/bin" in env.get("PATH", "") or os.path.exists("/.opencode/bin"):
+            if "/.opencode/bin" not in env.get("PATH", ""):
+                env["PATH"] = f"/.opencode/bin:{env.get('PATH', '')}"
+        
         env["HOME"] = agent_home
         env["PORT"] = str(port)
         
