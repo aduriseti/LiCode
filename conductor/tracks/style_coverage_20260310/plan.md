@@ -1,18 +1,18 @@
 # Implementation Plan: coding style & test coverage
 
-## Phase 1: Tooling Configuration
-- [ ] **Task: Configure Python linting and formatting (Ruff)**
+## Phase 1: Tooling Configuration [checkpoint: 82e1ac9]
+- [x] **Task: Configure Python linting and formatting (Ruff)** ae5f1b9
     - [ ] Install `ruff` if not present.
     - [ ] Create or update `pyproject.toml` or `ruff.toml` with project-specific rules.
     - [ ] Verify `ruff` runs correctly.
-- [ ] **Task: Configure TypeScript linting and formatting (ESLint/Prettier)**
+- [x] **Task: Configure TypeScript linting and formatting (ESLint/Prettier)** 1d598ac
     - [ ] Install `eslint` and `prettier` dependencies in `.opencode/`.
     - [ ] Create or update `.eslintrc.json` and `.prettierrc`.
     - [ ] Verify `eslint` and `prettier` run correctly.
-- [ ] **Task: Configure coverage reporting for Pytest and Vitest**
+- [x] **Task: Configure coverage reporting for Pytest and Vitest** f6e7c4d
     - [ ] Install `pytest-cov` and configure it.
     - [ ] Update `vitest.config.ts` to include coverage reporting using `v8`.
-- [ ] **Task: Conductor - User Manual Verification 'Phase 1: Tooling Configuration' (Protocol in workflow.md)**
+- [x] **Task: Conductor - User Manual Verification 'Phase 1: Tooling Configuration' (Protocol in workflow.md)** 82e1ac9
 
 ## Phase 2: Linting & Formatting Alignment
 - [ ] **Task: Apply Ruff auto-fixes and manual corrections to Python codebase**
