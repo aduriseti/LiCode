@@ -31,3 +31,6 @@
     - [x] Add `python-dotenv` to `requirements.txt`
     - [x] Integrate `load_dotenv()` into `evaluate_swe_bench.py` and `market/cli.py`
 - [x] Task: Conductor - User Manual Verification 'Validation & Cleanup' (Protocol in workflow.md) a333365
+
+## Phase: Review Fixes
+- [x] Task: Apply review suggestions f186691
