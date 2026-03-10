@@ -161,6 +161,12 @@ async def run_market_on_instance(instance, args, semaphore):
                 market_cmd.extend(["--model", args.model])
             if getattr(args, 'dashboard', False):
                 market_cmd.append("--dashboard")
+            
+            market_cmd.extend([
+                "--max-retries", str(args.max_retries),
+                "--timeout", str(args.initial_backoff),
+                "--max-backoff", str(args.max_backoff)
+            ])
 
             env = os.environ.copy()
             env["PYTHONPATH"] = os.path.abspath(".") 
@@ -283,6 +289,9 @@ async def async_main():
     parser.add_argument("--parallel", type=int, default=3, help="Number of instances to evaluate in parallel during generation.")
     parser.add_argument("--run-eval", action="store_true", help="Automatically run the SWE-bench evaluation harness after generation.")
     parser.add_argument("--eval-workers", type=int, default=2, help="Number of workers for the evaluation harness (Docker containers).")
+    parser.add_argument("--max-retries", type=int, default=2, help="Max retries per round (3 attempts total)")
+    parser.add_argument("--initial-backoff", type=float, default=120.0, help="Initial timeout in seconds")
+    parser.add_argument("--max-backoff", type=float, default=1000.0, help="Maximum timeout ceiling")
     parser.add_argument("--run-id", type=str, help="Unique identifier for this run. Used for folder naming.")
     
     args = parser.parse_args()

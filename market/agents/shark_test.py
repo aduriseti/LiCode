@@ -13,6 +13,8 @@ from opencode_ai.types import (
 )
 from opencode_ai.types.event_list_response import EventMessagePartUpdated
 from market.core.state import MarketState, MarketAsset, AgentPortfolio
+from opencode_ai import APITimeoutError, APIConnectionError
+from market.orchestrator import AgentAction
 
 class SharkTest(unittest.IsolatedAsyncioTestCase):
 
@@ -414,3 +416,167 @@ class TestSharkTraceLogging(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("[TOOL CALL: run_bash(ls)]", written_content)
         self.assertIn("[TOOL RESULT: file.txt]", written_content)
+
+class TestSharkRetryLogic(unittest.IsolatedAsyncioTestCase):
+    @patch('market.agents.shark.AsyncOpencode')
+    @patch('market.agents.shark.asyncio.sleep')
+    async def test_get_action_retry_on_timeout(self, mock_sleep, MockClient):
+        # 1. Setup Shark with short base timeout for testing
+        shark = Shark("agent_0", max_retries=2, timeout=1.0, max_backoff=10.0)
+        shark.initialize_session = AsyncMock()
+        shark.session = MagicMock()
+        shark.session.id = "ses_123"
+        shark.interrupt = AsyncMock()
+        
+        # 2. Mock _chat_with_network_retry to fail twice with timeout, then succeed
+        with patch.object(Shark, '_chat_with_network_retry') as mock_chat:
+            mock_chat.side_effect = [
+                APITimeoutError("Timeout!"),
+                APITimeoutError("Timeout again!"),
+                '{"beliefs": {"cand_0": 0.5}}'
+            ]
+            
+            state = MarketState(round_num=1, liquidity_b=100.0)
+            action = await shark.get_action(state)
+            
+            # 3. Assertions
+            self.assertEqual(action.beliefs["cand_0"], 0.5)
+            self.assertEqual(mock_chat.call_count, 3)
+            self.assertEqual(shark.interrupt.call_count, 2)
+            
+            # Verify NO sleep occurs (immediate retry)
+            self.assertEqual(mock_sleep.call_count, 0)
+            
+            # Verify timeout scaling: 1.0, then 2.0, then 4.0
+            calls = mock_chat.call_args_list
+            self.assertEqual(calls[0].kwargs.get("timeout"), 1.0)
+            self.assertEqual(calls[1].kwargs.get("timeout"), 2.0)
+            self.assertEqual(calls[2].kwargs.get("timeout"), 4.0)
+            
+            # Verify prompt updates
+            self.assertIn("You are Agent: agent_0", calls[0][0][0]) # First call has full state
+            self.assertIn("TIMEOUT: Your previous response took more than 1.0s", calls[1][0][0])
+            self.assertIn("You have 2.0s for this attempt", calls[1][0][0])
+            self.assertIn("TIMEOUT: Your previous response took more than 2.0s", calls[2][0][0])
+            self.assertIn("You have 4.0s for this attempt", calls[2][0][0])
+
+    @patch('market.agents.shark.AsyncOpencode')
+    @patch('market.agents.shark.asyncio.sleep')
+    async def test_get_action_retry_on_parsing_error(self, mock_sleep, MockClient):
+        shark = Shark("agent_0", max_retries=2)
+        shark.initialize_session = AsyncMock()
+        shark.session = MagicMock()
+        shark.session.id = "ses_123"
+        
+        with patch.object(Shark, '_chat_with_network_retry') as mock_chat:
+            mock_chat.side_effect = [
+                "Not JSON",
+                '{"beliefs": {"cand_0": 0.7}}'
+            ]
+            
+            state = MarketState(round_num=1, liquidity_b=100.0)
+            action = await shark.get_action(state)
+            
+            self.assertEqual(action.beliefs["cand_0"], 0.7)
+            self.assertEqual(mock_chat.call_count, 2)
+            # Parsing error doesn't cause sleep or interrupt
+            self.assertEqual(mock_sleep.call_count, 0)
+            
+            calls = mock_chat.call_args_list
+            self.assertIn("ERROR: Your previous response was invalid", calls[1][0][0])
+
+    @patch('market.agents.shark.AsyncOpencode')
+    @patch('market.agents.shark.asyncio.sleep')
+    async def test_get_action_max_retries_exceeded(self, mock_sleep, MockClient):
+        shark = Shark("agent_0", max_retries=1)
+        shark.initialize_session = AsyncMock()
+        shark.session = MagicMock()
+        shark.session.id = "ses_123"
+        shark.interrupt = AsyncMock()
+        
+        with patch.object(Shark, '_chat_with_network_retry') as mock_chat:
+            mock_chat.side_effect = [
+                APITimeoutError("Timeout 1"),
+                APITimeoutError("Timeout 2")
+            ]
+            
+            state = MarketState(round_num=1, liquidity_b=100.0)
+            from market.agents.shark import FatalAgentError
+            with self.assertRaises(FatalAgentError):
+                await shark.get_action(state)
+            
+            self.assertEqual(mock_chat.call_count, 2)
+            self.assertEqual(shark.interrupt.call_count, 2)
+
+    @patch('market.agents.shark.AsyncOpencode')
+    async def test_chat_with_network_retry_propagates_timeout(self, MockClient):
+        # Verify APITimeoutError is not swallowed by _chat_with_network_retry
+        client_inst = AsyncMock() 
+        MockClient.return_value = client_inst
+        client_inst.session = AsyncMock()
+        client_inst.session.chat = AsyncMock(side_effect=APITimeoutError("Request timed out"))
+        
+        shark = Shark("agent_0")
+        shark.session = MagicMock()
+        shark.session.id = "ses_123"
+        
+        # event.list() mock for stream
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.side_effect = lambda: (i for i in []) # empty stream
+        client_inst.event.list = AsyncMock(return_value=mock_stream)
+        
+        with self.assertRaises(APITimeoutError):
+            await shark._chat_with_network_retry("test prompt")
+
+    @patch('market.agents.shark.AsyncOpencode')
+    async def test_chat_with_network_retry_respects_timeout_config(self, MockClient):
+        # Verify both capture_client and main_client use call-specific timeout
+        base_timeout = 300.0
+        call_timeout = 120.0
+        client_inst = AsyncMock()
+        MockClient.return_value = client_inst
+        client_inst.session = AsyncMock()
+        client_inst.session.chat = AsyncMock()
+        
+        shark = Shark("agent_0", timeout=base_timeout)
+        shark.session = MagicMock()
+        shark.session.id = "ses_123"
+        
+        from opencode_ai.types import TextPart
+        dummy_part = TextPart(id="p1", messageID="m1", sessionID="s1", type="text", text='{"beliefs": {}}')
+        client_inst.session.messages = AsyncMock(return_value=[MagicMock(parts=[dummy_part])])
+        
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.side_effect = lambda: (i for i in [])
+        client_inst.event.list = AsyncMock(return_value=mock_stream)
+        
+        await shark._chat_with_network_retry("test prompt", timeout=call_timeout)
+        
+        # Check constructor calls
+        # 1st: __init__ (default timeout)
+        # 2nd: capture_client in _chat_with_network_retry (call_timeout)
+        # 3rd: main_client in _chat_with_network_retry (call_timeout)
+        timeouts = [call.kwargs.get("timeout") for call in MockClient.call_args_list]
+        self.assertEqual(timeouts.count(call_timeout), 2, f"Should have 2 clients with timeout {call_timeout}. Found: {timeouts}")
+
+    @patch('market.agents.shark.AsyncOpencode')
+    @patch('market.agents.shark.asyncio.sleep')
+    async def test_get_action_fatal_failure_on_short_timeout(self, mock_sleep, MockClient):
+        # Verify that repeated timeouts lead to FatalAgentError
+        shark = Shark("agent_0", max_retries=1, timeout=0.1)
+        shark.initialize_session = AsyncMock()
+        shark.session = MagicMock()
+        shark.session.id = "ses_123"
+        shark.interrupt = AsyncMock()
+        
+        # Mock _chat_with_network_retry to always timeout
+        with patch.object(Shark, '_chat_with_network_retry', side_effect=APITimeoutError("Timeout")):
+            state = MarketState(round_num=1, liquidity_b=100.0)
+            from market.agents.shark import FatalAgentError
+            with self.assertRaises(FatalAgentError):
+                await shark.get_action(state)
+            
+            self.assertEqual(shark.interrupt.call_count, 2) # initial + 1 retry
+
+if __name__ == "__main__":
+    unittest.main()

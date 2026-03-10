@@ -20,6 +20,7 @@ class TestPatchExtraction(unittest.TestCase):
             subprocess.run(["git", "commit", "-m", "Initial commit"], cwd=temp_dir, check=True, capture_output=True)
             
             # 3. Initial Baseline commit (LiCode starting state)
+            # We add problem.md here too
             with open(os.path.join(temp_dir, "problem.md"), "w") as f:
                 f.write("Fix the bug\n")
             subprocess.run(["git", "add", "."], cwd=temp_dir, check=True, capture_output=True)
@@ -58,9 +59,6 @@ class TestPatchExtraction(unittest.TestCase):
             
             # 7. Generate the patch
             patch = get_patch_from_winner(temp_dir, "Tournament Report", state_dict)
-            
-            print("\nGenerated Patch Output:")
-            print(patch)
             
             # VERIFICATION:
             # The diff should show agent_test.py as a NEW FILE (--- /dev/null)

@@ -65,7 +65,11 @@ class MarketRunner:
     Handles the game loop, agent orchestration, convergence checks,
     and the local OpenCode API server.
     """
-    def __init__(self, prompt: str, n_agents: int, budget: float, api_url: str = "http://127.0.0.1", model: str = "gemini-3-flash", provider: str = "opencode", agent_timeout: float = 300.0, dashboard: bool = False):
+    def __init__(self, prompt: str, n_agents: int, budget: float, api_url: str = "http://127.0.0.1", 
+                 model: str = "gemini-3-flash", provider: str = "opencode", 
+                 agent_timeout: float = 300.0, dashboard: bool = False,
+                 max_retries: int = 3, initial_backoff: float = 120.0, 
+                 max_backoff: float = 1000.0):
         self.run_id = f"run_{int(time.time())}"
         self.orchestrator = Orchestrator(prompt, n_agents, budget, base_dir=os.path.abspath(os.path.join("./.arenas", self.run_id)))
         self.arena_dir = self.orchestrator.base_dir
@@ -81,6 +85,9 @@ class MarketRunner:
         self.model = model
         self.provider = provider
         self.agent_timeout = agent_timeout
+        self.max_retries = max_retries
+        self.initial_backoff = initial_backoff
+        self.max_backoff = max_backoff
         self.dashboard = dashboard
         self.dashboard_url = None
         self._http_session = None
@@ -248,7 +255,10 @@ class MarketRunner:
             cand_id = aid.replace("agent", "cand")
             trace_path = os.path.join(self.traces_dir, f"{cand_id}_stream.txt")
             
-            shark = Shark(aid, model=self.model, provider=self.provider, api_url=agent_url, log_path=log_path, timeout=self.agent_timeout, trace_path=trace_path)
+            shark = Shark(aid, model=self.model, provider=self.provider, api_url=agent_url, 
+                          log_path=log_path, timeout=self.agent_timeout, trace_path=trace_path,
+                          max_retries=self.max_retries, initial_backoff=self.initial_backoff,
+                          max_backoff=self.max_backoff)
             self.sharks[aid] = shark
             
             # 3. Create Session

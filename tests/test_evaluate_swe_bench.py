@@ -28,7 +28,10 @@ async def test_run_market_dummy_mode(tmp_path):
         rounds=5,
         provider=None,
         model=None,
-        output=str(tmp_path / "run_folder" / "predictions.jsonl")
+        output=str(tmp_path / "run_folder" / "predictions.jsonl"),
+        max_retries=3,
+        initial_backoff=120.0,
+        max_backoff=1000.0
     )
     
     semaphore = asyncio.Semaphore(1)
@@ -199,9 +202,11 @@ async def test_run_market_protocol_fix(tmp_path):
         provider='test-provider',
         model='test-model',
         output=str(tmp_path / "run_folder" / "predictions.jsonl"),
-        dashboard=False
+        dashboard=False,
+        max_retries=3,
+        initial_backoff=120.0,
+        max_backoff=1000.0
     )
-    
     semaphore = asyncio.Semaphore(1)
     
     # Mock data with the "state" and "report" but NO "type": "final_result" tag
