@@ -6,3 +6,8 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 - [ ] **Track: coding style & test coverage**
   *Link: [./tracks/style_coverage_20260310/](./tracks/style_coverage_20260310/)*
+
+---
+
+- [ ] **Track: Implement containerized inference for SWE-bench evaluation**
+  *Link: [./tracks/containerized_inference_20260310/](./tracks/containerized_inference_20260310/)*
