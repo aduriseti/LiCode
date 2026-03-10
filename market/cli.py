@@ -6,6 +6,11 @@ import os
 import json
 import textwrap
 import io
+from dotenv import load_dotenv
+
+# Load environment variables from .env if it exists
+load_dotenv()
+
 from market.orchestrator import Orchestrator
 from market.runner import MarketRunner
 
@@ -97,7 +102,7 @@ def main():
     run_parser.add_argument("--initial-backoff", type=float, default=120.0, help="Deprecated: use --timeout instead")
     run_parser.add_argument("--max-backoff", type=float, default=1000.0, help="Maximum timeout ceiling in seconds")
     run_parser.add_argument("--api-url", type=str, default="http://127.0.0.1:4096")
-    run_parser.add_argument("--model", type=str, default="gemini-3-flash")
+    run_parser.add_argument("--model", type=str, default="gemini-2.5-flash")
     run_parser.add_argument("--provider", type=str, default="opencode")
     run_parser.add_argument("--json-logs", action="store_true", help="Output JSON logs to stdout instead of TUI")
     run_parser.add_argument("--dashboard", action="store_true", help="Launch and log to the local web dashboard")

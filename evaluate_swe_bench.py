@@ -10,6 +10,11 @@ import time
 import threading
 import math
 import webbrowser
+from dotenv import load_dotenv
+
+# Load environment variables from .env if it exists
+load_dotenv()
+
 from rich.live import Live
 from rich.table import Table
 from rich.console import Console
@@ -40,7 +45,15 @@ def get_patch_from_winner(work_dir, report, state_dict):
         
     winner_asset = state.assets.get(winner_id)
     code_path = winner_asset.code_path
-    if not code_path or not os.path.exists(code_path):
+    if not code_path:
+        print(f"No code_path in winner asset.")
+        return None
+        
+    # Map container-side /testbed paths back to the host work_dir
+    if code_path.startswith("/testbed"):
+        code_path = os.path.join(work_dir, code_path.replace("/testbed", "").lstrip("/"))
+        
+    if not os.path.exists(code_path):
         print(f"Winner code_path {code_path} not found.")
         return None
     
@@ -152,9 +165,9 @@ async def run_market_on_instance(instance, args, semaphore):
             )
             await git_safe_proc.communicate()
 
-            # 2. Install LiCode Deps
+            # 2. Install LiCode Deps in base env
             bootstrap_proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", container_id, "/opt/miniconda3/envs/testbed/bin/pip", "install", "-r", "/licode/requirements.txt",
+                "docker", "exec", container_id, "/opt/miniconda3/bin/pip", "install", "-r", "/licode/requirements.txt",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
@@ -183,8 +196,9 @@ async def run_market_on_instance(instance, args, semaphore):
                 "-e", f"OPENAI_API_KEY={os.environ.get('OPENAI_API_KEY', '')}",
                 "-e", f"ANTHROPIC_API_KEY={os.environ.get('ANTHROPIC_API_KEY', '')}",
                 "-e", f"GEMINI_API_KEY={os.environ.get('GEMINI_API_KEY', '')}",
+                "-e", f"OPENCODE_API_KEY={os.environ.get('OPENCODE_API_KEY', '')}",
                 container_id,
-                "/opt/miniconda3/envs/testbed/bin/python3", "-m", "market.cli", "run",
+                "/opt/miniconda3/bin/python3", "-m", "market.cli", "run",
                 "--prompt", f"Fix the bug described in problem.md.",
                 "--agents", str(args.agents),
                 "--rounds", str(args.rounds),
@@ -256,6 +270,16 @@ async def run_market_on_instance(instance, args, semaphore):
             if not data:
                 update_status("Extraction Failed: No Final Output")
                 return None
+
+            update_status("Fixing Permissions for Host")
+            # Change ownership of /testbed contents back to the host user (1000:1000)
+            # so the host git can read/write the arena worktrees.
+            chown_proc = await asyncio.create_subprocess_exec(
+                "docker", "exec", container_id, "chown", "-R", "1000:1000", "/testbed",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await chown_proc.communicate()
 
             update_status("Extracting Patch from Winner")
             # FS ops are quick but we can offload if needed. Git diff is in get_patch_from_winner.
