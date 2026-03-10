@@ -74,3 +74,8 @@ docstring-code-format = true
 #
 # This field is only used if `docstring-code-format` is enabled.
 docstring-code-line-length = "dynamic"
+
+[tool.pytest.ini_options]
+addopts = "--cov=market --cov-report=term-missing --cov-report=xml"
+testpaths = ["market", "tests"]
+
