@@ -34,3 +34,4 @@
 
 ## Phase: Review Fixes
 - [x] Task: Apply review suggestions f186691
+- [x] Task: Fix legacy evaluation tests a3686d0
