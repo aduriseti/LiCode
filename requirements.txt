@@ -9,3 +9,4 @@ pytest-timeout
 
 playwright
 pytest-playwright
+ruff
