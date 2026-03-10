@@ -14,11 +14,11 @@ export function createDashboardApp() {
 
     const htmlPath = path.join(__dirname, "../plugins/dashboard.html");
 
-    app.get('/', (req: Request, res: Response) => {
+    app.get("/", (req: Request, res: Response) => {
         try {
             const html = fs.readFileSync(htmlPath, "utf-8");
             res.send(html);
-        } catch (err) {
+        } catch (_err) {
             res.status(500).send("Error loading dashboard HTML");
         }
     });

@@ -1,521 +1,723 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Logical Induction Market</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    
-    <!-- Xterm.js -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
-    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Logical Induction Market</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
-    <style>
-        body { background-color: #ffffff; color: #1f2937; }
-        .log-entry { font-family: 'Consolas', 'Courier New', monospace; font-size: 11px; }
-        ::-webkit-scrollbar { width: 4px; height: 4px; }
-        ::-webkit-scrollbar-track { background: #f3f4f6; }
-        ::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 2px; }
-        .dense-panel { padding: 0.75rem; display: flex; flex-direction: column; min-height: 0; height: 100%; }
-        .active-trader { background-color: #eff6ff !important; border-left: 3px solid #3b82f6 !important; }
-        
-        /* Resizer Styling */
-        .resizer-v {
-            width: 4px;
-            cursor: col-resize;
-            background-color: #f3f4f6;
-            flex-shrink: 0;
-            z-index: 20;
-            transition: background-color 0.2s;
-        }
-        .resizer-v:hover, .resizer-v.dragging { background-color: #3b82f6; }
-        
-        .resizer-h {
-            height: 4px;
-            cursor: row-resize;
-            background-color: #f3f4f6;
-            flex-shrink: 0;
-            z-index: 20;
-            transition: background-color 0.2s;
-        }
-        .resizer-h:hover, .resizer-h.dragging { background-color: #3b82f6; }
+        <!-- Xterm.js -->
+        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css" />
+        <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
 
-        /* Tabs Styling */
-        .tabs { display: flex; border-bottom: 1px solid #e5e7eb; background: #f9fafb; overflow-x: auto; flex-shrink: 0; }
-        .tab-button { padding: 0.5rem 1rem; border: none; background: transparent; cursor: pointer; font-size: 11px; font-family: monospace; white-space: nowrap; border-bottom: 2px solid transparent; transition: all 0.2s; }
-        .tab-button:hover { background: #e5e7eb; }
-        .tab-button.active { background: #000; color: #fff; border-bottom-color: #3b82f6; }
-        
-        /* Terminal Styling */
-        .terminal-container { 
-            background: #fafafa; 
-            position: absolute; 
-            top: 0; 
-            left: 0; 
-            right: 0; 
-            bottom: 0; 
-            display: none; 
-            box-sizing: border-box; 
-            padding: 4px;
-        }
-        .terminal-container.active { display: block; }
-        /* Let xterm.js FitAddon calculate dimensions - don't force 100% */
-        .xterm { 
-            height: 100%;
-        }
-        .xterm-viewport { 
-            overflow-y: auto !important; 
-        }
-    </style>
-</head>
-<body class="h-screen flex flex-col font-sans overflow-hidden text-[12px]">
-    <!-- Header -->
-    <header class="flex justify-between items-center bg-white px-4 py-1.5 border-b border-gray-200 z-10 shadow-sm flex-shrink-0">
-        <div class="flex items-center gap-3">
-            <h1 class="text-xs font-black text-gray-800 uppercase tracking-widest">Tournament Terminal</h1>
-            <div id="status" class="px-2 py-0.5 rounded-[4px] text-[9px] font-bold bg-yellow-100 text-yellow-700 uppercase">Connecting</div>
-        </div>
-        <div id="round-info" class="text-[11px] font-bold text-blue-600 tabular-nums"></div>
-    </header>
+        <style>
+            body {
+                background-color: #ffffff;
+                color: #1f2937;
+            }
+            .log-entry {
+                font-family: "Consolas", "Courier New", monospace;
+                font-size: 11px;
+            }
+            ::-webkit-scrollbar {
+                width: 4px;
+                height: 4px;
+            }
+            ::-webkit-scrollbar-track {
+                background: #f3f4f6;
+            }
+            ::-webkit-scrollbar-thumb {
+                background: #d1d5db;
+                border-radius: 2px;
+            }
+            .dense-panel {
+                padding: 0.75rem;
+                display: flex;
+                flex-direction: column;
+                min-height: 0;
+                height: 100%;
+            }
+            .active-trader {
+                background-color: #eff6ff !important;
+                border-left: 3px solid #3b82f6 !important;
+            }
 
-    <!-- Top Section -->
-    <div id="top-pane" class="flex overflow-hidden border-b border-gray-200" style="height: 50%;">
-        <!-- Column 1: Charts -->
-        <div id="chart-pane" class="flex flex-col bg-white" style="width: 50%;">
-            <div class="flex-1 dense-panel border-b border-gray-100">
-                <h2 class="text-[9px] font-black text-gray-400 uppercase tracking-tighter mb-1 text-center">Asset Confidence</h2>
-                <div class="flex-1 relative"><canvas id="priceChart"></canvas></div>
+            /* Resizer Styling */
+            .resizer-v {
+                width: 4px;
+                cursor: col-resize;
+                background-color: #f3f4f6;
+                flex-shrink: 0;
+                z-index: 20;
+                transition: background-color 0.2s;
+            }
+            .resizer-v:hover,
+            .resizer-v.dragging {
+                background-color: #3b82f6;
+            }
+
+            .resizer-h {
+                height: 4px;
+                cursor: row-resize;
+                background-color: #f3f4f6;
+                flex-shrink: 0;
+                z-index: 20;
+                transition: background-color 0.2s;
+            }
+            .resizer-h:hover,
+            .resizer-h.dragging {
+                background-color: #3b82f6;
+            }
+
+            /* Tabs Styling */
+            .tabs {
+                display: flex;
+                border-bottom: 1px solid #e5e7eb;
+                background: #f9fafb;
+                overflow-x: auto;
+                flex-shrink: 0;
+            }
+            .tab-button {
+                padding: 0.5rem 1rem;
+                border: none;
+                background: transparent;
+                cursor: pointer;
+                font-size: 11px;
+                font-family: monospace;
+                white-space: nowrap;
+                border-bottom: 2px solid transparent;
+                transition: all 0.2s;
+            }
+            .tab-button:hover {
+                background: #e5e7eb;
+            }
+            .tab-button.active {
+                background: #000;
+                color: #fff;
+                border-bottom-color: #3b82f6;
+            }
+
+            /* Terminal Styling */
+            .terminal-container {
+                background: #fafafa;
+                position: absolute;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                display: none;
+                box-sizing: border-box;
+                padding: 4px;
+            }
+            .terminal-container.active {
+                display: block;
+            }
+            /* Let xterm.js FitAddon calculate dimensions - don't force 100% */
+            .xterm {
+                height: 100%;
+            }
+            .xterm-viewport {
+                overflow-y: auto !important;
+            }
+        </style>
+    </head>
+    <body class="h-screen flex flex-col font-sans overflow-hidden text-[12px]">
+        <!-- Header -->
+        <header
+            class="flex justify-between items-center bg-white px-4 py-1.5 border-b border-gray-200 z-10 shadow-sm flex-shrink-0"
+        >
+            <div class="flex items-center gap-3">
+                <h1 class="text-xs font-black text-gray-800 uppercase tracking-widest">
+                    Tournament Terminal
+                </h1>
+                <div
+                    id="status"
+                    class="px-2 py-0.5 rounded-[4px] text-[9px] font-bold bg-yellow-100 text-yellow-700 uppercase"
+                >
+                    Connecting
+                </div>
             </div>
-            <div class="flex-1 dense-panel">
-                <h2 class="text-[9px] font-black text-gray-400 uppercase tracking-tighter mb-1 text-center">Trader Wealth</h2>
-                <div class="flex-1 relative"><canvas id="wealthChart"></canvas></div>
-            </div>
-        </div>
+            <div id="round-info" class="text-[11px] font-bold text-blue-600 tabular-nums"></div>
+        </header>
 
-        <div class="resizer-v" id="top-v-resizer"></div>
-
-        <!-- Column 2: Data Tables -->
-        <div id="table-pane" class="flex flex-col flex-1 bg-gray-50/30">
-            <div class="flex-1 dense-panel border-b border-gray-100">
-                <h2 class="text-[9px] font-black text-gray-400 uppercase tracking-tighter mb-1 text-center">Assets</h2>
-                <div id="tables" class="flex-1 overflow-y-auto"></div>
+        <!-- Top Section -->
+        <div
+            id="top-pane"
+            class="flex overflow-hidden border-b border-gray-200"
+            style="height: 50%"
+        >
+            <!-- Column 1: Charts -->
+            <div id="chart-pane" class="flex flex-col bg-white" style="width: 50%">
+                <div class="flex-1 dense-panel border-b border-gray-100">
+                    <h2
+                        class="text-[9px] font-black text-gray-400 uppercase tracking-tighter mb-1 text-center"
+                    >
+                        Asset Confidence
+                    </h2>
+                    <div class="flex-1 relative"><canvas id="priceChart"></canvas></div>
+                </div>
+                <div class="flex-1 dense-panel">
+                    <h2
+                        class="text-[9px] font-black text-gray-400 uppercase tracking-tighter mb-1 text-center"
+                    >
+                        Trader Wealth
+                    </h2>
+                    <div class="flex-1 relative"><canvas id="wealthChart"></canvas></div>
+                </div>
             </div>
-            <div class="flex-1 dense-panel">
-                <h2 class="text-[9px] font-black text-gray-400 uppercase tracking-tighter mb-1 text-center">Traders</h2>
-                <div id="agents-table" class="flex-1 overflow-y-auto"></div>
-            </div>
-        </div>
-    </div>
 
-    <div class="resizer-h" id="main-h-resizer"></div>
+            <div class="resizer-v" id="top-v-resizer"></div>
 
-    <!-- Bottom Section: Session Explorer (PTY Console) -->
-    <div id="bottom-pane" class="flex flex-col flex-1 bg-white min-h-0">
-        <div class="px-3 py-2 border-b border-gray-200 bg-gray-50/50 flex justify-between items-center flex-shrink-0">
-            <div class="flex items-center gap-2">
-                <h2 class="text-[10px] font-black text-gray-600 uppercase tracking-widest">Session Explorer</h2>
-                <div id="explorer-status" class="text-[9px] text-gray-400 italic font-mono uppercase tracking-tighter ml-2">Initializing...</div>
-            </div>
-        </div>
-        <div id="terminal-tabs" class="tabs">
-            <button class="tab-button" onclick="selectTab('system')" id="tab-system">SYSTEM</button>
-        </div>
-        <div id="terminal-panes" class="flex-1 relative min-h-0 bg-gray-50">
-            <div id="terminal-system" class="terminal-container p-4 overflow-hidden h-full">
-                <div class="dense-panel h-full">
-                    <h2 class="text-[9px] font-black text-gray-400 uppercase tracking-tighter mb-1 text-center">System Stream</h2>
-                    <div id="logs" class="flex-1 overflow-y-auto font-mono text-[10px] leading-tight text-gray-500"></div>
+            <!-- Column 2: Data Tables -->
+            <div id="table-pane" class="flex flex-col flex-1 bg-gray-50/30">
+                <div class="flex-1 dense-panel border-b border-gray-100">
+                    <h2
+                        class="text-[9px] font-black text-gray-400 uppercase tracking-tighter mb-1 text-center"
+                    >
+                        Assets
+                    </h2>
+                    <div id="tables" class="flex-1 overflow-y-auto"></div>
+                </div>
+                <div class="flex-1 dense-panel">
+                    <h2
+                        class="text-[9px] font-black text-gray-400 uppercase tracking-tighter mb-1 text-center"
+                    >
+                        Traders
+                    </h2>
+                    <div id="agents-table" class="flex-1 overflow-y-auto"></div>
                 </div>
             </div>
         </div>
-    </div>
 
-    <script src="/socket.io/socket.io.js"></script>
-    <script>
-        const socket = io();
-        const state = { round: 0, viewingAgent: null };
-        const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#6366f1', '#14b8a6', '#f97316', '#06b6d4', '#84cc16', '#d946ef'];
+        <div class="resizer-h" id="main-h-resizer"></div>
 
-        const statusEl = document.getElementById('status');
-        const logsEl = document.getElementById('logs');
-        const roundInfoEl = document.getElementById('round-info');
-        const tablesEl = document.getElementById('tables');
-        const agentsEl = document.getElementById('agents-table');
-        const explorerStatus = document.getElementById('explorer-status');
-        const terminalTabs = document.getElementById('terminal-tabs');
-        const terminalPanes = document.getElementById('terminal-panes');
+        <!-- Bottom Section: Session Explorer (PTY Console) -->
+        <div id="bottom-pane" class="flex flex-col flex-1 bg-white min-h-0">
+            <div
+                class="px-3 py-2 border-b border-gray-200 bg-gray-50/50 flex justify-between items-center flex-shrink-0"
+            >
+                <div class="flex items-center gap-2">
+                    <h2 class="text-[10px] font-black text-gray-600 uppercase tracking-widest">
+                        Session Explorer
+                    </h2>
+                    <div
+                        id="explorer-status"
+                        class="text-[9px] text-gray-400 italic font-mono uppercase tracking-tighter ml-2"
+                    >
+                        Initializing...
+                    </div>
+                </div>
+            </div>
+            <div id="terminal-tabs" class="tabs">
+                <button class="tab-button" onclick="selectTab('system')" id="tab-system">
+                    SYSTEM
+                </button>
+            </div>
+            <div id="terminal-panes" class="flex-1 relative min-h-0 bg-gray-50">
+                <div id="terminal-system" class="terminal-container p-4 overflow-hidden h-full">
+                    <div class="dense-panel h-full">
+                        <h2
+                            class="text-[9px] font-black text-gray-400 uppercase tracking-tighter mb-1 text-center"
+                        >
+                            System Stream
+                        </h2>
+                        <div
+                            id="logs"
+                            class="flex-1 overflow-y-auto font-mono text-[10px] leading-tight text-gray-500"
+                        ></div>
+                    </div>
+                </div>
+            </div>
+        </div>
 
-        // --- Terminal Management ---
-        const terminals = new Map(); // agent_id -> { term, fitAddon, container, ws }
-        const knownAgents = new Set();
+        <script src="/socket.io/socket.io.js"></script>
+        <script>
+            const socket = io();
+            const state = { round: 0, viewingAgent: null };
+            const COLORS = [
+                "#3b82f6",
+                "#10b981",
+                "#f59e0b",
+                "#ef4444",
+                "#8b5cf6",
+                "#ec4899",
+                "#6366f1",
+                "#14b8a6",
+                "#f97316",
+                "#06b6d4",
+                "#84cc16",
+                "#d946ef",
+            ];
 
-        const TERM_THEME = {
-            background: '#fafafa',
-            foreground: '#1f2937',
-            cursor: '#3b82f6',
-            cursorAccent: '#ffffff',
-            selectionBackground: '#bfdbfe',
-            black: '#000000',
-            red: '#dc2626',
-            green: '#16a34a',
-            yellow: '#ca8a04',
-            blue: '#2563eb',
-            magenta: '#c026d3',
-            cyan: '#0891b2',
-            white: '#6b7280',
-            brightBlack: '#4b5563',
-            brightRed: '#ef4444',
-            brightGreen: '#22c55e',
-            brightYellow: '#eab308',
-            brightBlue: '#3b82f6',
-            brightMagenta: '#d946ef',
-            brightCyan: '#06b6d4',
-            brightWhite: '#1f2937'
-        };
+            const statusEl = document.getElementById("status");
+            const logsEl = document.getElementById("logs");
+            const roundInfoEl = document.getElementById("round-info");
+            const tablesEl = document.getElementById("tables");
+            const agentsEl = document.getElementById("agents-table");
+            const explorerStatus = document.getElementById("explorer-status");
+            const terminalTabs = document.getElementById("terminal-tabs");
+            const terminalPanes = document.getElementById("terminal-panes");
 
-        function createTerminalForAgent(agentId) {
-            if (terminals.has(agentId)) return;
+            // --- Terminal Management ---
+            const terminals = new Map(); // agent_id -> { term, fitAddon, container, ws }
+            const knownAgents = new Set();
 
-            const container = document.createElement('div');
-            container.className = 'terminal-container';
-            container.id = `terminal-${agentId}`;
-            terminalPanes.appendChild(container);
-
-            const term = new Terminal({
-                theme: TERM_THEME,
-                fontSize: 12,
-                fontFamily: 'Consolas, "Courier New", monospace',
-                cursorBlink: true,
-                scrollback: 5000,
-                allowProposedApi: true,
-                convertEol: true
-            });
-            const fitAddon = new FitAddon.FitAddon();
-            term.loadAddon(fitAddon);
-            term.open(container);
-
-            terminals.set(agentId, { term, fitAddon, container, ws: null, initialized: false });
-
-            const tabButton = document.createElement('button');
-            tabButton.className = 'tab-button';
-            tabButton.textContent = agentId;
-            tabButton.onclick = () => selectTab(agentId);
-            terminalTabs.appendChild(tabButton);
-
-            term.write(`\x1b[34mWaiting for ${agentId} terminal...\x1b[0m\r\n`);
-            // Ask the server if a helper is already ready for this agent
-            socket.emit('terminal.init', { agent_id: agentId });
-        }
-
-        // --- Resizer Management ---
-        function initResizers() {
-            const hResizer = document.getElementById('main-h-resizer');
-            const topPane = document.getElementById('top-pane');
-            const vResizer = document.getElementById('top-v-resizer');
-            const chartPane = document.getElementById('chart-pane');
-
-            let isDraggingH = false;
-            let isDraggingV = false;
-
-            hResizer.addEventListener('mousedown', () => { isDraggingH = true; hResizer.classList.add('dragging'); document.body.style.cursor = 'row-resize'; });
-            vResizer.addEventListener('mousedown', () => { isDraggingV = true; vResizer.classList.add('dragging'); document.body.style.cursor = 'col-resize'; });
-
-            document.addEventListener('mousemove', (e) => {
-                if (isDraggingH) {
-                    const headerHeight = document.querySelector('header').offsetHeight;
-                    const percentage = ((e.clientY - headerHeight) / (window.innerHeight - headerHeight)) * 100;
-                    if (percentage > 20 && percentage < 80) topPane.style.height = `${percentage}%`;
-                }
-                if (isDraggingV) {
-                    const percentage = (e.clientX / window.innerWidth) * 100;
-                    if (percentage > 20 && percentage < 80) chartPane.style.width = `${percentage}%`;
-                }
-            });
-
-            document.addEventListener('mouseup', () => {
-                if (isDraggingH || isDraggingV) {
-                    isDraggingH = false; isDraggingV = false;
-                    hResizer.classList.remove('dragging'); vResizer.classList.remove('dragging');
-                    document.body.style.cursor = 'default';
-                    window.dispatchEvent(new Event('resize'));
-                }
-            });
-        }
-        initResizers();
-        // Start with System tab selected
-        selectTab('system');
-
-        function connectTerminalToHelper(agentId) {
-            const terminal = terminals.get(agentId);
-            if (!terminal) return;
-            if (terminal.ws) return; // already connected
-
-            // Connect through the dashboard server's WebSocket proxy
-            const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const wsUrl = `${proto}//${window.location.host}/terminal/${encodeURIComponent(agentId)}`;
-            console.log(`[WS-CONNECT] ${agentId} -> ${wsUrl}`);
-            terminal.term.write(`\x1b[34mConnecting to ${agentId} session...\x1b[0m\r\n`);
-
-            const ws = new WebSocket(wsUrl);
-            terminal.ws = ws;
-
-            ws.onopen = () => {
-                console.log(`[WS-OPEN] ${agentId} connected`);
-                terminal.term.write(`\x1b[32mConnected.\x1b[0m\r\n`);
-                // Send initial size
-                terminal.fitAddon.fit();
-                ws.send(JSON.stringify({ type: 'resize', cols: terminal.term.cols, rows: terminal.term.rows }));
+            const TERM_THEME = {
+                background: "#fafafa",
+                foreground: "#1f2937",
+                cursor: "#3b82f6",
+                cursorAccent: "#ffffff",
+                selectionBackground: "#bfdbfe",
+                black: "#000000",
+                red: "#dc2626",
+                green: "#16a34a",
+                yellow: "#ca8a04",
+                blue: "#2563eb",
+                magenta: "#c026d3",
+                cyan: "#0891b2",
+                white: "#6b7280",
+                brightBlack: "#4b5563",
+                brightRed: "#ef4444",
+                brightGreen: "#22c55e",
+                brightYellow: "#eab308",
+                brightBlue: "#3b82f6",
+                brightMagenta: "#d946ef",
+                brightCyan: "#06b6d4",
+                brightWhite: "#1f2937",
             };
 
-            ws.onmessage = (event) => {
-                try {
-                    const msg = JSON.parse(event.data);
-                    if (msg.type === 'data' || msg.type === 'buffer') {
-                        terminal.term.write(msg.data);
-                    } else if (msg.type === 'exit') {
-                        terminal.term.write(`\r\n\x1b[31m[Process exited: code=${msg.exitCode}, signal=${msg.signal}]\x1b[0m\r\n`);
+            function createTerminalForAgent(agentId) {
+                if (terminals.has(agentId)) return;
+
+                const container = document.createElement("div");
+                container.className = "terminal-container";
+                container.id = `terminal-${agentId}`;
+                terminalPanes.appendChild(container);
+
+                const term = new Terminal({
+                    theme: TERM_THEME,
+                    fontSize: 12,
+                    fontFamily: 'Consolas, "Courier New", monospace',
+                    cursorBlink: true,
+                    scrollback: 5000,
+                    allowProposedApi: true,
+                    convertEol: true,
+                });
+                const fitAddon = new FitAddon.FitAddon();
+                term.loadAddon(fitAddon);
+                term.open(container);
+
+                terminals.set(agentId, { term, fitAddon, container, ws: null, initialized: false });
+
+                const tabButton = document.createElement("button");
+                tabButton.className = "tab-button";
+                tabButton.textContent = agentId;
+                tabButton.onclick = () => selectTab(agentId);
+                terminalTabs.appendChild(tabButton);
+
+                term.write(`\x1b[34mWaiting for ${agentId} terminal...\x1b[0m\r\n`);
+                // Ask the server if a helper is already ready for this agent
+                socket.emit("terminal.init", { agent_id: agentId });
+            }
+
+            // --- Resizer Management ---
+            function initResizers() {
+                const hResizer = document.getElementById("main-h-resizer");
+                const topPane = document.getElementById("top-pane");
+                const vResizer = document.getElementById("top-v-resizer");
+                const chartPane = document.getElementById("chart-pane");
+
+                let isDraggingH = false;
+                let isDraggingV = false;
+
+                hResizer.addEventListener("mousedown", () => {
+                    isDraggingH = true;
+                    hResizer.classList.add("dragging");
+                    document.body.style.cursor = "row-resize";
+                });
+                vResizer.addEventListener("mousedown", () => {
+                    isDraggingV = true;
+                    vResizer.classList.add("dragging");
+                    document.body.style.cursor = "col-resize";
+                });
+
+                document.addEventListener("mousemove", (e) => {
+                    if (isDraggingH) {
+                        const headerHeight = document.querySelector("header").offsetHeight;
+                        const percentage =
+                            ((e.clientY - headerHeight) / (window.innerHeight - headerHeight)) *
+                            100;
+                        if (percentage > 20 && percentage < 80)
+                            topPane.style.height = `${percentage}%`;
                     }
-                } catch (e) {}
-            };
-
-            ws.onclose = () => {
-                console.log(`[WS-CLOSE] ${agentId}`);
-                terminal.ws = null;
-            };
-
-            // Send keyboard input directly to helper
-            terminal.term.onData(data => {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: 'input', data }));
-                }
-            });
-        }
-
-        // Charts
-        const createChart = (id, options) => {
-            const el = document.getElementById(id);
-            if (!el) return { data: { labels: [], datasets: [] }, update: () => {}, destroy: () => {} };
-            try {
-                if (typeof Chart !== 'undefined' && Chart.name === 'MockChart') {
-                    return Chart(el, { data: { labels: [], datasets: [] }, options });
-                }
-                return new Chart(el.getContext('2d'), {
-                    type: 'line',
-                    data: { labels: [], datasets: [] },
-                    options: {
-                        responsive: true, maintainAspectRatio: false, animation: false,
-                        elements: { point: { radius: 0.5 }, line: { borderWidth: 1.5, tension: 0.1 } },
-                        plugins: { legend: { display: true, position: 'top', align: 'end', labels: { boxWidth: 5, font: { size: 8 } } } },
-                        scales: { x: { display: false }, y: { grid: { color: '#f9fafb' }, ticks: { font: { size: 8 } }, ...options.y } }
+                    if (isDraggingV) {
+                        const percentage = (e.clientX / window.innerWidth) * 100;
+                        if (percentage > 20 && percentage < 80)
+                            chartPane.style.width = `${percentage}%`;
                     }
                 });
-            } catch (e) { return { data: { labels: [], datasets: [] }, update: () => {} }; }
-        };
 
-        const priceChart = createChart('priceChart', { y: { min: 0, max: 1 } });
-        const wealthChart = createChart('wealthChart', { y: {} });
+                document.addEventListener("mouseup", () => {
+                    if (isDraggingH || isDraggingV) {
+                        isDraggingH = false;
+                        isDraggingV = false;
+                        hResizer.classList.remove("dragging");
+                        vResizer.classList.remove("dragging");
+                        document.body.style.cursor = "default";
+                        window.dispatchEvent(new Event("resize"));
+                    }
+                });
+            }
+            initResizers();
+            // Start with System tab selected
+            selectTab("system");
 
-        socket.on('connect', () => {
-            statusEl.textContent = 'ONLINE';
-            statusEl.className = "px-2 py-0.5 rounded-[4px] text-[9px] font-bold bg-green-100 text-green-700 uppercase";
-        });
+            function connectTerminalToHelper(agentId) {
+                const terminal = terminals.get(agentId);
+                if (!terminal) return;
+                if (terminal.ws) return; // already connected
 
-        socket.on('disconnect', () => {
-            statusEl.textContent = 'OFFLINE';
-            statusEl.className = "px-2 py-0.5 rounded-[4px] text-[9px] font-bold bg-red-100 text-red-700 uppercase";
-        });
+                // Connect through the dashboard server's WebSocket proxy
+                const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+                const wsUrl = `${proto}//${window.location.host}/terminal/${encodeURIComponent(agentId)}`;
+                console.log(`[WS-CONNECT] ${agentId} -> ${wsUrl}`);
+                terminal.term.write(`\x1b[34mConnecting to ${agentId} session...\x1b[0m\r\n`);
 
-        socket.on('log', (data) => {
-            if (data.type === 'log') {
-                const line = document.createElement('div');
-                line.className = 'log-entry mb-0.5 border-b border-gray-50/50 pb-0.5 whitespace-pre-wrap break-words';
-                line.textContent = `[${new Date().toLocaleTimeString().split(' ')[0]}] ${data.message}`;
+                const ws = new WebSocket(wsUrl);
+                terminal.ws = ws;
+
+                ws.onopen = () => {
+                    console.log(`[WS-OPEN] ${agentId} connected`);
+                    terminal.term.write(`\x1b[32mConnected.\x1b[0m\r\n`);
+                    // Send initial size
+                    terminal.fitAddon.fit();
+                    ws.send(
+                        JSON.stringify({
+                            type: "resize",
+                            cols: terminal.term.cols,
+                            rows: terminal.term.rows,
+                        }),
+                    );
+                };
+
+                ws.onmessage = (event) => {
+                    try {
+                        const msg = JSON.parse(event.data);
+                        if (msg.type === "data" || msg.type === "buffer") {
+                            terminal.term.write(msg.data);
+                        } else if (msg.type === "exit") {
+                            terminal.term.write(
+                                `\r\n\x1b[31m[Process exited: code=${msg.exitCode}, signal=${msg.signal}]\x1b[0m\r\n`,
+                            );
+                        }
+                    } catch (e) {}
+                };
+
+                ws.onclose = () => {
+                    console.log(`[WS-CLOSE] ${agentId}`);
+                    terminal.ws = null;
+                };
+
+                // Send keyboard input directly to helper
+                terminal.term.onData((data) => {
+                    if (ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({ type: "input", data }));
+                    }
+                });
+            }
+
+            // Charts
+            const createChart = (id, options) => {
+                const el = document.getElementById(id);
+                if (!el)
+                    return {
+                        data: { labels: [], datasets: [] },
+                        update: () => {},
+                        destroy: () => {},
+                    };
+                try {
+                    if (typeof Chart !== "undefined" && Chart.name === "MockChart") {
+                        return Chart(el, { data: { labels: [], datasets: [] }, options });
+                    }
+                    return new Chart(el.getContext("2d"), {
+                        type: "line",
+                        data: { labels: [], datasets: [] },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            animation: false,
+                            elements: {
+                                point: { radius: 0.5 },
+                                line: { borderWidth: 1.5, tension: 0.1 },
+                            },
+                            plugins: {
+                                legend: {
+                                    display: true,
+                                    position: "top",
+                                    align: "end",
+                                    labels: { boxWidth: 5, font: { size: 8 } },
+                                },
+                            },
+                            scales: {
+                                x: { display: false },
+                                y: {
+                                    grid: { color: "#f9fafb" },
+                                    ticks: { font: { size: 8 } },
+                                    ...options.y,
+                                },
+                            },
+                        },
+                    });
+                } catch (e) {
+                    return { data: { labels: [], datasets: [] }, update: () => {} };
+                }
+            };
+
+            const priceChart = createChart("priceChart", { y: { min: 0, max: 1 } });
+            const wealthChart = createChart("wealthChart", { y: {} });
+
+            socket.on("connect", () => {
+                statusEl.textContent = "ONLINE";
+                statusEl.className =
+                    "px-2 py-0.5 rounded-[4px] text-[9px] font-bold bg-green-100 text-green-700 uppercase";
+            });
+
+            socket.on("disconnect", () => {
+                statusEl.textContent = "OFFLINE";
+                statusEl.className =
+                    "px-2 py-0.5 rounded-[4px] text-[9px] font-bold bg-red-100 text-red-700 uppercase";
+            });
+
+            socket.on("log", (data) => {
+                if (data.type === "log") {
+                    const line = document.createElement("div");
+                    line.className =
+                        "log-entry mb-0.5 border-b border-gray-50/50 pb-0.5 whitespace-pre-wrap break-words";
+                    line.textContent = `[${new Date().toLocaleTimeString().split(" ")[0]}] ${data.message}`;
+                    logsEl.appendChild(line);
+                    logsEl.scrollTop = logsEl.scrollHeight;
+                } else if (data.type === "state") {
+                    updateState(data);
+                } else if (data.type === "agent_init") {
+                    addLog(`[SYSTEM] Agent ${data.agent_id} attached`, "text-blue-600 font-bold");
+                    if (data.agent_id && !knownAgents.has(data.agent_id)) {
+                        knownAgents.add(data.agent_id);
+                        createTerminalForAgent(data.agent_id);
+                    }
+                }
+            });
+
+            // When the server tells us a helper is ready, connect xterm to it via proxy
+            socket.on("terminal.ready", ({ agent_id }) => {
+                console.log(`[TERMINAL-READY] ${agent_id}`);
+                if (!terminals.has(agent_id)) {
+                    createTerminalForAgent(agent_id);
+                }
+                connectTerminalToHelper(agent_id);
+            });
+
+            function addLog(msg, classes = "text-gray-500") {
+                const line = document.createElement("div");
+                line.className = `log-entry mb-0.5 border-b border-gray-50/50 pb-0.5 whitespace-pre-wrap break-words ${classes}`;
+                line.textContent = `[${new Date().toLocaleTimeString().split(" ")[0]}] ${msg}`;
                 logsEl.appendChild(line);
                 logsEl.scrollTop = logsEl.scrollHeight;
-            } else if (data.type === 'state') {
-                updateState(data);
-            } else if (data.type === 'agent_init') {
-                addLog(`[SYSTEM] Agent ${data.agent_id} attached`, 'text-blue-600 font-bold');
-                if (data.agent_id && !knownAgents.has(data.agent_id)) {
-                    knownAgents.add(data.agent_id);
-                    createTerminalForAgent(data.agent_id);
+            }
+
+            function selectTab(tabId) {
+                console.log(`[SELECT-TAB] Selecting ${tabId}`);
+
+                const isAgent = terminals.has(tabId);
+                state.viewingAgent = isAgent ? tabId : null;
+                explorerStatus.textContent = `Active: ${tabId}`;
+
+                // Update trader table highlighting
+                document
+                    .querySelectorAll("#agents-table tr")
+                    .forEach((row) => row.classList.remove("active-trader", "font-bold"));
+                if (isAgent) {
+                    const selectedRow = Array.from(
+                        document.querySelectorAll("#agents-table td"),
+                    ).find((td) => td.textContent === tabId)?.parentElement;
+                    if (selectedRow) selectedRow.classList.add("active-trader", "font-bold");
+                }
+
+                // Switch tabs and panes
+                document
+                    .querySelectorAll(".tab-button")
+                    .forEach((btn) => btn.classList.remove("active"));
+                document
+                    .querySelectorAll(".terminal-container")
+                    .forEach((pane) => pane.classList.remove("active"));
+
+                const tabButton = Array.from(document.querySelectorAll(".tab-button")).find(
+                    (btn) => btn.textContent === tabId || btn.id === `tab-${tabId}`,
+                );
+                if (tabButton) tabButton.classList.add("active");
+
+                const pane = document.getElementById(`terminal-${tabId}`);
+                if (pane) pane.classList.add("active");
+
+                const terminal = terminals.get(tabId);
+                if (terminal) {
+                    console.log(`[SELECT-TAB] Terminal found for ${tabId}, making active`);
+                    // Fit terminal after container is visible and has dimensions
+                    requestAnimationFrame(() => {
+                        // Give browser time to render and calculate dimensions
+                        setTimeout(() => {
+                            terminal.fitAddon.fit();
+                            terminal.term.focus();
+                            console.log(
+                                `[FIT] ${tabId} sized to ${terminal.term.cols}x${terminal.term.rows}`,
+                            );
+                            if (terminal.ws && terminal.ws.readyState === WebSocket.OPEN) {
+                                terminal.ws.send(
+                                    JSON.stringify({
+                                        type: "resize",
+                                        cols: terminal.term.cols,
+                                        rows: terminal.term.rows,
+                                    }),
+                                );
+                            }
+                        }, 100);
+                    });
                 }
             }
-        });
 
-        // When the server tells us a helper is ready, connect xterm to it via proxy
-        socket.on('terminal.ready', ({ agent_id }) => {
-            console.log(`[TERMINAL-READY] ${agent_id}`);
-            if (!terminals.has(agent_id)) {
-                createTerminalForAgent(agent_id);
-            }
-            connectTerminalToHelper(agent_id);
-        });
-
-        function addLog(msg, classes = 'text-gray-500') {
-            const line = document.createElement('div');
-            line.className = `log-entry mb-0.5 border-b border-gray-50/50 pb-0.5 whitespace-pre-wrap break-words ${classes}`;
-            line.textContent = `[${new Date().toLocaleTimeString().split(' ')[0]}] ${msg}`;
-            logsEl.appendChild(line);
-            logsEl.scrollTop = logsEl.scrollHeight;
-        }
-
-        function selectTab(tabId) {
-            console.log(`[SELECT-TAB] Selecting ${tabId}`);
-            
-            const isAgent = terminals.has(tabId);
-            state.viewingAgent = isAgent ? tabId : null;
-            explorerStatus.textContent = `Active: ${tabId}`;
-            
-            // Update trader table highlighting
-            document.querySelectorAll('#agents-table tr').forEach(row => row.classList.remove('active-trader', 'font-bold'));
-            if (isAgent) {
-                const selectedRow = Array.from(document.querySelectorAll('#agents-table td')).find(td => td.textContent === tabId)?.parentElement;
-                if (selectedRow) selectedRow.classList.add('active-trader', 'font-bold');
+            function getOrCreateDataset(chart, label, colorIdx) {
+                let ds = chart.data.datasets.find((d) => d.label === label);
+                if (!ds) {
+                    ds = {
+                        label: label,
+                        data: new Array(Math.max(0, chart.data.labels.length - 1)).fill(null),
+                        borderColor: COLORS[colorIdx % COLORS.length],
+                        backgroundColor: COLORS[colorIdx % COLORS.length],
+                        fill: false,
+                        borderWidth: 1.5,
+                    };
+                    chart.data.datasets.push(ds);
+                }
+                return ds;
             }
 
-            // Switch tabs and panes
-            document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
-            document.querySelectorAll('.terminal-container').forEach(pane => pane.classList.remove('active'));
+            function updateState(data) {
+                const isNewRound = state.round !== data.round_num;
+                state.round = data.round_num;
+                roundInfoEl.textContent = `ROUND ${state.round}`;
 
-            const tabButton = Array.from(document.querySelectorAll('.tab-button')).find(btn => btn.textContent === tabId || btn.id === `tab-${tabId}`);
-            if (tabButton) tabButton.classList.add('active');
-
-            const pane = document.getElementById(`terminal-${tabId}`);
-            if (pane) pane.classList.add('active');
-
-            const terminal = terminals.get(tabId);
-            if (terminal) {
-                console.log(`[SELECT-TAB] Terminal found for ${tabId}, making active`);
-                // Fit terminal after container is visible and has dimensions
-                requestAnimationFrame(() => {
-                    // Give browser time to render and calculate dimensions
-                    setTimeout(() => {
-                        terminal.fitAddon.fit();
-                        terminal.term.focus();
-                        console.log(`[FIT] ${tabId} sized to ${terminal.term.cols}x${terminal.term.rows}`);
-                        if (terminal.ws && terminal.ws.readyState === WebSocket.OPEN) {
-                            terminal.ws.send(JSON.stringify({ type: 'resize', cols: terminal.term.cols, rows: terminal.term.rows }));
+                // Auto-create terminals for new agents
+                if (data.agents) {
+                    Object.keys(data.agents).forEach((agentId) => {
+                        if (!knownAgents.has(agentId)) {
+                            knownAgents.add(agentId);
+                            createTerminalForAgent(agentId);
                         }
-                    }, 100);
-                });
-            }
-        }
+                    });
 
-        function getOrCreateDataset(chart, label, colorIdx) {
-            let ds = chart.data.datasets.find(d => d.label === label);
-            if (!ds) {
-                ds = {
-                    label: label,
-                    data: new Array(Math.max(0, chart.data.labels.length - 1)).fill(null),
-                    borderColor: COLORS[colorIdx % COLORS.length],
-                    backgroundColor: COLORS[colorIdx % COLORS.length],
-                    fill: false,
-                    borderWidth: 1.5
-                };
-                chart.data.datasets.push(ds);
-            }
-            return ds;
-        }
-
-        function updateState(data) {
-            const isNewRound = state.round !== data.round_num;
-            state.round = data.round_num;
-            roundInfoEl.textContent = `ROUND ${state.round}`;
-
-            // Auto-create terminals for new agents
-            if (data.agents) {
-                Object.keys(data.agents).forEach(agentId => {
-                    if (!knownAgents.has(agentId)) {
-                        knownAgents.add(agentId);
-                        createTerminalForAgent(agentId);
+                    // Auto-select first agent
+                    if (!state.viewingAgent && knownAgents.size > 0) {
+                        const firstAgent = Array.from(knownAgents)[0];
+                        setTimeout(() => selectTab(firstAgent), 1500);
                     }
-                });
-
-                // Auto-select first agent
-                if (!state.viewingAgent && knownAgents.size > 0) {
-                    const firstAgent = Array.from(knownAgents)[0];
-                    setTimeout(() => selectTab(firstAgent), 1500);
                 }
-            }
 
-            const label = `R${state.round}`;
-            if (priceChart.data.labels[priceChart.data.labels.length - 1] !== label) {
-                priceChart.data.labels.push(label);
-                wealthChart.data.labels.push(label);
-            }
+                const label = `R${state.round}`;
+                if (priceChart.data.labels[priceChart.data.labels.length - 1] !== label) {
+                    priceChart.data.labels.push(label);
+                    wealthChart.data.labels.push(label);
+                }
 
-            // Assets
-            let assetHtml = '<table class="w-full text-left text-[10px] table-auto border-collapse"><thead><tr class="text-gray-400 border-b border-gray-100 uppercase text-[8px] font-bold"><th class="pb-1">Asset</th><th class="pb-1 text-right">Price</th><th class="pb-1 text-center w-10">Conf</th></tr></thead><tbody>';
-            Object.entries(data.assets).sort(([,a], [,b]) => a.type.localeCompare(b.type)).forEach(([id, asset], idx) => {
-                const price = asset.q_yes !== undefined ? calcPrice(asset.q_yes, asset.q_no, data.liquidity_b) : 0.5;
-                const ds = getOrCreateDataset(priceChart, id, idx);
-                if (isNewRound || ds.data.length < priceChart.data.labels.length) ds.data.push(price);
-                else ds.data[ds.data.length - 1] = price;
+                // Assets
+                let assetHtml =
+                    '<table class="w-full text-left text-[10px] table-auto border-collapse"><thead><tr class="text-gray-400 border-b border-gray-100 uppercase text-[8px] font-bold"><th class="pb-1">Asset</th><th class="pb-1 text-right">Price</th><th class="pb-1 text-center w-10">Conf</th></tr></thead><tbody>';
+                Object.entries(data.assets)
+                    .sort(([, a], [, b]) => a.type.localeCompare(b.type))
+                    .forEach(([id, asset], idx) => {
+                        const price =
+                            asset.q_yes !== undefined
+                                ? calcPrice(asset.q_yes, asset.q_no, data.liquidity_b)
+                                : 0.5;
+                        const ds = getOrCreateDataset(priceChart, id, idx);
+                        if (isNewRound || ds.data.length < priceChart.data.labels.length)
+                            ds.data.push(price);
+                        else ds.data[ds.data.length - 1] = price;
 
-                const width = Math.min(100, price * 100);
-                const barColor = price > 0.8 ? 'bg-green-500' : (price < 0.2 ? 'bg-red-500' : 'bg-blue-400');
-                assetHtml += `<tr class="hover:bg-gray-100 border-b border-gray-50">
+                        const width = Math.min(100, price * 100);
+                        const barColor =
+                            price > 0.8
+                                ? "bg-green-500"
+                                : price < 0.2
+                                  ? "bg-red-500"
+                                  : "bg-blue-400";
+                        assetHtml += `<tr class="hover:bg-gray-100 border-b border-gray-50">
                     <td class="py-1 font-mono text-gray-600 truncate max-w-[80px]" title="${id}">${id}</td>
                     <td class="py-1 text-right font-bold text-gray-800 font-mono">${price.toFixed(3)}</td>
                     <td class="py-1 flex justify-center"><div class="h-1 w-6 bg-gray-200 rounded-full mt-1.5 overflow-hidden"><div class="${barColor} h-full" style="width: ${width}%"></div></div></td>
                 </tr>`;
-            });
-            tablesEl.innerHTML = assetHtml + '</tbody></table>';
-            priceChart.update();
+                    });
+                tablesEl.innerHTML = assetHtml + "</tbody></table>";
+                priceChart.update();
 
-            // Traders
-            let agentHtml = '<table class="w-full text-left text-[10px]"><thead><tr class="text-gray-400 border-b border-gray-100 uppercase text-[8px] font-bold"><th class="pb-1">Trader</th><th class="pb-1 text-right pr-1">Wealth</th></tr></thead><tbody>';
-            const activeAgents = new Set(Object.keys(data.agents));
-            const allTraders = Object.values(data.agents).map(a => ({...a, type: 'AGENT'}));
-            // Keep bankrupt agents visible with $0 wealth
-            knownAgents.forEach(agentId => {
-                if (!activeAgents.has(agentId)) {
-                    allTraders.push({ agent_id: agentId, wealth: 0, type: 'BANKRUPT' });
-                }
-            });
-            allTraders.push({ agent_id: 'Whale', wealth: data.whale_wealth, type: 'WHALE' });
-            allTraders.sort((a, b) => b.wealth - a.wealth);
+                // Traders
+                let agentHtml =
+                    '<table class="w-full text-left text-[10px]"><thead><tr class="text-gray-400 border-b border-gray-100 uppercase text-[8px] font-bold"><th class="pb-1">Trader</th><th class="pb-1 text-right pr-1">Wealth</th></tr></thead><tbody>';
+                const activeAgents = new Set(Object.keys(data.agents));
+                const allTraders = Object.values(data.agents).map((a) => ({ ...a, type: "AGENT" }));
+                // Keep bankrupt agents visible with $0 wealth
+                knownAgents.forEach((agentId) => {
+                    if (!activeAgents.has(agentId)) {
+                        allTraders.push({ agent_id: agentId, wealth: 0, type: "BANKRUPT" });
+                    }
+                });
+                allTraders.push({ agent_id: "Whale", wealth: data.whale_wealth, type: "WHALE" });
+                allTraders.sort((a, b) => b.wealth - a.wealth);
 
-            allTraders.forEach((trader, idx) => {
-                const ds = getOrCreateDataset(wealthChart, trader.agent_id, idx);
-                if (isNewRound || ds.data.length < wealthChart.data.labels.length) ds.data.push(trader.wealth);
-                else ds.data[ds.data.length - 1] = trader.wealth;
+                allTraders.forEach((trader, idx) => {
+                    const ds = getOrCreateDataset(wealthChart, trader.agent_id, idx);
+                    if (isNewRound || ds.data.length < wealthChart.data.labels.length)
+                        ds.data.push(trader.wealth);
+                    else ds.data[ds.data.length - 1] = trader.wealth;
 
-                const isWhale = trader.type === 'WHALE';
-                const isSelected = state.viewingAgent === trader.agent_id;
-                agentHtml += `<tr class="border-b border-gray-50 ${isWhale ? 'bg-gray-50/50' : 'cursor-pointer hover:bg-blue-50'} ${isSelected ? 'active-trader font-bold' : ''}" onclick="${isWhale ? '' : `selectTab('${trader.agent_id}')`}">
+                    const isWhale = trader.type === "WHALE";
+                    const isSelected = state.viewingAgent === trader.agent_id;
+                    agentHtml += `<tr class="border-b border-gray-50 ${isWhale ? "bg-gray-50/50" : "cursor-pointer hover:bg-blue-50"} ${isSelected ? "active-trader font-bold" : ""}" onclick="${isWhale ? "" : `selectTab('${trader.agent_id}')`}">
                     <td class="py-1 font-mono px-1 truncate max-w-[100px]">${trader.agent_id}</td>
                     <td class="py-1 text-right font-mono pr-1">$${trader.wealth.toFixed(0)}</td>
                 </tr>`;
-            });
-            agentsEl.innerHTML = agentHtml + '</tbody></table>';
-            wealthChart.update();
-        }
-
-        function calcPrice(q_yes, q_no, b) {
-            if (b <= 0) return 0.5;
-            const exp = (q_no - q_yes) / b;
-            return 1 / (1 + Math.exp(Math.max(-700, Math.min(700, exp))));
-        }
-
-        // Debounced resize handler for better performance
-        let resizeTimeout;
-        window.addEventListener('resize', () => {
-            clearTimeout(resizeTimeout);
-            resizeTimeout = setTimeout(() => {
-                terminals.forEach((terminal, agentId) => {
-                    if (terminal.container.classList.contains('active')) {
-                        terminal.fitAddon.fit();
-                        if (terminal.ws && terminal.ws.readyState === WebSocket.OPEN) {
-                            terminal.ws.send(JSON.stringify({ type: 'resize', cols: terminal.term.cols, rows: terminal.term.rows }));
-                        }
-                    }
                 });
-            }, 100);
-        });
-    </script>
-</body>
+                agentsEl.innerHTML = agentHtml + "</tbody></table>";
+                wealthChart.update();
+            }
+
+            function calcPrice(q_yes, q_no, b) {
+                if (b <= 0) return 0.5;
+                const exp = (q_no - q_yes) / b;
+                return 1 / (1 + Math.exp(Math.max(-700, Math.min(700, exp))));
+            }
+
+            // Debounced resize handler for better performance
+            let resizeTimeout;
+            window.addEventListener("resize", () => {
+                clearTimeout(resizeTimeout);
+                resizeTimeout = setTimeout(() => {
+                    terminals.forEach((terminal, agentId) => {
+                        if (terminal.container.classList.contains("active")) {
+                            terminal.fitAddon.fit();
+                            if (terminal.ws && terminal.ws.readyState === WebSocket.OPEN) {
+                                terminal.ws.send(
+                                    JSON.stringify({
+                                        type: "resize",
+                                        cols: terminal.term.cols,
+                                        rows: terminal.term.rows,
+                                    }),
+                                );
+                            }
+                        }
+                    });
+                }, 100);
+            });
+        </script>
+    </body>
 </html>

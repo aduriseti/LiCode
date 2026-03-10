@@ -9,11 +9,13 @@ const mocks = vi.hoisted(() => ({
     },
     server: {
         listen: vi.fn((...args) => {
-            const cb = args.find(a => typeof a === 'function');
+            const cb = args.find((a) => typeof a === "function");
             if (cb) cb();
         }),
         address: vi.fn(() => ({ port: 8080 })),
-        close: vi.fn((cb) => { if(cb) cb(); }),
+        close: vi.fn((cb) => {
+            if (cb) cb();
+        }),
         on: vi.fn(),
     },
     io: {
@@ -51,7 +53,7 @@ vi.mock("eventsource", () => ({
 
 vi.mock("child_process", () => ({
     exec: mocks.exec,
-    spawn: mocks.spawn
+    spawn: mocks.spawn,
 }));
 
 vi.mock("../lib/dashboard.app", () => ({
@@ -66,18 +68,17 @@ vi.mock("../lib/dashboard.app", () => ({
 // Fix for Constructor Mock - Use regular function
 vi.mock("../lib/terminal.manager", () => {
     return {
-        TerminalManager: vi.fn().mockImplementation(function() { 
-            return mocks.terminalManager; 
-        })
+        TerminalManager: vi.fn().mockImplementation(function () {
+            return mocks.terminalManager;
+        }),
     };
 });
 
 // Mock process.exit
-// @ts-ignore
+// @ts-expect-error: intentional mock
 process.exit = mocks.processExit;
 
 describe("Dashboard Server Logic", () => {
-    
     beforeEach(() => {
         vi.clearAllMocks();
         mocks.io.engine.clientsCount = 0;
@@ -114,12 +115,12 @@ describe("Dashboard Server Logic", () => {
     it("should handle batched log requests", async () => {
         await import("../lib/dashboard-server");
         const handler = getHandler("/api/log");
-        
+
         const events = [
-            { type: 'log', message: 'one' },
-            { type: 'log', message: 'two' }
+            { type: "log", message: "one" },
+            { type: "log", message: "two" },
         ];
-        const req = { body: { type: 'batch', events } };
+        const req = { body: { type: "batch", events } };
         const res = { sendStatus: vi.fn() };
 
         handler(req, res);
@@ -139,78 +140,88 @@ describe("Dashboard Server Logic", () => {
             api_url: "http://localhost:5000",
             session_id: "ses_1",
             agent_id: "agent_0",
-            arena_dir: "/tmp/arena"
+            arena_dir: "/tmp/arena",
         };
         const req = { body: agentData };
         const res = { sendStatus: vi.fn(), status: vi.fn().mockReturnThis(), send: vi.fn() };
 
         // Mock EventSource instance
         const mockES = { onmessage: null, onerror: null, close: vi.fn() };
-        mocks.EventSource.mockImplementation(function() { return mockES; });
+        mocks.EventSource.mockImplementation(function () {
+            return mockES;
+        });
 
         handler(req, res);
 
         expect(mocks.terminalManager.registerAgent).toHaveBeenCalledWith(
-            "agent_0", "http://localhost:5000", "ses_1", "/tmp/arena"
+            "agent_0",
+            "http://localhost:5000",
+            "ses_1",
+            "/tmp/arena",
         );
         expect(mocks.terminalManager.spawnTerminal).toHaveBeenCalledWith("agent_0");
 
         expect(mocks.EventSource).toHaveBeenCalledWith("http://localhost:5000/event");
-        
+
         const sseEvent = {
             type: "message.part.updated",
             properties: {
                 part: { sessionID: "ses_1" },
-                delta: "Chunk"
-            }
+                delta: "Chunk",
+            },
         };
-        
+
         // Wait for parallel setup
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise((resolve) => setTimeout(resolve, 50));
 
         if (mockES.onmessage) {
             (mockES.onmessage as any)({ data: JSON.stringify(sseEvent) });
         }
 
-        expect(mocks.io.emit).toHaveBeenCalledWith("log", expect.objectContaining({
-            type: "agent_stream",
-            agent_id: "agent_0",
-            text: "Chunk"
-        }));
+        expect(mocks.io.emit).toHaveBeenCalledWith(
+            "log",
+            expect.objectContaining({
+                type: "agent_stream",
+                agent_id: "agent_0",
+                text: "Chunk",
+            }),
+        );
 
         expect(res.sendStatus).toHaveBeenCalledWith(200);
     });
 
     it("should trigger cleanup when all clients disconnect AFTER parent exits", async () => {
         vi.useFakeTimers();
-        
+
         // Mock stdin.on to capture the 'end' handler
-        const stdinOnMock = vi.spyOn(process.stdin, 'on');
-        
+        const stdinOnMock = vi.spyOn(process.stdin, "on");
+
         await import("../lib/dashboard-server");
 
         // 1. Get the 'end' handler for stdin
-        const endCall = stdinOnMock.mock.calls.find(c => c[0] === 'end');
+        const endCall = stdinOnMock.mock.calls.find((c) => c[0] === "end");
         const endHandler = endCall![1];
 
         // 2. Setup socket.io disconnect handler
-        const connectionCall = mocks.io.on.mock.calls.find((c: any[]) => c[0] === 'connection');
+        const connectionCall = mocks.io.on.mock.calls.find((c: any[]) => c[0] === "connection");
         const connectionHandler = connectionCall[1];
         const mockSocket = { on: vi.fn() };
         connectionHandler(mockSocket);
-        const disconnectHandler = mockSocket.on.mock.calls.find((c: any[]) => c[0] === 'disconnect')![1];
-        
+        const disconnectHandler = mockSocket.on.mock.calls.find(
+            (c: any[]) => c[0] === "disconnect",
+        )![1];
+
         // 3. Disconnect while parent is ALIVE
         mocks.io.engine.clientsCount = 0;
         disconnectHandler();
         vi.advanceTimersByTime(15000);
-        
+
         // Should NOT be closed yet
         expect(mocks.server.close).not.toHaveBeenCalled();
 
         // 4. Simulate Parent Exit
         endHandler();
-        
+
         // 5. Trigger disconnect or wait for the 60s timer
         vi.advanceTimersByTime(65000);
 

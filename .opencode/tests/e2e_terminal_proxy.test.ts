@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { createServer } from "http";
-import { Server } from "socket.io";
+import { _Server } from "socket.io";
 import { TerminalManager } from "../lib/terminal.manager";
 import { createDashboardApp } from "../lib/dashboard.app";
 import WebSocket from "ws";
@@ -35,7 +35,7 @@ describe("E2E Terminal WebSocket Proxy", () => {
         const { spawn } = await import("child_process");
         const srvProc = spawn("/home/codespace/.opencode/bin/opencode", ["serve", "--port", "0"], {
             stdio: ["ignore", "pipe", "pipe"],
-            env: { ...process.env, TERM: "dumb" }
+            env: { ...process.env, TERM: "dumb" },
         });
 
         let srvUrl = "";
@@ -65,7 +65,10 @@ describe("E2E Terminal WebSocket Proxy", () => {
                     resolve();
                 }
             }, 100);
-            setTimeout(() => { clearInterval(check); resolve(); }, 10000);
+            setTimeout(() => {
+                clearInterval(check);
+                resolve();
+            }, 10000);
         });
 
         expect(terminalManager.getHelperPort("test_agent")).toBeGreaterThan(0);
@@ -85,17 +88,20 @@ describe("E2E Terminal WebSocket Proxy", () => {
         ws.on("message", (raw) => {
             try {
                 const msg = JSON.parse(raw.toString());
-                if ((msg.type === "data" || msg.type === "buffer") && typeof msg.data === "string") {
+                if (
+                    (msg.type === "data" || msg.type === "buffer") &&
+                    typeof msg.data === "string"
+                ) {
                     validMessages++;
                     receivedData += msg.data;
                 }
-            } catch (e) {
+            } catch {
                 parseErrors++;
             }
         });
 
         // 6. Wait for TUI data
-        await new Promise(resolve => setTimeout(resolve, 5000));
+        await new Promise((resolve) => setTimeout(resolve, 5000));
 
         ws.close();
         srvProc.kill();
@@ -119,7 +125,7 @@ describe("E2E Terminal WebSocket Proxy", () => {
         const { spawn } = await import("child_process");
         const srvProc = spawn("/home/codespace/.opencode/bin/opencode", ["serve", "--port", "0"], {
             stdio: ["ignore", "pipe", "pipe"],
-            env: { ...process.env, TERM: "dumb" }
+            env: { ...process.env, TERM: "dumb" },
         });
 
         let srvUrl = "";
@@ -147,7 +153,10 @@ describe("E2E Terminal WebSocket Proxy", () => {
                     resolve();
                 }
             }, 100);
-            setTimeout(() => { clearInterval(check); resolve(); }, 10000);
+            setTimeout(() => {
+                clearInterval(check);
+                resolve();
+            }, 10000);
         });
 
         const helperPort = terminalManager.getHelperPort("survivor");
@@ -165,21 +174,23 @@ describe("E2E Terminal WebSocket Proxy", () => {
             try {
                 const msg = JSON.parse(raw.toString());
                 if (msg.type === "data" || msg.type === "buffer") firstData += msg.data;
-            } catch (e) {}
+            } catch {
+                /* ignore */
+            }
         });
 
-        await new Promise(resolve => setTimeout(resolve, 3000));
+        await new Promise((resolve) => setTimeout(resolve, 3000));
         ws1.close();
         expect(firstData.length).toBeGreaterThan(0);
 
         // Kill the serve process (simulates PTY exit after tournament ends)
         srvProc.kill("SIGKILL");
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise((resolve) => setTimeout(resolve, 2000));
 
         // Helper should still be alive -- new connection should get buffered output
         const ws2 = new WebSocket(`ws://127.0.0.1:${dashboardPort}/terminal/survivor`);
         let bufferData = "";
-        let gotExit = false;
+        let _gotExit = false;
         await new Promise<void>((resolve, reject) => {
             ws2.on("open", resolve);
             ws2.on("error", reject);
@@ -189,11 +200,13 @@ describe("E2E Terminal WebSocket Proxy", () => {
             try {
                 const msg = JSON.parse(raw.toString());
                 if (msg.type === "buffer") bufferData += msg.data;
-                if (msg.type === "exit") gotExit = true;
-            } catch (e) {}
+                if (msg.type === "exit") _gotExit = true;
+            } catch {
+                /* ignore */
+            }
         });
 
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        await new Promise((resolve) => setTimeout(resolve, 2000));
         ws2.close();
 
         // Buffer replay should contain the earlier session data
