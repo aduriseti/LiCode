@@ -92,7 +92,10 @@ def main():
     run_parser.add_argument("--agents", type=int, default=3)
     run_parser.add_argument("--budget", type=float, default=1000.0)
     run_parser.add_argument("--rounds", type=int, default=10)
-    run_parser.add_argument("--timeout", type=float, default=300.0, help="Agent response timeout in seconds")
+    run_parser.add_argument("--timeout", type=float, default=120.0, help="Initial agent response timeout in seconds (doubles on each retry)")
+    run_parser.add_argument("--max-retries", type=int, default=2, help="Max timeout retries per round (default 2 results in 3 attempts: 2m, 4m, 8m)")
+    run_parser.add_argument("--initial-backoff", type=float, default=120.0, help="Deprecated: use --timeout instead")
+    run_parser.add_argument("--max-backoff", type=float, default=1000.0, help="Maximum timeout ceiling in seconds")
     run_parser.add_argument("--api-url", type=str, default="http://127.0.0.1:4096")
     run_parser.add_argument("--model", type=str, default="gemini-3-flash")
     run_parser.add_argument("--provider", type=str, default="opencode")
@@ -150,12 +153,19 @@ def main():
             model=args.model, 
             provider=args.provider, 
             agent_timeout=args.timeout,
-            dashboard=args.dashboard
+            dashboard=args.dashboard,
+            max_retries=args.max_retries,
+            initial_backoff=args.initial_backoff,
+            max_backoff=args.max_backoff
         )
         
         async def run_tournament():
-            await runner.initialize(json_logs=args.json_logs)
-            await runner.run_loop(args.rounds, stream_ui=not args.json_logs, json_logs=args.json_logs)
+            try:
+                await runner.initialize(json_logs=args.json_logs)
+                await runner.run_loop(args.rounds, stream_ui=not args.json_logs, json_logs=args.json_logs)
+            finally:
+                if not args.dashboard:
+                    await runner.close()
 
         asyncio.run(run_tournament())
         

@@ -9,6 +9,8 @@ import io
 import sys
 from collections import deque
 from unittest.mock import MagicMock, patch, AsyncMock
+from opencode_ai.types.event_list_response import EventMessagePartUpdated
+from opencode_ai.types import TextPart
 from market.runner import MarketRunner
 from market.orchestrator import AgentAction, Orchestrator
 from market.core.state import MarketState, MarketAsset, AgentPortfolio
@@ -153,13 +155,49 @@ class IntegrationDashboardTest(unittest.IsolatedAsyncioTestCase):
         mock_client_inst = MockClient.return_value
         mock_client_inst.session.create = AsyncMock(return_value=MagicMock(id="ses_123"))
         mock_client_inst.close = AsyncMock()
-        
-        # Responses: 
+    
+        # Responses content: 
         # Shark 0: bad, then good (retry)
-        res_bad = MagicMock(text="This is not JSON")
-        res_good = MagicMock(text='{"beliefs": {"cand_0": 0.5}}')
-        # We need 2 responses for shark 0 (bad+good) and 1 for shark 1
-        mock_client_inst.session.chat = AsyncMock(side_effect=[res_bad, res_good, res_good])
+        # Shark 1: good
+        contents = ["This is not JSON", '{"beliefs": {"cand_0": 0.5}}', '{"beliefs": {"cand_0": 0.5}}']
+        
+        def create_mock_cm(content_text):
+            mock_event = MagicMock(spec=EventMessagePartUpdated)
+            mock_event.properties = MagicMock()
+            mock_part = MagicMock(spec=TextPart)
+            mock_part.text = content_text
+            mock_part.session_id = "ses_123"
+            mock_part.id = "p1"
+            mock_event.properties.part = mock_part
+            
+            async def mock_iter():
+                yield mock_event
+                
+            mock_stream = MagicMock()
+            mock_stream.parse = AsyncMock(return_value=mock_iter())
+            mock_stream.close = AsyncMock()
+            # Handle AsyncStream iteration
+            mock_stream.__aiter__.side_effect = lambda: mock_iter()
+            
+            return mock_stream
+
+        # Mock event.list()
+        mock_stream = create_mock_cm("") # Generic stream for tracing
+        mock_client_inst.event.list = AsyncMock(return_value=mock_stream)
+
+        # Mock session.messages() - needs to return different things for different calls
+        msg_contents = deque(contents)
+        async def messages_side_effect(*args, **kwargs):
+            c = msg_contents.popleft() if msg_contents else contents[-1]
+            mock_part = MagicMock(spec=TextPart)
+            mock_part.text = c
+            mock_msg = MagicMock()
+            mock_msg.parts = [mock_part]
+            return [mock_msg]
+        
+        mock_client_inst.session.messages = AsyncMock(side_effect=messages_side_effect)
+        
+        mock_client_inst.session.chat = AsyncMock()
 
         # 2. Setup Runner
         runner = MarketRunner(prompt="Test", n_agents=2, budget=100.0)

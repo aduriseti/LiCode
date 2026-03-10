@@ -46,12 +46,21 @@ def get_patch_from_winner(work_dir, report, state_dict):
     max_price = state.get_asset_price(winner_id)
     print(f"Winner identified from state: {winner_id} (Price: {max_price:.1%})")
         
+    # Find the "Initial Baseline" commit
+    res = subprocess.run(
+        ["git", "log", "--grep=Initial Baseline", "--format=%H", "-n", "1"],
+        cwd=code_path, capture_output=True, text=True
+    )
+    baseline_commit = res.stdout.strip()
+    if not baseline_commit:
+        raise Exception("Fatal: Could not find 'Initial Baseline' commit for diff generation.")
+
     # Get the patch
     subprocess.run(["git", "add", "."], cwd=code_path, capture_output=True)
     # Remove problem.md from staging so it's not in the diff
-    subprocess.run(["git", "reset", "problem.md"], cwd=code_path, capture_output=True)
+    subprocess.run(["git", "reset", baseline_commit, "problem.md"], cwd=code_path, capture_output=True)
     
-    diff_res = subprocess.run(["git", "diff", "--cached", "HEAD"], cwd=code_path, capture_output=True, text=True)
+    diff_res = subprocess.run(["git", "diff", "--cached", baseline_commit], cwd=code_path, capture_output=True, text=True)
     return diff_res.stdout
 
 async def run_market_on_instance(instance, args, semaphore):
@@ -152,6 +161,12 @@ async def run_market_on_instance(instance, args, semaphore):
                 market_cmd.extend(["--model", args.model])
             if getattr(args, 'dashboard', False):
                 market_cmd.append("--dashboard")
+            
+            market_cmd.extend([
+                "--max-retries", str(args.max_retries),
+                "--timeout", str(args.initial_backoff),
+                "--max-backoff", str(args.max_backoff)
+            ])
 
             env = os.environ.copy()
             env["PYTHONPATH"] = os.path.abspath(".") 
@@ -261,6 +276,8 @@ def generate_table():
 async def async_main():
     parser = argparse.ArgumentParser(description="Evaluate OpenCode Market on SWE-bench Verified")
     parser.add_argument("--repo", type=str, default="pallets/flask", help="Filter by repo to test a subset (e.g., pallets/flask)")
+    parser.add_argument("--task-ids", type=str, help="Comma-separated list of SWE-bench task IDs to evaluate")
+    parser.add_argument("--dataset", type=str, default="princeton-nlp/SWE-bench_Verified", help="SWE-bench dataset to use (e.g., princeton-nlp/SWE-bench_Verified, princeton-nlp/SWE-bench_Lite)")
     parser.add_argument("--limit", type=int, default=3, help="Max instances to evaluate")
     parser.add_argument("--agents", type=int, default=3, help="Number of market agents")
     parser.add_argument("--rounds", type=int, default=5, help="Number of market rounds")
@@ -272,6 +289,9 @@ async def async_main():
     parser.add_argument("--parallel", type=int, default=3, help="Number of instances to evaluate in parallel during generation.")
     parser.add_argument("--run-eval", action="store_true", help="Automatically run the SWE-bench evaluation harness after generation.")
     parser.add_argument("--eval-workers", type=int, default=2, help="Number of workers for the evaluation harness (Docker containers).")
+    parser.add_argument("--max-retries", type=int, default=2, help="Max retries per round (3 attempts total)")
+    parser.add_argument("--initial-backoff", type=float, default=120.0, help="Initial timeout in seconds")
+    parser.add_argument("--max-backoff", type=float, default=1000.0, help="Maximum timeout ceiling")
     parser.add_argument("--run-id", type=str, help="Unique identifier for this run. Used for folder naming.")
     
     args = parser.parse_args()
@@ -300,15 +320,18 @@ async def async_main():
     if os.path.exists(args.output):
         os.remove(args.output)
 
-    log_print(f"Loading SWE-bench Verified dataset...", style="bold green")
-    ds = await asyncio.to_thread(load_dataset, "princeton-nlp/SWE-bench_Verified", split="test")
+    log_print(f"Loading {args.dataset} dataset...", style="bold green")
+    ds = await asyncio.to_thread(load_dataset, args.dataset, split="test")
     
-    if args.repo:
+    if args.task_ids:
+        target_ids = set(id.strip() for id in args.task_ids.split(","))
+        instances = [i for i in ds if i['instance_id'] in target_ids]
+    elif args.repo:
         instances = [i for i in ds if args.repo in i['repo']]
+        instances = instances[:args.limit]
     else:
-        instances = list(ds)
+        instances = list(ds)[:args.limit]
         
-    instances = instances[:args.limit]
     log_print(f"Found {len(instances)} instances to evaluate. Running with parallelism {args.parallel}")
 
     with status_lock:
@@ -347,9 +370,15 @@ async def async_main():
             "--report_dir", "."
         ]
         log_print(f"Executing: {' '.join(eval_cmd)}")
+        
+        env = os.environ.copy()
+        env["FORCE_COLOR"] = "1"
+        env["TERM"] = "xterm-256color"
+        
         eval_proc = await asyncio.create_subprocess_exec(
             *eval_cmd,
             cwd=output_dir,
+            env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT
         )

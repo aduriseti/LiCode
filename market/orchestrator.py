@@ -21,7 +21,7 @@ class AgentAction:
     beliefs: Dict[str, float] = field(default_factory=dict)
     proposals: List[Dict] = field(default_factory=list) # e.g. {"type": "VERIFIER", "path": "..."}
 
-DEFAULT_EXCLUDE_LIST = [".arenas"]
+DEFAULT_EXCLUDE_LIST = [".arenas", ".home"]
 
 class Orchestrator:
     def __init__(self, prompt: str, n_agents: int, budget: float = 1000.0, state: Optional[MarketState] = None, base_dir: str = "/tmp/market"):
@@ -127,6 +127,15 @@ class Orchestrator:
                 stderr=asyncio.subprocess.PIPE
             )
             await proc.communicate()
+            
+            # 2.5 Ensure exclude_list directories do not pollute agent diffs
+            def update_git_exclude():
+                exclude_path = os.path.join(dest_dir, ".git", "info", "exclude")
+                if os.path.exists(exclude_path):
+                    with open(exclude_path, "a") as f:
+                        for item in self.exclude_list:
+                            f.write(f"\n{item}\n")
+            await asyncio.to_thread(update_git_exclude)
             
             # 3. Overlay Current Work (Modified + Untracked non-ignored files)
             # Use 'git ls-files -co' to find everything we want to sync
@@ -796,20 +805,33 @@ class Orchestrator:
             try:
                 # Stage changes to capture new files
                 subprocess.run("git add .", shell=True, check=True, cwd=winner.code_path, capture_output=True)
-                
-                # Get raw diff
+
+                # Find the "Initial Baseline" commit
+                res = subprocess.run(
+                    ["git", "log", "--grep=Initial Baseline", "--format=%H", "-n", "1"],
+                    cwd=winner.code_path, capture_output=True, text=True
+                )
+                baseline_commit = res.stdout.strip()
+                if not baseline_commit:
+                    lines.append("_Failed to generate diff: Could not find 'Initial Baseline' commit._\n")
+                    return "\n".join(lines)
+
+                # Remove problem.md from staging so it's not in the diff
+                subprocess.run(["git", "reset", baseline_commit, "problem.md"], cwd=winner.code_path, capture_output=True)
+
+                # Get raw diff against baseline
                 result = subprocess.run(
-                    ["git", "diff", "--cached", "HEAD"], 
-                    cwd=winner.code_path, 
-                    capture_output=True, 
+                    ["git", "diff", "--cached", baseline_commit],
+                    cwd=winner.code_path,
+                    capture_output=True,
                     text=True
                 )
-                
+
                 if not result.stdout.strip():
-                     lines.append("_No changes made to the codebase._\n")
-                     # Fallback to solution.py content
-                     main_file = os.path.join(winner.code_path, "solution.py")
-                     if os.path.exists(main_file):
+                    lines.append("_No changes made to the codebase._\n")
+                    # Fallback to solution.py content
+                    main_file = os.path.join(winner.code_path, "solution.py")
+                    if os.path.exists(main_file):
                         with open(main_file, "r") as f:
                             lines.append(f"### Full Content of solution.py\n```python\n{f.read()}\n```\n")
                 else:
@@ -846,7 +868,7 @@ class Orchestrator:
                             processed_diff.extend(current_file_diff)
 
                     lines.append(f"### Proposed Changes (Diff)\n```diff\n" + "\n".join(processed_diff) + "\n```\n")
-                    lines.append("> **Note:** Large diffs are truncated. To view the full diff, run:\n> `cd " + winner.code_path + " && git diff --cached HEAD`\n")
+                    lines.append("> **Note:** Large diffs are truncated. To view the full diff, run:\n> `cd " + winner.code_path + " && git diff --cached " + baseline_commit + "`\n")
 
             except Exception as e:
                 lines.append(f"_Failed to generate diff: {e}_")

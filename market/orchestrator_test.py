@@ -342,6 +342,36 @@ class TestOrchestratorVerifier(unittest.IsolatedAsyncioTestCase):
         vid = self.orchestrator._create_verifier_from_path("agent_0", src_dir)
         self.assertIsNone(vid)
 
+    async def test_clone_workspace_adds_exclude_list(self):
+        """Test that _clone_workspace appends exclude_list items to .git/info/exclude."""
+        dest_dir = os.path.join(self.test_dir, "worktrees", "cand_clone_test")
+        
+        # We need a dummy git repo as the source for clone to succeed
+        src_repo = os.path.join(self.test_dir, "dummy_src")
+        os.makedirs(src_repo, exist_ok=True)
+        import subprocess
+        subprocess.run(["git", "init"], cwd=src_repo, check=True, capture_output=True)
+        with open(os.path.join(src_repo, "file.txt"), "w") as f: f.write("test")
+        subprocess.run(["git", "add", "file.txt"], cwd=src_repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=src_repo, check=True, capture_output=True)
+        
+        # Override the current working directory temporarily during the test to simulate the source
+        original_cwd = os.getcwd()
+        os.chdir(src_repo)
+        try:
+            await self.orchestrator._clone_workspace(dest_dir)
+        finally:
+            os.chdir(original_cwd)
+        
+        exclude_path = os.path.join(dest_dir, ".git", "info", "exclude")
+        self.assertTrue(os.path.exists(exclude_path), ".git/info/exclude should exist")
+        
+        with open(exclude_path, "r") as f:
+            exclude_content = f.read()
+            
+        for item in self.orchestrator.exclude_list:
+            self.assertIn(item, exclude_content, f"{item} should be in .git/info/exclude")
+
 class PermissionsTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.test_dir = tempfile.mkdtemp()

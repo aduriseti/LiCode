@@ -19,6 +19,7 @@ class TestCLI(unittest.TestCase):
         from unittest.mock import AsyncMock
         mock_runner_instance.run_loop = AsyncMock()
         mock_runner_instance.initialize = AsyncMock()
+        mock_runner_instance.close = AsyncMock()
         
         mock_runner_instance.orchestrator.state.to_json.return_value = "{}"
         mock_runner_instance.orchestrator.get_final_report.return_value = "Report"
@@ -29,7 +30,12 @@ class TestCLI(unittest.TestCase):
             main()
             
         # Verify MarketRunner initialized correctly
-        MockRunner.assert_called_with("foo", 3, 1000.0, "http://127.0.0.1:4096", model="gemini-3-flash", provider="opencode", agent_timeout=300.0, dashboard=False)
+        MockRunner.assert_called_with(
+            "foo", 3, 1000.0, "http://127.0.0.1:4096", 
+            model="gemini-3-flash", provider="opencode", 
+            agent_timeout=120.0, dashboard=False,
+            max_retries=2, initial_backoff=120.0, max_backoff=1000.0
+        )
         
         # Verify loop called
         mock_runner_instance.run_loop.assert_called_with(5, stream_ui=True, json_logs=False)
@@ -81,6 +87,7 @@ class TestCLI(unittest.TestCase):
         mock_runner_instance = MockRunner.return_value
         mock_runner_instance.run_loop = AsyncMock()
         mock_runner_instance.initialize = AsyncMock()
+        mock_runner_instance.close = AsyncMock()
         mock_runner_instance.orchestrator.state.to_json.return_value = "{}"
         mock_runner_instance.orchestrator.get_final_report.return_value = "Report"
         
@@ -98,6 +105,7 @@ class TestCLI(unittest.TestCase):
         mock_runner_instance = MockRunner.return_value
         mock_runner_instance.run_loop = AsyncMock()
         mock_runner_instance.initialize = AsyncMock()
+        mock_runner_instance.close = AsyncMock()
         mock_runner_instance.orchestrator.state.to_json.return_value = "{}"
         mock_runner_instance.orchestrator.get_final_report.return_value = "Report"
         
@@ -113,6 +121,7 @@ class TestCLI(unittest.TestCase):
         """Verifies that Dashboard URL hits both stdout (JSON) and stderr (Text) when json_logs=True."""
         mock_runner_instance = MockRunner.return_value
         mock_runner_instance.run_loop = AsyncMock()
+        mock_runner_instance.close = AsyncMock()
         
         # Define a side effect for initialize that logs the URL
         async def mock_initialize(json_logs=False):
