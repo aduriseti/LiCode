@@ -1,8 +1,18 @@
 import json
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Literal
 
 AssetType = Literal["VERIFIER", "CANDIDATE"]
+
+
+class PathEncoder(json.JSONEncoder):
+    """Custom JSON encoder for Path objects."""
+
+    def default(self, obj):
+        if isinstance(obj, Path):
+            return str(obj)
+        return super().default(obj)
 
 
 @dataclass
@@ -91,7 +101,7 @@ class MarketState:
     def to_json(self) -> str:
         data = self.to_dict()
         data["type"] = "state"
-        return json.dumps(data)
+        return json.dumps(data, cls=PathEncoder)
 
     def clone(self):
         """Returns a deep copy of the current state."""

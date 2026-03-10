@@ -1,3 +1,4 @@
+import os
 import unittest
 
 from market.core.state import AgentPortfolio, MarketAsset

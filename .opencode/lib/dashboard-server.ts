@@ -37,7 +37,7 @@ app.use(express.json());
 // State
 const terminalManager = new TerminalManager(io, {
     verbose: true,
-    log: (level, msg) => console.log(`[${level.toUpperCase()}] ${msg}`),
+    log: (level, msg) => log(level, msg),
 });
 setupTerminalProxy(terminalManager);
 
@@ -151,10 +151,10 @@ app.post("/api/agent", (req, res) => {
 
     // Track for cleanup
     try {
-        const port = new URL(api_url).port;
-        if (port) agentServerPorts.add(Number(port));
+        const url = new URL(api_url);
+        if (url.port) agentServerPorts.add(Number(url.port));
     } catch {
-        log("error", `Failed to parse agent URL for cleanup: ${api_url} - ${e}`);
+        log("error", `Failed to parse agent URL for cleanup: ${api_url}`);
     }
 
     sessionToAgent.set(session_id, agent_id);

@@ -43,7 +43,7 @@
 
 
 ## Phase 4: Coverage Expansion (TypeScript)
-- [ ] **Task: Identify low-coverage areas in `.opencode/lib/`**
+- [~] **Task: Identify low-coverage areas in `.opencode/lib/`**
     - [ ] Run initial coverage report for TypeScript code.
     - [ ] Document modules with coverage <80%.
 - [ ] **Task: Write tests for `dashboard-server.ts` and `dashboard.app.ts`**

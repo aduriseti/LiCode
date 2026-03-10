@@ -3,6 +3,8 @@ import { tool, type ToolContext } from "@opencode-ai/plugin/tool";
 import { spawn, type ChildProcess } from "child_process";
 import { type LogEvent } from "../lib/types";
 import open from "open";
+import path from "path";
+import fs from "fs";
 
 export const tournamentPlugin: Plugin = async ({ client, $ }) => {
     return {
@@ -24,8 +26,8 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
                         .describe("The LLM provider ID. MUST be 'opencode' to use credits."),
                     log_level: tool.schema
                         .string()
-                        .default("INFO")
-                        .describe("Logging level (DEBUG, INFO, WARNING, ERROR). Defaults to INFO."),
+                        .default("ERROR")
+                        .describe("Logging level (DEBUG, INFO, WARNING, ERROR). Defaults to ERROR."),
                     timeout: tool.schema
                         .number()
                         .default(300.0)
@@ -37,11 +39,132 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
                     { prompt, rounds, agents, model, provider, log_level, timeout },
                     ctx: ToolContext,
                 ) {
+                    // 1. Start Dashboard Server (Detached)
+                    const dashboardServerPath = path.join(__dirname, "../lib/dashboard-server.ts");
+                    const arenaDir = path.join(process.cwd(), ".arenas"); // Base arenas dir
+                    const dashboardLogPath = path.join(arenaDir, "dashboard.log");
+
+                    // Ensure arena dir exists for the log
+                    if (!fs.existsSync(arenaDir)) fs.mkdirSync(arenaDir, { recursive: true });
+
+                    // Spawn detached process
+                    const dashboardProcess = spawn(
+                        "bun",
+                        [dashboardServerPath, "--log-file", dashboardLogPath],
+                        {
+                            detached: true,
+                            stdio: ["ignore", "pipe", "pipe"], // Capture stdout for port
+                            env: { ...process.env }, // Pass environment variables
+                        },
+                    );
+
+                    let dashboardUrl = "";
+
+                    // Wait for dashboard to print its URL
+                    await new Promise<void>((resolve, reject) => {
+                        let buffer = "";
+                        let resolved = false;
+
+                        const onData = (data: Buffer) => {
+                            buffer += data.toString();
+                            if (buffer.includes("\n")) {
+                                const lines = buffer.split("\n");
+                                for (const line of lines) {
+                                    try {
+                                        const info = JSON.parse(line);
+                                        if (info.url) {
+                                            dashboardUrl = info.url;
+                                            resolved = true;
+                                            resolve();
+                                            return;
+                                        }
+                                    } catch (e) {}
+                                }
+                            }
+                        };
+
+                        dashboardProcess.stdout?.on("data", onData);
+
+                        dashboardProcess.on("error", (err) => {
+                            if (!resolved)
+                                reject(new Error(`Failed to start dashboard: ${err.message}`));
+                        });
+
+                        dashboardProcess.on("exit", (code) => {
+                            if (!resolved)
+                                reject(new Error(`Dashboard exited prematurely with code ${code}`));
+                        });
+
+                        // Timeout after 10s
+                        setTimeout(() => {
+                            if (!resolved) {
+                                try {
+                                    dashboardProcess.kill();
+                                } catch (e) {
+                                    // Use log helper during plugin execution
+                                    console.error(
+                                        `[DASHBOARD-START] Failed to kill process on timeout: ${e}`,
+                                    );
+                                }
+                                reject(new Error("Timeout waiting for dashboard URL"));
+                            }
+                        }, 10000);
+                    });
+
+                    // Forward Dashboard Server stderr to OpenCode logs while plugin is alive
+                    dashboardProcess.stderr?.on("data", (data: Buffer) => {
+                        const lines = data.toString().split("\n");
+                        for (const line of lines) {
+                            if (line.trim()) {
+                                client.app
+                                    .log({
+                                        body: {
+                                            service: "dashboard-server",
+                                            level: "debug",
+                                            message: line.trim(),
+                                        },
+                                    })
+                                    .catch(() => {});
+                            }
+                        }
+                    });
+
+                    // Detach and unref so plugin can exit independently
+                    dashboardProcess.unref();
+
                     const log = (level: "debug" | "info" | "warn" | "error", message: string) => {
                         client.app
                             .log({ body: { service: "tournament-tool", level, message } })
                             .catch(() => {});
                     };
+
+                    log("info", `[DASHBOARD] ${dashboardUrl}`);
+                    const msg: string = `🚀 Live tournament dashboard available at ${dashboardUrl}`;
+
+                    await client.tui.showToast({
+                        body: {
+                            message: `🚀 Opening live tournament dashboard at ${dashboardUrl}`,
+                            variant: "info",
+                        },
+                    });
+
+                    // Give user time to react to toast
+                    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+                    // Auto-open browser using 'open' library
+                    await open(dashboardUrl);
+
+                    // 5. Report URL via Session Prompt (Chat Backup)
+                    await client.session.promptAsync({
+                        path: { id: ctx.sessionID },
+                        body: {
+                            parts: [{ type: "text", text: msg }],
+                            noReply: true,
+                        },
+                    });
+
+                    // Yield to event loop
+                    await new Promise<void>((resolve) => setTimeout(resolve, 2000));
 
                     return new Promise<string>((resolve, reject) => {
                         const env: NodeJS.ProcessEnv = {
@@ -49,13 +172,14 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
                             OPENCODE_API_KEY: process.env.OPENCODE,
                             FORCE_COLOR: "1",
                             PYTHONUNBUFFERED: "1",
+                            DASHBOARD_URL: dashboardUrl,
                         };
 
                         const args: string[] = [
                             "-m",
                             "market.cli",
                             "--log-level",
-                            log_level.toUpperCase(),
+                            log_level,
                             "run",
                             "--prompt",
                             prompt,
@@ -69,7 +193,7 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
                             provider,
                             "--timeout",
                             String(timeout),
-                            "--json-logs",
+                            "--json-logs", // Use JSON logs
                             "--dashboard",
                         ];
 
@@ -77,8 +201,21 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
 
                         let lineBuffer: string = "";
                         let finalReport: string = "No report generated.";
-                        let dashboardUrl: string | null = null;
-                        let cliError: string | null = null;
+
+                        // Helper to send logs to dashboard
+                        const sendToDashboard = (endpoint: string, data: any) => {
+                            fetch(`${dashboardUrl}${endpoint}`, {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify(data),
+                            }).catch((err) => {
+                                // Use the structured logger to avoid corrupting the TUI
+                                log(
+                                    "debug",
+                                    `[DASHBOARD-COMM] Failed to send to ${endpoint}: ${err.message}`,
+                                );
+                            });
+                        };
 
                         child.stdout?.on("data", (data: Buffer) => {
                             const chunk: string = data.toString();
@@ -94,54 +231,33 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
                                         const event: LogEvent | Record<string, unknown> =
                                             JSON.parse(line);
 
-                                        if (event.type === "error") {
-                                            cliError = String(event.message);
-                                            log("error", `[CLI ERROR] ${cliError}`);
-                                        }
-
-                                        if (
-                                            event.type === "log" &&
-                                            typeof event.message === "string" &&
-                                            event.message.startsWith("Dashboard active at ")
-                                        ) {
-                                            dashboardUrl = event.message
-                                                .replace("Dashboard active at ", "")
-                                                .trim();
-                                            const msg = `🚀 Live tournament dashboard available at ${dashboardUrl}`;
-
-                                            log("info", `[DASHBOARD] ${dashboardUrl}`);
-
-                                            Promise.all([
-                                                client.tui.showToast({
-                                                    body: {
-                                                        message: `🚀 Opening live tournament dashboard at ${dashboardUrl}`,
-                                                        variant: "info",
-                                                    },
-                                                }),
-                                                open(dashboardUrl),
-                                                client.session.promptAsync({
-                                                    path: { id: ctx.sessionID },
-                                                    body: {
-                                                        parts: [{ type: "text", text: msg }],
-                                                        noReply: true,
-                                                    },
-                                                }),
-                                            ]).catch((err) =>
-                                                log(
-                                                    "debug",
-                                                    `UI Notification failed: ${err.message}`,
-                                                ),
-                                            );
-                                        }
-
                                         if (
                                             event.type === "final_result" &&
                                             typeof event.report === "string"
                                         ) {
                                             finalReport = event.report;
+                                            sendToDashboard("/api/log", {
+                                                type: "log",
+                                                message: "Tournament Finished. Processing results...",
+                                            });
+                                        } else if (event.type === "agent_init") {
+                                            // Register agent with Dashboard Server
+                                            sendToDashboard("/api/agent", event);
+                                            sendToDashboard("/api/log", event);
+                                        } else {
+                                            sendToDashboard("/api/log", event);
                                         }
                                     } catch (e: unknown) {
-                                        log("info", `[PYTHON STDOUT] ${line}`);
+                                        const err = e as Error;
+                                        client.app
+                                            .log({
+                                                body: {
+                                                    service: "tournament-tool",
+                                                    level: "debug",
+                                                    message: `Failed to parse JSON: ${err.message}`,
+                                                },
+                                            })
+                                            .catch(() => {});
                                     }
                                 }
                             }
@@ -149,22 +265,24 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
 
                         child.stderr?.on("data", (data: Buffer) => {
                             const msg: string = data.toString();
-                            log("error", `[PYTHON STDERR] ${msg}`);
+                            sendToDashboard("/api/log", { type: "log", message: `[STDERR] ${msg}` });
                         });
 
                         child.on("close", async (code: number | null) => {
-                            let resultMsg =
+                            sendToDashboard("/api/log", {
+                                type: "log",
+                                message:
+                                    "Tournament finished. Dashboard and agent sessions remain active for exploration.",
+                            });
+
+                            const resultMsg =
                                 code !== 0
-                                    ? `Market crashed (Exit Code ${code})`
-                                    : `${finalReport}`;
+                                    ? `Market crashed (Exit Code ${code})\nDashboard remains active at ${dashboardUrl}`
+                                    : `${finalReport}\n\nDashboard remains active at ${dashboardUrl}`;
 
-                            if (cliError) {
-                                resultMsg = `Failed to start tournament: ${cliError}`;
-                            }
-
-                            if (dashboardUrl) {
-                                resultMsg += `\n\nDashboard remains active at ${dashboardUrl}`;
-                            }
+                            // Resolve immediately so the invoking agent can apply results.
+                            // The dashboard server stays alive in the background for the user
+                            // to explore sessions; it self-closes when all clients disconnect.
                             resolve(resultMsg);
                         });
 

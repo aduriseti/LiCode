@@ -67,8 +67,9 @@ export class TerminalManager {
             try {
                 existing?.proc.kill();
             } catch {
-                this.log("warn", `[TERMINAL] Failed to kill existing helper for ${agentId}: ${e}`);
+                this.log("warn", `[TERMINAL] Failed to kill existing helper for ${agentId}`);
             }
+
             this.helpers.delete(agentId);
         }
 

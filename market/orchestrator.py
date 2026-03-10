@@ -1,3 +1,4 @@
+import os
 import asyncio
 import hashlib
 import json
@@ -9,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from market.core.lmsr import LMSRMarket
-from market.core.state import AgentPortfolio, MarketAsset, MarketBond, MarketState
+from market.core.state import AgentPortfolio, MarketAsset, MarketBond, MarketState, PathEncoder
 from market.core.strategy import Strategy
 from market.logic.oracle import Oracle
 from market.logic.whale import Whale
@@ -26,7 +27,7 @@ DEFAULT_EXCLUDE_LIST = [".arenas", ".home"]
 
 
 class Orchestrator:
-    def __init__(self, prompt: str, n_agents: int, **kwargs):
+    def __init__(self, prompt: str, n_agents: int, budget: float = 1000.0, **kwargs):
         self.base_dir = Path(kwargs.get("base_dir", "/tmp/market"))
         self.worktrees_dir = self.base_dir / "worktrees"
         self.verifiers_dir = self.base_dir / "verifiers"
@@ -40,7 +41,7 @@ class Orchestrator:
         self.verifiers_dir.chmod(0o755)
 
         self.n_agents = n_agents
-        self.budget = kwargs.get("budget", 1000.0)
+        self.budget = budget
         self.prompt = prompt
         self.exclude_list = DEFAULT_EXCLUDE_LIST
 
@@ -685,7 +686,7 @@ class Orchestrator:
 
         # Deterministic ID based on content of run.sh + (test.py if exists)
         # This is a simplification; ideally hash all files.
-        content_hash = hashlib.md5(json.dumps(files, sort_keys=True).encode()).hexdigest()[:8]
+        content_hash = hashlib.md5(json.dumps(files, cls=PathEncoder, sort_keys=True).encode()).hexdigest()[:8]
         vid = f"v_{content_hash}"
 
         if vid in self.state.assets:

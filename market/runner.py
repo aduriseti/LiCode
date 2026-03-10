@@ -7,9 +7,12 @@ import socket
 import statistics
 import sys
 import time
+import subprocess
 from collections import deque
+from urllib.parse import urlparse as new_urlparse
 
 from .agents.shark import Shark
+from .core.state import MarketState, PathEncoder
 from .orchestrator import Orchestrator
 
 
@@ -176,7 +179,8 @@ class MarketRunner:
         if json_logs:
             print(
                 json.dumps(
-                    {"type": "log", "message": f"Tournament Arena initialized at: {rel_path}"}
+                    {"type": "log", "message": f"Tournament Arena initialized at: {rel_path}"},
+                    cls=PathEncoder,
                 )
             )
             sys.stdout.flush()
@@ -184,7 +188,14 @@ class MarketRunner:
             print(f"Tournament Arena initialized at: {rel_path}")
         logging.info(f"Tournament Arena initialized at: {rel_path}")
 
-        if self.dashboard:
+        # Check if dashboard is already provided via environment (e.g. by OpenCode plugin)
+        env_dash_url = os.environ.get("DASHBOARD_URL")
+        if env_dash_url:
+            self.dashboard_url = env_dash_url
+            self.dashboard = True
+            logging.info(f"Using existing dashboard at {self.dashboard_url}")
+
+        if self.dashboard and not self.dashboard_url:
             port = self._find_free_port()
             self.dashboard_url = f"http://localhost:{port}"
 
@@ -242,10 +253,15 @@ class MarketRunner:
             if self.main_loop and self.main_loop.is_running():
                 self.main_loop.create_task(dashboard_heartbeat())
 
+        if self.dashboard_url:
             # Wait for ready (Increased to 150 attempts @ 0.1s = 15s)
+            parsed_url = new_urlparse(self.dashboard_url)
+            port = parsed_url.port or 80
+            host = parsed_url.hostname or "127.0.0.1"
+
             for _ in range(150):
                 try:
-                    _, writer = await asyncio.open_connection("127.0.0.1", port)
+                    _, writer = await asyncio.open_connection(host, port)
                     writer.close()
                     await writer.wait_closed()
 
@@ -264,7 +280,8 @@ class MarketRunner:
             if json_logs:
                 print(
                     json.dumps(
-                        {"type": "log", "message": f"Dashboard active at {self.dashboard_url}"}
+                        {"type": "log", "message": f"Dashboard active at {self.dashboard_url}"},
+                        cls=PathEncoder,
                     )
                 )
                 sys.stdout.flush()
@@ -334,7 +351,7 @@ class MarketRunner:
                 "arena_dir": self.arena_dir,
             }
             if json_logs:
-                print(json.dumps(event))
+                print(json.dumps(event, cls=PathEncoder))
                 sys.stdout.flush()
 
             await self._send_to_dashboard("/api/agent", event)
@@ -358,7 +375,8 @@ class MarketRunner:
 
         # Emit Initial State
         if json_logs:
-            print(json.dumps({"type": "state", **json.loads(self.orchestrator.state.to_json())}))
+            state_data = json.loads(self.orchestrator.state.to_json())
+            print(json.dumps({"type": "state", **state_data}, cls=PathEncoder))
             sys.stdout.flush()
 
         # Write session map
@@ -436,11 +454,13 @@ class MarketRunner:
         # Validate and serialize configuration
         config_obj = Config(**config_data)
         # Use model_dump to avoid Pydantic v2 serialization issues with Mocks in tests
-        config_json = json.dumps(config_obj.model_dump(exclude_none=True, by_alias=True))
+        config_json = json.dumps(
+            config_obj.model_dump(exclude_none=True, by_alias=True), cls=PathEncoder
+        )
 
         # Use OPENCODE_CONFIG_CONTENT as it has higher precedence in some opencode versions
         # OPENCODE_PERMISSION should be the JSON string of the permission object
-        env["OPENCODE_PERMISSION"] = json.dumps(permission_data)
+        env["OPENCODE_PERMISSION"] = json.dumps(permission_data, cls=PathEncoder)
         env["OPENCODE_CONFIG_CONTENT"] = config_json
 
         # Enable raw LLM interaction tracing (prompts and completions)
@@ -518,7 +538,12 @@ class MarketRunner:
                 # 1. Collect Actions in Parallel
                 logging.info(f"Round {i + 1}: Collecting agent actions...")
                 if json_logs:
-                    print(json.dumps({"type": "log", "message": f"Starting Round {i + 1}"}))
+                    print(
+                        json.dumps(
+                            {"type": "log", "message": f"Starting Round {i + 1}"},
+                            cls=PathEncoder,
+                        )
+                    )
                     sys.stdout.flush()
 
                 tasks = []
@@ -556,7 +581,8 @@ class MarketRunner:
                     if json_logs:
                         print(
                             json.dumps(
-                                {"type": "log", "message": f"Convergence reached at round {i + 1}"}
+                                {"type": "log", "message": f"Convergence reached at round {i + 1}"},
+                                cls=PathEncoder,
                             )
                         )
                         sys.stdout.flush()
@@ -574,7 +600,7 @@ class MarketRunner:
                 "report": self.orchestrator.get_final_report(),
             }
             if json_logs:
-                print(json.dumps(output))
+                print(json.dumps(output, cls=PathEncoder))
                 sys.stdout.flush()
 
             await self._send_to_dashboard(

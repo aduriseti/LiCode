@@ -45,7 +45,7 @@ The value of a subarray is defined as sumArr * (sumArr + 1) / 2, where sumArr is
                     if (ocProcess?.pid) {
                         try {
                             process.kill(-ocProcess.pid, "SIGKILL");
-                        } catch {
+                        } catch (_e) {
                             /* ignore */
                         }
                     }
@@ -132,11 +132,11 @@ The value of a subarray is defined as sumArr * (sumArr + 1) / 2, where sumArr is
                     if (expectedContent.length > 0) {
                         await agentTab!.click();
                     }
-                } catch {
+                } catch (_e) {
                     console.error(
                         `[TEST FAIL] Failure while waiting for agent tab (${name}). Full log output:\n${fullOutput}`,
                     );
-                    throw e;
+                    throw _e;
                 }
 
                 // If we have expected content, verify it
