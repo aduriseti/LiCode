@@ -117,7 +117,10 @@ class Orchestrator:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            await proc.communicate()
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                logging.error(f"Git clone failed (code {proc.returncode}): {stderr.decode()}")
+                raise RuntimeError(f"Failed to clone workspace: {stderr.decode()}")
             
             # 2. Safety: Remove origin
             proc = await asyncio.create_subprocess_exec(
@@ -126,7 +129,10 @@ class Orchestrator:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            await proc.communicate()
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                 logging.error(f"Failed to remove origin (code {proc.returncode}): {stderr.decode()}")
+                 # Not fatal, but concerning
             
             # 2.5 Ensure exclude_list directories do not pollute agent diffs
             def update_git_exclude():

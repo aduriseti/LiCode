@@ -10,12 +10,18 @@ import time
 import threading
 import math
 import webbrowser
+from dotenv import load_dotenv
+
+# Load environment variables from .env if it exists
+load_dotenv()
+
 from rich.live import Live
 from rich.table import Table
 from rich.console import Console
 from rich import box
 from market.orchestrator import Orchestrator, DEFAULT_EXCLUDE_LIST
 from market.core.state import MarketState
+from market.core import docker
 
 try:
     from datasets import load_dataset
@@ -39,7 +45,15 @@ def get_patch_from_winner(work_dir, report, state_dict):
         
     winner_asset = state.assets.get(winner_id)
     code_path = winner_asset.code_path
-    if not code_path or not os.path.exists(code_path):
+    if not code_path:
+        print(f"No code_path in winner asset.")
+        return None
+        
+    # Map container-side /testbed paths back to the host work_dir
+    if code_path.startswith("/testbed"):
+        code_path = os.path.join(work_dir, code_path.replace("/testbed", "").lstrip("/"))
+        
+    if not os.path.exists(code_path):
         print(f"Winner code_path {code_path} not found.")
         return None
     
@@ -131,6 +145,34 @@ async def run_market_on_instance(instance, args, semaphore):
             with open(problem_path, "w") as f:
                 f.write(problem_statement)
 
+            update_status("Resolving Docker Image")
+            image_name = docker.get_image_name(instance_id)
+            await docker.pull_image(image_name)
+            
+            update_status("Starting Container")
+            # Mount the current LiCode root to /licode
+            licode_host_path = os.path.abspath(".")
+            opencode_host_path = os.path.expanduser("~/.opencode")
+            container_id = await docker.start_container(image_name, work_dir, licode_host_path, opencode_host_path)
+
+            update_status("Bootstrapping Dependencies")
+            # 1. Fix Git Ownership (Necessary for cloning mounted volumes)
+            # Use '*' to allow all mounted directories to be treated as safe
+            git_safe_proc = await asyncio.create_subprocess_exec(
+                "docker", "exec", container_id, "git", "config", "--global", "--add", "safe.directory", "*",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await git_safe_proc.communicate()
+
+            # 2. Install LiCode Deps in base env
+            bootstrap_proc = await asyncio.create_subprocess_exec(
+                "docker", "exec", container_id, "/opt/miniconda3/bin/pip", "install", "-r", "/licode/requirements.txt",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await bootstrap_proc.communicate()
+
             if args.dummy:
                 update_status("Dummy Mode: Returning Empty Patch")
                 await asyncio.sleep(1)
@@ -148,16 +190,24 @@ async def run_market_on_instance(instance, args, semaphore):
             log_file_path = os.path.join(log_dir, f"{instance_id}.log")
 
             market_cmd = [
-                sys.executable, "-m", "market.cli", "run",
+                "docker", "exec", "-w", "/testbed",
+                "-e", "PYTHONPATH=/licode",
+                "-e", "PATH=/.opencode/bin:/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "-e", f"OPENAI_API_KEY={os.environ.get('OPENAI_API_KEY', '')}",
+                "-e", f"ANTHROPIC_API_KEY={os.environ.get('ANTHROPIC_API_KEY', '')}",
+                "-e", f"GEMINI_API_KEY={os.environ.get('GEMINI_API_KEY', '')}",
+                "-e", f"OPENCODE_API_KEY={os.environ.get('OPENCODE_API_KEY', '')}",
+                container_id,
+                "/opt/miniconda3/bin/python3", "-m", "market.cli", "run",
                 "--prompt", f"Fix the bug described in problem.md.",
                 "--agents", str(args.agents),
                 "--rounds", str(args.rounds),
                 "--json-logs"
             ]
 
-            if args.provider:
+            if getattr(args, 'provider', None):
                 market_cmd.extend(["--provider", args.provider])
-            if args.model:
+            if getattr(args, 'model', None):
                 market_cmd.extend(["--model", args.model])
             if getattr(args, 'dashboard', False):
                 market_cmd.append("--dashboard")
@@ -168,59 +218,69 @@ async def run_market_on_instance(instance, args, semaphore):
                 "--max-backoff", str(args.max_backoff)
             ])
 
-            env = os.environ.copy()
-            env["PYTHONPATH"] = os.path.abspath(".") 
-
             data = None
-            with open(log_file_path, "w") as log_file:
-                process = await asyncio.create_subprocess_exec(
-                    *market_cmd,
-                    cwd=work_dir,
-                    env=env,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                    limit=1024 * 1024 * 32,
-                )
+            try:
+                with open(log_file_path, "w") as log_file:
+                    process = await asyncio.create_subprocess_exec(
+                        *market_cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
+                        limit=1024 * 1024 * 32,
+                    )
 
-                while True:
-                    line_bytes = await process.stdout.readline()
-                    if not line_bytes:
-                        break
-                    line = line_bytes.decode('utf-8', errors='replace')
-                    log_file.write(line)
-                    log_file.flush()
-                    
-                    if not line.strip():
-                        continue
-                    try:
-                        msg = json.loads(line)
-                        if msg.get("type") == "log":
-                            text = msg.get("message", "")
-                            if text.startswith("Dashboard active at "):
-                                url = text.replace("Dashboard active at ", "").strip()
-                                with status_lock:
-                                    status_map[instance_id]["dashboard_url"] = url
+                    while True:
+                        line_bytes = await process.stdout.readline()
+                        if not line_bytes:
+                            break
+                        line = line_bytes.decode('utf-8', errors='replace')
+                        log_file.write(line)
+                        log_file.flush()
+                        
+                        if not line.strip():
+                            continue
+                        try:
+                            msg = json.loads(line)
+                            if msg.get("type") == "log":
+                                text = msg.get("message", "")
+                                if text.startswith("Dashboard active at "):
+                                    url = text.replace("Dashboard active at ", "").strip()
+                                    with status_lock:
+                                        status_map[instance_id]["dashboard_url"] = url
 
-                                # Re-issue the official signal back to the parent terminal.
-                                sys.stderr.write(f"\nDashboard active at {url}\n")
-                                sys.stderr.flush()
-                            elif "Starting Round" in text:
-                                update_status(text)
-                            elif "Convergence reached" in text:
-                                update_status("Convergence Detected")
-                        elif msg.get("type") == "final_result" or ("state" in msg and "report" in msg):
-                            data = msg
-                    except json.JSONDecodeError:
-                        continue
+                                    # Re-issue the official signal back to the parent terminal.
+                                    sys.stderr.write(f"\nDashboard active at {url}\n")
+                                    sys.stderr.flush()
+                                elif "Starting Round" in text:
+                                    update_status(text)
+                                elif "Convergence reached" in text:
+                                    update_status("Convergence Detected")
+                            elif msg.get("type") == "final_result" or ("state" in msg and "report" in msg):
+                                data = msg
+                        except json.JSONDecodeError:
+                            continue
 
-                await process.wait()
-                if process.returncode != 0:
-                    update_status(f"Market Failed (Code {process.returncode})")
-                    return None
+                    await process.wait()
+                    if process.returncode != 0:
+                        update_status(f"Market Failed (Code {process.returncode})")
+                        return None
+            except Exception as e:
+                update_status(f"Error during market execution: {str(e)}")
+                return None
 
             if not data:
                 update_status("Extraction Failed: No Final Output")
                 return None
+
+            update_status("Fixing Permissions for Host")
+            # Change ownership of /testbed contents back to the host user
+            # so the host git can read/write the arena worktrees.
+            uid, gid = os.getuid(), os.getgid()
+            chown_proc = await asyncio.create_subprocess_exec(
+                "docker", "exec", container_id, "chown", "-R", f"{uid}:{gid}", "/testbed",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await chown_proc.communicate()
 
             update_status("Extracting Patch from Winner")
             # FS ops are quick but we can offload if needed. Git diff is in get_patch_from_winner.
@@ -239,6 +299,9 @@ async def run_market_on_instance(instance, args, semaphore):
         except Exception as e:
             update_status(f"Error: {str(e)}")
             return None
+        finally:
+            if 'container_id' in locals():
+                await docker.stop_container(container_id)
 
 def generate_table():
     table = Table(title="OpenCode Market: SWE-bench Evaluation", box=box.ROUNDED)

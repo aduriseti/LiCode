@@ -342,23 +342,22 @@ class MarketRunner:
         if not os.path.exists(agent_dir):
             os.makedirs(agent_dir, exist_ok=True)
         
-        real_home = os.path.expanduser('~')
-        real_auth = os.path.join(real_home, ".local/share/opencode/auth.json")
-        
         # Sandbox HOME inside the candidate worktree
         agent_home = os.path.join(agent_dir, ".home")
-        arena_auth_dir = os.path.join(agent_home, ".local/share/opencode")
-        os.makedirs(arena_auth_dir, exist_ok=True)
+        os.makedirs(agent_home, exist_ok=True)
         
-        if os.path.exists(real_auth):
-            arena_auth_path = os.path.join(arena_auth_dir, "auth.json")
-            if not os.path.exists(arena_auth_path):
-                try:
-                    os.symlink(real_auth, arena_auth_path)
-                except FileExistsError:
-                    pass
-        
+        # Environment setup
         env = os.environ.copy()
+        
+        # Ensure API keys are correctly mapped for different providers
+        if "GEMINI_API_KEY" in env and "GOOGLE_GENERATIVE_AI_API_KEY" not in env:
+            env["GOOGLE_GENERATIVE_AI_API_KEY"] = env["GEMINI_API_KEY"]
+            
+        # Ensure /.opencode/bin is in the PATH if we are in a container
+        if "/.opencode/bin" in env.get("PATH", "") or os.path.exists("/.opencode/bin"):
+            if "/.opencode/bin" not in env.get("PATH", ""):
+                env["PATH"] = f"/.opencode/bin:{env.get('PATH', '')}"
+        
         env["HOME"] = agent_home
         env["PORT"] = str(port)
         
