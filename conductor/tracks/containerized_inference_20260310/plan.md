@@ -19,8 +19,15 @@
 - [x] Task: Conductor - User Manual Verification 'Orchestration Refactor' (Protocol in workflow.md)
 
 #### Phase 3: Validation & Cleanup
-- [ ] Task: End-to-End Validation
+- [~] Task: End-to-End Validation
     - [ ] Verify `astropy__astropy-13033` passes `pytest` (confirming `setuptools_scm` access)
     - [ ] Verify `django__django-13195` string formatting matches container expectations
     - [ ] Verify zero container leakage on process interruption
+- [ ] Task: Fix OpenCode Agent Startup Authentication
+    - [ ] Remove hardcoded `~/.local/share/opencode/auth.json` symlink logic from `market/runner.py`
+    - [ ] Ensure `OPENCODE_API_KEY` is passed via `docker exec` in `evaluate_swe_bench.py`
+- [ ] Task: Implement Centralized .env Configuration
+    - [ ] Create `.env.example` with standard LLM and OpenCode config placeholders
+    - [ ] Add `python-dotenv` to `requirements.txt`
+    - [ ] Integrate `load_dotenv()` into `evaluate_swe_bench.py` and `market/cli.py`
 - [ ] Task: Conductor - User Manual Verification 'Validation & Cleanup' (Protocol in workflow.md)
