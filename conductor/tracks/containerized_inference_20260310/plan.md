@@ -9,14 +9,14 @@
 - [x] Task: Conductor - User Manual Verification 'Docker Infrastructure' (Protocol in workflow.md)
 
 #### Phase 2: Orchestration Refactor
-- [ ] Task: Update `evaluate_swe_bench.py` to manage containerized tournaments
-    - [ ] Write integration test for container lifecycle in evaluation flow
-    - [ ] Integrate container start/stop into the `run_market_on_instance` loop
-    - [ ] Implement the `Bootstrap` step (pip install LiCode deps inside container)
-- [ ] Task: Modify tournament execution to use `docker exec`
-    - [ ] Write test verifying command routing to container
-    - [ ] Refactor market command generation to use `docker exec` with mounted paths
-- [ ] Task: Conductor - User Manual Verification 'Orchestration Refactor' (Protocol in workflow.md)
+- [x] Task: Update `evaluate_swe_bench.py` to manage containerized tournaments f3e45d3
+    - [x] Write integration test for container lifecycle in evaluation flow
+    - [x] Integrate container start/stop into the `run_market_on_instance` loop
+    - [x] Implement the `Bootstrap` step (pip install LiCode deps inside container)
+- [x] Task: Modify tournament execution to use `docker exec` f3e45d3
+    - [x] Write test verifying command routing to container
+    - [x] Refactor market command generation to use `docker exec` with mounted paths
+- [x] Task: Conductor - User Manual Verification 'Orchestration Refactor' (Protocol in workflow.md)
 
 #### Phase 3: Validation & Cleanup
 - [ ] Task: End-to-End Validation
