@@ -1,12 +1,12 @@
 ### Implementation Plan: Containerized Inference for SWE-bench
 
-#### Phase 1: Docker Infrastructure
+#### Phase 1: Docker Infrastructure [checkpoint: fde9264]
 - [x] Task: Implement `market/core/docker.py` for image resolution and container management b78a59a
-    - [ ] Create unit tests for `get_image_name` (strict x86_64 resolution)
-    - [ ] Implement image resolution using Epoch research GHCR pattern
-    - [ ] Create tests for container start/stop/exec wrappers
-    - [ ] Implement Docker lifecycle wrappers using `subprocess`
-- [ ] Task: Conductor - User Manual Verification 'Docker Infrastructure' (Protocol in workflow.md)
+    - [x] Create unit tests for `get_image_name` (strict x86_64 resolution)
+    - [x] Implement image resolution using Epoch research GHCR pattern
+    - [x] Create tests for container start/stop/exec wrappers
+    - [x] Implement Docker lifecycle wrappers using `subprocess`
+- [x] Task: Conductor - User Manual Verification 'Docker Infrastructure' (Protocol in workflow.md)
 
 #### Phase 2: Orchestration Refactor
 - [ ] Task: Update `evaluate_swe_bench.py` to manage containerized tournaments
