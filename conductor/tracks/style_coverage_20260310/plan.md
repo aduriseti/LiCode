@@ -15,7 +15,7 @@
 - [x] **Task: Conductor - User Manual Verification 'Phase 1: Tooling Configuration' (Protocol in workflow.md)** 82e1ac9
 
 ## Phase 2: Linting & Formatting Alignment
-- [ ] **Task: Apply Ruff auto-fixes and manual corrections to Python codebase**
+- [~] **Task: Apply Ruff auto-fixes and manual corrections to Python codebase**
     - [ ] Run `ruff check --fix` on `market/`.
     - [ ] Manually fix any remaining errors.
     - [ ] Run `ruff format` on `market/`.

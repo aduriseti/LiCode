@@ -1,13 +1,15 @@
+import asyncio
 import os
 import sys
-import pytest
-import asyncio
-from unittest.mock import patch, MagicMock
 from argparse import Namespace
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 # Add project root to sys.path so we can import evaluate_swe_bench
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import evaluate_swe_bench
+
 
 @pytest.mark.asyncio
 async def test_run_market_dummy_mode(tmp_path):
@@ -16,12 +18,12 @@ async def test_run_market_dummy_mode(tmp_path):
     creates the workspace, writes the problem, and returns an empty patch.
     """
     instance = {
-        'instance_id': 'test_repo__test_issue-123',
-        'repo': 'test/repo',
-        'base_commit': 'abcdef123456',
-        'problem_statement': 'Fix the bug.'
+        "instance_id": "test_repo__test_issue-123",
+        "repo": "test/repo",
+        "base_commit": "abcdef123456",
+        "problem_statement": "Fix the bug.",
     }
-    
+
     args = Namespace(
         dummy=True,
         agents=3,
@@ -31,109 +33,120 @@ async def test_run_market_dummy_mode(tmp_path):
         output=str(tmp_path / "run_folder" / "predictions.jsonl"),
         max_retries=3,
         initial_backoff=120.0,
-        max_backoff=1000.0
+        max_backoff=1000.0,
     )
-    
+
     semaphore = asyncio.Semaphore(1)
-    
+
     # Patch subprocess utilities
-    with patch('evaluate_swe_bench.asyncio.create_subprocess_exec') as mock_exec:
+    with patch("evaluate_swe_bench.asyncio.create_subprocess_exec") as mock_exec:
         # Mock git clone/checkout processes
         mock_proc = MagicMock()
-        mock_proc.communicate = MagicMock(side_effect=lambda: asyncio.sleep(0)) # Lambda returning coroutine
+        mock_proc.communicate = MagicMock(
+            side_effect=lambda: asyncio.sleep(0)
+        )  # Lambda returning coroutine
         mock_proc.wait = MagicMock(side_effect=lambda: asyncio.sleep(0))
-        
+
         async def mock_communicate():
             return b"", b""
+
         mock_proc.communicate = mock_communicate
-        
+
         mock_exec.return_value = mock_proc
-        
+
         # Patch the base path for workspaces to use tmp_path
         original_abspath = os.path.abspath
+
         def mock_abspath(path):
             if "run_folder" in path:
                 return str(tmp_path / "run_folder" / "predictions.jsonl")
             return original_abspath(path)
-            
-        with patch('evaluate_swe_bench.os.path.abspath', side_effect=mock_abspath):
+
+        with patch("evaluate_swe_bench.os.path.abspath", side_effect=mock_abspath):
             result = await evaluate_swe_bench.run_market_on_instance(instance, args, semaphore)
-            
+
             # 1. Assert correct result format
             assert result is not None
-            assert result['instance_id'] == 'test_repo__test_issue-123'
-            assert result['model_patch'] == ''
-            assert result['model_name_or_path'] == 'dummy-test-agent'
-            
+            assert result["instance_id"] == "test_repo__test_issue-123"
+            assert result["model_patch"] == ""
+            assert result["model_name_or_path"] == "dummy-test-agent"
+
             # 2. Verify the workspace directory was created
             workspace_dir = tmp_path / "run_folder" / "workspaces" / "test_repo__test_issue-123"
             assert workspace_dir.exists()
-            assert (workspace_dir / 'problem.md').exists()
-            with open(workspace_dir / 'problem.md', 'r') as f:
-                assert f.read() == 'Fix the bug.'
+            assert (workspace_dir / "problem.md").exists()
+            with open(workspace_dir / "problem.md") as f:
+                assert f.read() == "Fix the bug."
+
 
 from rich.table import Table
+
 
 def test_generate_table():
     """
     Test that the generate_table function correctly processes the global status_map.
     """
     import time
+
     # Clear and populate the global status_map for the test
     evaluate_swe_bench.status_map.clear()
-    
+
     start = time.time()
     evaluate_swe_bench.status_map["test-issue-1"] = {
         "status": "Running Round 1",
         "start_time": start - 10,
         "stages": [
             {"name": "Cloning", "start_time": start - 10, "duration": 5},
-            {"name": "Starting Round 1", "start_time": start - 5, "duration": 0}
-        ]
+            {"name": "Starting Round 1", "start_time": start - 5, "duration": 0},
+        ],
     }
-    
+
     table = evaluate_swe_bench.generate_table()
-    
+
     # 1. Assert it's a rich Table object
     assert isinstance(table, Table)
     assert table.title == "OpenCode Market: SWE-bench Evaluation"
-    
+
     # 2. Verify columns and presence of data
     assert len(table.columns) == 5
     # Rich table data is not easily accessible via public API without rendering,
     # but we can check if it runs without error and has the title we expect.
+
 
 def test_generate_table_dynamic_updates():
     """
     Test that generate_table reflects real-time changes in status_map.
     """
     import time
+
     evaluate_swe_bench.status_map.clear()
-    
+
     # 1. Start with an empty map
     table = evaluate_swe_bench.generate_table()
     assert table.row_count == 0
-    
+
     # 2. Add an item and verify it appears
     evaluate_swe_bench.status_map["issue-1"] = {
         "status": "Test Status",
         "start_time": time.time(),
-        "stages": []
+        "stages": [],
     }
     table = evaluate_swe_bench.generate_table()
     assert table.row_count == 1
-    
+
     # 3. Verify it works as a callable (Option A)
     from rich.live import Live
+
     with Live(get_renderable=evaluate_swe_bench.generate_table, refresh_per_second=1):
         evaluate_swe_bench.status_map["issue-2"] = {
             "status": "Another Status",
             "start_time": time.time(),
-            "stages": []
+            "stages": [],
         }
         # Just verifying it doesn't crash when called by Live
         final_table = evaluate_swe_bench.generate_table()
         assert final_table.row_count == 2
+
 
 def test_get_patch_from_winner(tmp_path):
     """
@@ -151,13 +164,14 @@ def test_get_patch_from_winner(tmp_path):
                 "description": "desc",
                 "code_path": str(tmp_path),
                 "q_yes": 500.0,
-                "q_no": 0.0
+                "q_no": 0.0,
             }
         },
-        "agents": {}
+        "agents": {},
     }
-    
-    with patch('evaluate_swe_bench.subprocess.run') as mock_run:
+
+    with patch("evaluate_swe_bench.subprocess.run") as mock_run:
+
         def mock_run_side_effect(cmd, **kwargs):
             m = MagicMock()
             if cmd[1] == "log":
@@ -167,20 +181,34 @@ def test_get_patch_from_winner(tmp_path):
             else:
                 m.stdout = ""
             return m
-            
+
         mock_run.side_effect = mock_run_side_effect
-        
+
         patch_text = evaluate_swe_bench.get_patch_from_winner(str(tmp_path), report, state)
-        
+
         assert patch_text == "diff --git a/test.py b/test.py\n+print('fixed')"
-        
+
         # Verify the correct git commands were called
-        mock_run.assert_any_call(["git", "log", "--grep=Initial Baseline", "--format=%H", "-n", "1"], cwd=str(tmp_path), capture_output=True, text=True)
+        mock_run.assert_any_call(
+            ["git", "log", "--grep=Initial Baseline", "--format=%H", "-n", "1"],
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+        )
         mock_run.assert_any_call(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
-        mock_run.assert_any_call(["git", "reset", "abc123baseline", "problem.md"], cwd=str(tmp_path), capture_output=True)
-        mock_run.assert_any_call(["git", "diff", "--cached", "abc123baseline"], cwd=str(tmp_path), capture_output=True, text=True)
+        mock_run.assert_any_call(
+            ["git", "reset", "abc123baseline", "problem.md"], cwd=str(tmp_path), capture_output=True
+        )
+        mock_run.assert_any_call(
+            ["git", "diff", "--cached", "abc123baseline"],
+            cwd=str(tmp_path),
+            capture_output=True,
+            text=True,
+        )
+
 
 import json
+
 
 @pytest.mark.asyncio
 async def test_run_market_protocol_fix(tmp_path):
@@ -189,77 +217,76 @@ async def test_run_market_protocol_fix(tmp_path):
     even if the "type": "final_result" tag is missing, as long as "state" and "report" are present.
     """
     instance = {
-        'instance_id': 'test_repo__test_issue-456',
-        'repo': 'test/repo',
-        'base_commit': 'abcdef123456',
-        'problem_statement': 'Fix the bug.'
+        "instance_id": "test_repo__test_issue-456",
+        "repo": "test/repo",
+        "base_commit": "abcdef123456",
+        "problem_statement": "Fix the bug.",
     }
-    
+
     args = Namespace(
         dummy=False,
         agents=1,
         rounds=1,
-        provider='test-provider',
-        model='test-model',
+        provider="test-provider",
+        model="test-model",
         output=str(tmp_path / "run_folder" / "predictions.jsonl"),
         dashboard=False,
         max_retries=3,
         initial_backoff=120.0,
-        max_backoff=1000.0
+        max_backoff=1000.0,
     )
     semaphore = asyncio.Semaphore(1)
-    
+
     # Mock data with the "state" and "report" but NO "type": "final_result" tag
     mock_output = {
         "state": {"round_num": 1, "assets": {"winner": {"type": "CANDIDATE", "code_path": "/tmp"}}},
-        "report": "**Winner:** winner"
+        "report": "**Winner:** winner",
     }
-    
-    with patch('evaluate_swe_bench.asyncio.create_subprocess_exec') as mock_exec, \
-         patch('evaluate_swe_bench.get_patch_from_winner', return_value="fake-patch"):
-        
+
+    with (
+        patch("evaluate_swe_bench.asyncio.create_subprocess_exec") as mock_exec,
+        patch("evaluate_swe_bench.get_patch_from_winner", return_value="fake-patch"),
+    ):
         # We need three mocks for clone, checkout, and market run
         async def mock_async_none():
             return None
-        
+
         mock_clone = MagicMock()
         mock_clone.communicate = mock_async_none
         mock_clone.wait = mock_async_none
         mock_clone.returncode = 0
-        
+
         mock_checkout = MagicMock()
         mock_checkout.communicate = mock_async_none
         mock_checkout.wait = mock_async_none
         mock_checkout.returncode = 0
-        
+
         mock_market = MagicMock()
         mock_market.wait = mock_async_none
         mock_market.returncode = 0
-        
+
         # Setup market stdout
         mock_stdout = MagicMock()
         lines = [
             json.dumps({"type": "log", "message": "Starting Round 1"}).encode() + b"\n",
             json.dumps(mock_output).encode() + b"\n",
-            b"" # EOF
+            b"",  # EOF
         ]
-        
+
         async def mock_readline():
             if not lines:
                 return b""
             return lines.pop(0)
-        
+
         mock_stdout.readline = mock_readline
         mock_market.stdout = mock_stdout
-        
+
         mock_exec.side_effect = [mock_clone, mock_checkout, mock_market]
-        
+
         # Patch directory operations
-        with patch('evaluate_swe_bench.os.makedirs'), \
-             patch('evaluate_swe_bench.open', MagicMock()):
-            
+        with patch("evaluate_swe_bench.os.makedirs"), patch("evaluate_swe_bench.open", MagicMock()):
             result = await evaluate_swe_bench.run_market_on_instance(instance, args, semaphore)
-            
+
             assert result is not None
-            assert result['instance_id'] == 'test_repo__test_issue-456'
-            assert result['model_patch'] == 'fake-patch'
+            assert result["instance_id"] == "test_repo__test_issue-456"
+            assert result["model_patch"] == "fake-patch"

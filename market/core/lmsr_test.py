@@ -1,9 +1,10 @@
-import unittest
 import math
+import unittest
+
 from market.core.lmsr import LMSRMarket
 
-class TestLMSRMarket(unittest.TestCase):
 
+class TestLMSRMarket(unittest.TestCase):
     def test_cost_function_initial_state(self):
         """Test cost is b * ln(2) when q_yes = q_no = 0"""
         b = 100.0
@@ -32,16 +33,16 @@ class TestLMSRMarket(unittest.TestCase):
         b = 100.0
         q_yes = 0
         q_no = 0
-        
+
         # Initial price
         p0 = LMSRMarket.current_price(q_yes, q_no, b)
         self.assertEqual(p0, 0.5)
-        
+
         # Buy 10 YES shares
         q_yes += 10
         p1 = LMSRMarket.current_price(q_yes, q_no, b)
         self.assertTrue(p1 > 0.5)
-        
+
         # Buy 100 more YES shares
         q_yes += 100
         p2 = LMSRMarket.current_price(q_yes, q_no, b)
@@ -54,7 +55,7 @@ class TestLMSRMarket(unittest.TestCase):
         p_high = LMSRMarket.current_price(1000, 0, b)
         self.assertTrue(p_high <= 1.0)
         self.assertAlmostEqual(p_high, 1.0, places=4)
-        
+
         # Extreme NO favor
         p_low = LMSRMarket.current_price(0, 1000, b)
         self.assertTrue(p_low >= 0.0)
@@ -66,12 +67,12 @@ class TestLMSRMarket(unittest.TestCase):
         q_yes = 10
         q_no = 20
         delta = 5
-        
+
         # Calculate expected manually
         c_before = LMSRMarket.cost_function(q_yes, q_no, b)
         c_after = LMSRMarket.cost_function(q_yes + delta, q_no, b)
         expected_cost = c_after - c_before
-        
+
         calc_cost = LMSRMarket.calculate_trade_cost(q_yes, q_no, b, delta, True)
         self.assertAlmostEqual(calc_cost, expected_cost, places=5)
 
@@ -87,18 +88,23 @@ class TestLMSRMarket(unittest.TestCase):
         q_yes = 0.0
         q_no = 0.0
         target_cost = 50.0
-        
+
         # Calculate how many shares we can buy for 50 credits
         dq = LMSRMarket.calculate_delta_q(q_yes, q_no, b, target_cost, is_yes_share=True)
-        
+
         # Verify that the cost of buying dq shares is exactly target_cost
-        actual_cost = LMSRMarket.cost_function(q_yes + dq, q_no, b) - LMSRMarket.cost_function(q_yes, q_no, b)
+        actual_cost = LMSRMarket.cost_function(q_yes + dq, q_no, b) - LMSRMarket.cost_function(
+            q_yes, q_no, b
+        )
         self.assertAlmostEqual(actual_cost, target_cost, places=5)
-        
+
         # Test for NO shares
         dq_no = LMSRMarket.calculate_delta_q(q_yes, q_no, b, target_cost, is_yes_share=False)
-        actual_cost_no = LMSRMarket.cost_function(q_yes, q_no + dq_no, b) - LMSRMarket.cost_function(q_yes, q_no, b)
+        actual_cost_no = LMSRMarket.cost_function(
+            q_yes, q_no + dq_no, b
+        ) - LMSRMarket.cost_function(q_yes, q_no, b)
         self.assertAlmostEqual(actual_cost_no, target_cost, places=5)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()
