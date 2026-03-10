@@ -70,7 +70,9 @@ class MarketRunner:
         self.orchestrator = Orchestrator(prompt, n_agents, budget, base_dir=os.path.abspath(os.path.join("./.arenas", self.run_id)))
         self.arena_dir = self.orchestrator.base_dir
         self.sessions_dir = os.path.join(self.arena_dir, "sessions")
+        self.traces_dir = os.path.join(self.arena_dir, "traces")
         os.makedirs(self.sessions_dir, exist_ok=True)
+        os.makedirs(self.traces_dir, exist_ok=True)
         
         self.sharks: Dict[str, Shark] = {}
         self.agent_servers: Dict[str, asyncio.subprocess.Process] = {}
@@ -243,7 +245,10 @@ class MarketRunner:
 
             # 2. Initialize Shark
             log_path = os.path.join(self.sessions_dir, f"{aid}.log")
-            shark = Shark(aid, model=self.model, provider=self.provider, api_url=agent_url, log_path=log_path, timeout=self.agent_timeout)
+            cand_id = aid.replace("agent", "cand")
+            trace_path = os.path.join(self.traces_dir, f"{cand_id}_stream.txt")
+            
+            shark = Shark(aid, model=self.model, provider=self.provider, api_url=agent_url, log_path=log_path, timeout=self.agent_timeout, trace_path=trace_path)
             self.sharks[aid] = shark
             
             # 3. Create Session
@@ -380,11 +385,17 @@ class MarketRunner:
         env["OPENCODE_PERMISSION"] = json.dumps(permission_data)
         env["OPENCODE_CONFIG_CONTENT"] = config_json
         
-        agent_log = os.path.join(agent_dir, "opencode_serve.log")
+        # Enable raw LLM interaction tracing (prompts and completions)
+        env["DEBUG"] = "opencode:provider:*"
+        env["OPENCODE_LOG"] = "debug"
+        env["PYTHONUNBUFFERED"] = "1"
+        
+        agent_log = os.path.join(self.traces_dir, f"{cand_id}_opencode_serve.log")
         
         with open(agent_log, "w") as f:
             proc = await asyncio.create_subprocess_exec(
                 "opencode", "serve", "--port", str(port), "--hostname=127.0.0.1",
+                "--print-logs", "--log-level", "DEBUG",
                 stdout=f,
                 stderr=f,
                 cwd=agent_dir,

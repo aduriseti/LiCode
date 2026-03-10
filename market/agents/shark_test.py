@@ -4,10 +4,54 @@ import asyncio
 import os
 import io
 import json
-from market.agents.shark import Shark, LLMResponseError
+from market.agents.shark import Shark, LLMResponseError, FatalAgentError
+from opencode_ai.types import (
+    TextPart,
+    ToolPart,
+    ToolStateRunning,
+    ToolStateCompleted
+)
+from opencode_ai.types.event_list_response import EventMessagePartUpdated
 from market.core.state import MarketState, MarketAsset, AgentPortfolio
 
 class SharkTest(unittest.IsolatedAsyncioTestCase):
+
+    def setUp(self):
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+
+    def tearDown(self):
+        self.loop.close()
+
+    def setup_mock_stream(self, MockClient, content_text):
+        # 1. Mock event.list() for tracing
+        mock_event = MagicMock(spec=EventMessagePartUpdated)
+        mock_event.properties = MagicMock()
+        mock_part = MagicMock(spec=TextPart)
+        mock_part.text = content_text
+        mock_part.session_id = "ses_123"
+        mock_part.id = "p1"
+        mock_event.properties.part = mock_part
+        
+        async def mock_iter():
+            yield mock_event
+            
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.side_effect = lambda: mock_iter()
+        mock_stream.close = AsyncMock()
+        
+        # AsyncOpencode() instance
+        client_inst = MockClient.return_value
+        client_inst.event.list = AsyncMock(return_value=mock_stream)
+        client_inst.close = AsyncMock()
+        
+        # 2. Mock session.chat()
+        client_inst.session.chat = AsyncMock()
+        
+        # 3. Mock session.messages() for content retrieval
+        mock_msg_item = MagicMock()
+        mock_msg_item.parts = [mock_part]
+        client_inst.session.messages = AsyncMock(return_value=[mock_msg_item])
 
     @patch('market.agents.shark.subprocess.run')
     @patch('market.agents.shark.asyncio.create_subprocess_shell') # Mock shell for git add
@@ -138,119 +182,235 @@ class SharkTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("--- cand_0 Diff ---", prompt)
         self.assertIn("(No changes from baseline)", prompt)
 
-class TestSharkActionParsing(unittest.TestCase):
+class TestSharkActionParsing(unittest.IsolatedAsyncioTestCase):
+
+    def setup_mock_stream(self, MockClient, content_text):
+        # 1. Mock event.list() for tracing
+        mock_event = MagicMock(spec=EventMessagePartUpdated)
+        mock_event.properties = MagicMock()
+        mock_part = MagicMock(spec=TextPart)
+        mock_part.text = content_text
+        mock_part.session_id = "ses_123"
+        mock_part.id = "p1"
+        mock_event.properties.part = mock_part
+        
+        async def mock_iter():
+            yield mock_event
+            
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.side_effect = lambda: mock_iter()
+        mock_stream.close = AsyncMock()
+        
+        # AsyncOpencode() instance
+        client_inst = MockClient.return_value
+        client_inst.event.list = AsyncMock(return_value=mock_stream)
+        client_inst.close = AsyncMock()
+        
+        # 2. Mock session.chat()
+        client_inst.session.chat = AsyncMock()
+        
+        # 3. Mock session.messages() for content retrieval
+        mock_msg_item = MagicMock()
+        mock_msg_item.parts = [mock_part]
+        client_inst.session.messages = AsyncMock(return_value=[mock_msg_item])
 
     @patch('market.agents.shark.AsyncOpencode')
-    def test_parsing_success_markdown(self, MockClient):
+    async def test_parsing_success_markdown(self, MockClient):
         # Mock successful JSON in markdown
-        mock_response = MagicMock()
-        mock_response.text = 'Some reasoning... ```json\n{"beliefs": {"cand_0": 0.9}, "proposals": []}\n```'
+        self.setup_mock_stream(MockClient, 'Some reasoning... ```json\n{"beliefs": {"cand_0": 0.9}, "proposals": []}\n```')
         
         mock_session = MagicMock()
         mock_session.id = "ses_123"
-        
-        mock_client_instance = MockClient.return_value
-        mock_client_instance.session.create = AsyncMock(return_value=mock_session)
-        mock_client_instance.session.chat = AsyncMock(return_value=mock_response)
+        MockClient.return_value.session.create = AsyncMock(return_value=mock_session)
 
         state = MarketState(round_num=1, liquidity_b=100.0)
         shark = Shark("agent_0")
         
-        # Use run_until_complete for async in sync test
-        loop = asyncio.new_event_loop()
-        action = loop.run_until_complete(shark.get_action(state))
-        loop.close()
+        action = await shark.get_action(state)
         self.assertEqual(action.beliefs["cand_0"], 0.9)
 
     @patch('market.agents.shark.AsyncOpencode')
-    def test_parsing_success_raw(self, MockClient):
+    async def test_parsing_success_raw(self, MockClient):
         # Mock successful raw JSON
-        mock_response = MagicMock()
-        mock_response.text = '{"beliefs": {"cand_0": 0.8}, "proposals": []}'
+        self.setup_mock_stream(MockClient, '{"beliefs": {"cand_0": 0.8}, "proposals": []}')
         
         mock_session = MagicMock()
         mock_session.id = "ses_123"
-        
-        mock_client_instance = MockClient.return_value
-        mock_client_instance.session.create = AsyncMock(return_value=mock_session)
-        mock_client_instance.session.chat = AsyncMock(return_value=mock_response)
+        MockClient.return_value.session.create = AsyncMock(return_value=mock_session)
 
         state = MarketState(round_num=1, liquidity_b=100.0)
         shark = Shark("agent_0")
         
-        loop = asyncio.new_event_loop()
-        action = loop.run_until_complete(shark.get_action(state))
-        loop.close()
+        action = await shark.get_action(state)
         self.assertEqual(action.beliefs["cand_0"], 0.8)
 
     @patch('market.agents.shark.AsyncOpencode')
-    def test_parsing_failure_no_json(self, MockClient):
+    async def test_parsing_failure_no_json(self, MockClient):
         # Mock blabber with no JSON
-        mock_response = MagicMock()
-        mock_response.text = 'I am thinking about Fibonacci but I will not give you JSON today.'
+        self.setup_mock_stream(MockClient, 'I am thinking about Fibonacci but I will not give you JSON today.')
         
         mock_session = MagicMock()
         mock_session.id = "ses_123"
-        
-        mock_client_instance = MockClient.return_value
-        mock_client_instance.session.create = AsyncMock(return_value=mock_session)
-        mock_client_instance.session.chat = AsyncMock(return_value=mock_response)
+        MockClient.return_value.session.create = AsyncMock(return_value=mock_session)
 
         state = MarketState(round_num=1, liquidity_b=100.0)
         shark = Shark("agent_0")
         
-        loop = asyncio.new_event_loop()
-        # We expect fallback Action after all self-correction attempts fail
-        async def run_test():
-            # Mock the chat method to consistently return non-JSON content
-            shark._chat_with_network_retry = AsyncMock(return_value=mock_response.text)
-            action = await shark.get_action(state)
-            self.assertEqual(action.agent_id, "agent_0")
-            self.assertEqual(action.beliefs, {})
-            self.assertEqual(action.proposals, [])
-    
-        loop.run_until_complete(run_test())
-        loop.close()
+        # We expect FatalAgentError after all self-correction attempts fail
+        with self.assertRaises(FatalAgentError):
+            await shark.get_action(state)
 
     @patch('market.agents.shark.AsyncOpencode')
-    def test_parsing_malformed_json_recovery(self, MockClient):
+    async def test_parsing_malformed_json_recovery(self, MockClient):
         # Mock malformed JSON that has a valid block inside
-        mock_response = MagicMock()
-        mock_response.text = 'Here is a list: { "item": 1 } and here is the real answer: {"beliefs": {"cand_0": 0.5}}'
+        self.setup_mock_stream(MockClient, 'Here is a list: { "item": 1 } and here is the real answer: {"beliefs": {"cand_0": 0.5}}')
         
         mock_session = MagicMock()
         mock_session.id = "ses_123"
-        
-        mock_client_instance = MockClient.return_value
-        mock_client_instance.session.create = AsyncMock(return_value=mock_session)
-        mock_client_instance.session.chat = AsyncMock(return_value=mock_response)
+        MockClient.return_value.session.create = AsyncMock(return_value=mock_session)
 
         state = MarketState(round_num=1, liquidity_b=100.0)
         shark = Shark("agent_0")
         
-        loop = asyncio.new_event_loop()
-        action = loop.run_until_complete(shark.get_action(state))
-        loop.close()
+        action = await shark.get_action(state)
         self.assertEqual(action.beliefs["cand_0"], 0.5)
 
     @patch('market.agents.shark.AsyncOpencode')
-    def test_get_action_fallback_on_exception(self, MockClient):
+    async def test_get_action_fallback_on_exception(self, MockClient):
         # Mock successful session creation but chat raises an Exception
         mock_session = MagicMock()
         mock_session.id = "ses_123"
-        
+
         mock_client_instance = MockClient.return_value
         mock_client_instance.session.create = AsyncMock(return_value=mock_session)
-        mock_client_instance.session.chat = AsyncMock(side_effect=Exception("Random unhandled crash"))
+
+        # Mock context manager to raise exception
+        mock_cm = AsyncMock()
+        mock_cm.__aenter__.side_effect = Exception("API error")
+        mock_client_instance.session.with_streaming_response.chat.return_value = mock_cm
 
         state = MarketState(round_num=1, liquidity_b=100.0)
         shark = Shark("agent_0")
+
+        # Verify it raises FatalAgentError
+        with self.assertRaises(FatalAgentError):
+            await shark.get_action(state)
+
+class TestSharkTraceLogging(unittest.IsolatedAsyncioTestCase):
+
+    @patch('market.agents.shark.AsyncOpencode')
+    @patch('market.agents.shark.open', new_callable=mock_open)
+    async def test_chat_logs_prompt(self, mock_file, MockClient):
+        shark = Shark("agent_0", trace_path="/tmp/trace.txt")
+        shark.session = MagicMock()
+        shark.session.id = "ses_123"
+
+        # 1. Mock event.list()
+        mock_event = MagicMock(spec=EventMessagePartUpdated)
+        mock_event.properties = MagicMock()
+        mock_part = MagicMock(spec=TextPart)
+        mock_part.text = '{"beliefs": {}}'
+        mock_part.session_id = "ses_123"
+        mock_part.id = "p1"
+        mock_event.properties.part = mock_part
+
+        async def mock_iter():
+            yield mock_event
+            
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.side_effect = lambda: mock_iter()
+        mock_stream.close = AsyncMock()
         
-        loop = asyncio.new_event_loop()
-        action = loop.run_until_complete(shark.get_action(state))
-        loop.close()
+        client_inst = MockClient.return_value
+        client_inst.event.list = AsyncMock(return_value=mock_stream)
+        client_inst.close = AsyncMock()
         
-        # Verify it falls back to an empty action without bubbling the exception
-        self.assertEqual(action.agent_id, "agent_0")
-        self.assertEqual(action.beliefs, {})
-        self.assertEqual(action.proposals, [])
+        # 2. Mock session.chat()
+        client_inst.session.chat = AsyncMock()
+        
+        # 3. Mock session.messages()
+        mock_msg_item = MagicMock()
+        mock_msg_item.parts = [mock_part]
+        client_inst.session.messages = AsyncMock(return_value=[mock_msg_item])
+
+        await shark._chat_with_network_retry("Hello")
+
+        # Verify prompt was written to trace
+        found_prompt = False
+        # mock_file.call_args_list contains calls to open()
+        handle = mock_file()
+        for write_call in handle.write.call_args_list:
+            if "[PROMPT]\nHello" in write_call[0][0]:
+                found_prompt = True
+
+        self.assertTrue(found_prompt)
+
+    @patch('market.agents.shark.AsyncOpencode')
+    @patch('market.agents.shark.open', new_callable=mock_open)
+    async def test_capture_sse_events_tool_calls(self, mock_file, MockClient):
+        shark = Shark("agent_0", trace_path="/tmp/trace.txt")
+        shark.session = MagicMock()
+        shark.session.id = "ses_123"
+
+        # 1. Mock SSE stream events
+        mock_event_before = MagicMock(spec=EventMessagePartUpdated)
+        mock_event_before.type = 'message.part.updated'
+        mock_event_before.properties = MagicMock()
+        mock_part_before = MagicMock(spec=ToolPart)
+        mock_part_before.type = "tool"
+        mock_part_before.tool = "run_bash"
+        mock_part_before.session_id = "ses_123"
+        mock_part_before.id = "p_tool"
+        mock_part_before.state = MagicMock(spec=ToolStateRunning)
+        mock_part_before.state.status = "running"
+        mock_part_before.state.input = "ls"
+        mock_event_before.properties.part = mock_part_before
+
+        mock_event_after = MagicMock(spec=EventMessagePartUpdated)
+        mock_event_after.type = 'message.part.updated'
+        mock_event_after.properties = MagicMock()
+        mock_part_after = MagicMock(spec=ToolPart)
+        mock_part_after.type = "tool"
+        mock_part_after.tool = "run_bash"
+        mock_part_after.session_id = "ses_123"
+        mock_part_after.id = "p_tool"
+        mock_part_after.state = MagicMock(spec=ToolStateCompleted)
+        mock_part_after.state.status = "completed"
+        mock_part_after.state.output = "file.txt"
+        mock_event_after.properties.part = mock_part_after
+
+        # For the final retrieval, we need a text part
+        mock_part_text = MagicMock(spec=TextPart)
+        mock_part_text.text = '{"beliefs": {}}'
+
+        async def mock_iter():
+            yield mock_event_before
+            yield mock_event_after
+            
+        mock_stream = AsyncMock()
+        mock_stream.__aiter__.side_effect = lambda: mock_iter()
+        mock_stream.close = AsyncMock()
+        
+        client_inst = MockClient.return_value
+        client_inst.event.list = AsyncMock(return_value=mock_stream)
+        client_inst.close = AsyncMock()
+        
+        # 2. Mock session.chat()
+        client_inst.session.chat = AsyncMock()
+        
+        # 3. Mock session.messages()
+        mock_msg_item = MagicMock()
+        mock_msg_item.parts = [mock_part_before, mock_part_after, mock_part_text]
+        client_inst.session.messages = AsyncMock(return_value=[mock_msg_item])
+
+        # Run the chat logic (which now captures events in-line)
+        await shark._chat_with_network_retry("test prompt")
+
+        # Verify all events were written
+        written_content = ""
+        handle = mock_file()
+        for call in handle.write.call_args_list:
+            written_content += call[0][0]
+
+        self.assertIn("[TOOL CALL: run_bash(ls)]", written_content)
+        self.assertIn("[TOOL RESULT: file.txt]", written_content)

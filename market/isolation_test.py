@@ -109,10 +109,17 @@ class TestIsolationRegression(unittest.IsolatedAsyncioTestCase):
                 env = kwargs.get("env", {})
                 self.assertIn("OPENCODE_PERMISSION", env)
                 self.assertIn("OPENCODE_CONFIG_CONTENT", env)
+                self.assertEqual(env.get("DEBUG"), "opencode:provider:*")
+                self.assertEqual(env.get("OPENCODE_LOG"), "debug")
                 
                 # Check permission object
                 perms_raw = json.loads(env["OPENCODE_PERMISSION"])
                 self.assertEqual(perms_raw["external_directory"], "deny")
+                
+                # Check log file path in traces directory
+                self.assertTrue(runner.traces_dir.endswith("traces"))
+                log_path = os.path.join(runner.traces_dir, "cand_0_opencode_serve.log")
+                self.assertEqual(kwargs.get("stdout").name, log_path)
 
     async def test_runner_config_plumbing(self):
         """Verifies model_id and provider_id are injected into agent servers."""

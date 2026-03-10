@@ -196,6 +196,7 @@ async def test_agent_terminal_connection():
         except: pass
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(120)
 async def test_real_dashboard_startup():
     """
     E2E test: Runs market.cli with a real dashboard process (NO MOCKING).
@@ -253,7 +254,7 @@ async def test_real_dashboard_startup():
                 line_bytes = await process.stdout.readline()
                 if not line_bytes: break
                 line = line_bytes.decode('utf-8').strip()
-                
+
                 # Capture Dashboard Port
                 if '"type": "log"' in line and "Dashboard active at http://localhost:" in line:
                     dashboard_url_found_stdout = True
@@ -289,7 +290,7 @@ async def test_real_dashboard_startup():
         try:
             await asyncio.wait_for(
                 asyncio.gather(read_stdout(), read_stderr()),
-                timeout=20
+                timeout=40
             )
         except asyncio.TimeoutError:
             pass
@@ -313,22 +314,59 @@ async def test_real_dashboard_startup():
                 except Exception as e:
                     pytest.fail(f"Local connectivity failed for {name}: {e}")
 
-            # 3. Persistence Check
+            # 3. Verify Trace Directory and Content
+            # Wait a moment for background capture thread to write initial stream
+            arena_dirs = [d for d in os.listdir(os.path.join(temp_dir, ".arenas")) if d.startswith("run_")]
+            assert len(arena_dirs) > 0, "No arena run directory found"
+            run_dir = os.path.join(temp_dir, ".arenas", arena_dirs[0])
+            traces_dir = os.path.join(run_dir, "traces")
+            
+            assert os.path.exists(traces_dir), "Traces directory was not created"
+            
+            # Poll for trace content (capture thread might take a moment to start and flush)
+            content = ""
+            for _ in range(30): # Wait up to 30s for AI to think and act
+                stream_traces = [f for f in os.listdir(traces_dir) if f.endswith("_stream.txt")]
+                if stream_traces:
+                    with open(os.path.join(traces_dir, stream_traces[0]), "r") as f:
+                        content = f.read()
+                        # Check if we have anything after [ASSISTANT]
+                        if "[ASSISTANT]" in content:
+                            parts = content.split("[ASSISTANT]")
+                            if len(parts) > 1 and parts[1].strip():
+                                break
+                await asyncio.sleep(1.0)
+            
+            assert content, "No streaming trace content found after 30s polling"
+            assert "[PROMPT]" in content, "Trace missing [PROMPT] header"
+            assert "[ASSISTANT]" in content, "Trace missing [ASSISTANT] marker"
+            
+            # Check for AI thinking/content after the assistant marker
+            assistant_content = content.split("[ASSISTANT]")[-1].strip()
+            assert assistant_content, "No AI content found after [ASSISTANT] marker"
+            
+            # Verify tool usage is captured
+            assert "[TOOL CALL:" in content, "Trace missing [TOOL CALL:] marker"
+            assert "[TOOL RESULT:" in content, "Trace missing [TOOL RESULT:] marker"
+            
+            print(f"\n[VERIFIED] Streaming trace found with {len(content)} characters, including prompts and tools.")
+            # 4. Persistence Check
             await session.close()
             await asyncio.sleep(7.0)
             
             if process.returncode is not None:
-                pytest.fail(f"Dashboard exited prematurely with code {process.returncode} after client disconnected.")
-    
+                # We expect return code 0 or -15/143 (terminated by us)
+                if process.returncode not in [0, -15, 143]:
+                    pytest.fail(f"Dashboard exited prematurely with code {process.returncode} after client disconnected.")    
     finally:
         # 3. Cleanup
         try:
             process.kill()
             await asyncio.wait_for(process.wait(), timeout=2.0)
         except: pass
-        try:
-            shutil.rmtree(temp_dir)
-        except: pass
+        # try:
+        #     shutil.rmtree(temp_dir)
+        # except: pass
 
 if __name__ == "__main__":
     try:

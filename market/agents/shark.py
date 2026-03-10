@@ -4,8 +4,16 @@ import os
 import sys
 import subprocess
 import asyncio
+import threading
 from typing import Dict, Any, Optional
 from opencode_ai import AsyncOpencode, APITimeoutError, APIConnectionError
+from opencode_ai.types import (
+    TextPart, 
+    ToolPart,
+    ToolStateRunning,
+    ToolStateCompleted
+)
+from opencode_ai.types.event_list_response import EventMessagePartUpdated
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type, before_sleep_log
 
 from ..core.state import MarketState
@@ -21,15 +29,20 @@ class LLMResponseError(Exception):
     """Raised when the LLM returns an invalid or non-JSON response."""
     pass
 
+class FatalAgentError(Exception):
+    """Raised for critical agent failures that should stop the tournament."""
+    pass
+
 class Shark:
     """
     An Inductive Agent (Shark) powered by an LLM via OpenCode API.
     """
-    def __init__(self, agent_id: str, model: str = "gemini-3-flash", provider: str = "opencode", api_url: str = "http://127.0.0.1:4096", log_path: Optional[str] = None, timeout: float = 300.0):
+    def __init__(self, agent_id: str, model: str = "gemini-3-flash", provider: str = "opencode", api_url: str = "http://127.0.0.1:4096", log_path: Optional[str] = None, timeout: float = 300.0, trace_path: Optional[str] = None):
         self.agent_id = agent_id
         self.model = model
         self.provider = provider
         self.log_path = log_path
+        self.trace_path = trace_path
         # Initialize Async OpenCode client
         # Disable internal retries so Tenacity handles it with logging
         self.client = AsyncOpencode(base_url=api_url, timeout=timeout, max_retries=0)
@@ -114,6 +127,18 @@ You must output a single JSON object.
 }}
 """
 
+    def _append_to_trace(self, content: str):
+        """Helper for thread-safe file appending."""
+        if not self.trace_path:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.trace_path), exist_ok=True)
+            with open(self.trace_path, "a") as f:
+                f.write(content)
+                f.flush()
+        except Exception:
+            pass
+
     async def get_action(self, state: MarketState) -> AgentAction:
         """
         Analyzes the market state and returns an action.
@@ -125,8 +150,9 @@ You must output a single JSON object.
             # 1. Generate full state prompt ONCE
             current_prompt = await self._format_state_prompt(state)
             
-            # 2. Self-correction loop
-            for attempt in range(3): # Up to 3 attempts at correction
+            # 2. Self-correction loop (max 3 attempts)
+            last_error = None
+            for attempt in range(3):
                 try:
                     # Call API with retry only for transient network/timeout errors
                     content = await self._chat_with_network_retry(current_prompt)
@@ -137,18 +163,19 @@ You must output a single JSON object.
                 except LLMResponseError as e:
                     if attempt == 2: # Last attempt failed
                         logging.error(f"Shark {self.agent_id} failed after 3 attempts: {e}")
-                        # Return empty action as fallback
-                        return AgentAction(agent_id=self.agent_id)
+                        raise FatalAgentError(f"Shark {self.agent_id} failed to provide valid JSON after 3 attempts: {e}")
                     
                     # 4. Propagate error to agent for self-correction
-                    # We send a short error message instead of resending the 10KB state
                     logging.warning(f"Shark {self.agent_id} parsing failed. Sending error back for correction (Attempt {attempt+1}/3)")
                     current_prompt = f"ERROR: Your previous response was invalid: {str(e)}\nPlease provide your updated beliefs and proposals in the correct JSON format."
             
-            return AgentAction(agent_id=self.agent_id) # Final fallback
-        except Exception as e:
-            logging.error(f"Shark {self.agent_id} failed to get action: {e}")
             return AgentAction(agent_id=self.agent_id)
+            
+        except FatalAgentError:
+            raise
+        except Exception as e:
+            logging.error(f"Shark {self.agent_id} critical failure: {e}")
+            raise FatalAgentError(f"Shark {self.agent_id} experienced a critical failure: {e}")
 
     @retry(
         retry=retry_if_exception_type((APITimeoutError, APIConnectionError)), # Only retry transient network/hangs
@@ -158,42 +185,105 @@ You must output a single JSON object.
         before_sleep=log_retry_attempt()
     )
     async def _chat_with_network_retry(self, prompt: str) -> str:
-        """Performs the actual API call with transient error handling."""
+        """Sends a message to the OpenCode session with network-level retries."""
         logging.info(f"Shark {self.agent_id} calling API...")
-        
         if not self.session:
-            raise RuntimeError("Session not initialized")
-
-        response = await self.client.session.chat(
-            id=self.session.id,
-            model_id=self.model,
-            provider_id=self.provider,
-            system=self.system_prompt,
-            parts=[{"type": "text", "text": prompt}]
-        )
-        
-        # Log interaction for debugging
-        self._log_interaction(prompt, response)
-        
-        content = getattr(response, "text", "") or getattr(response, "content", "")
-        # Handle cases where response is not as expected
-        if not content:
-            parts = getattr(response, "parts", [])
-            if parts:
-                extracted_parts = []
-                for p in parts: # type: ignore
-                    text = p.get("text") if isinstance(p, dict) else getattr(p, "text", None)
-                    if text: extracted_parts.append(text)
-                content = "".join(extracted_parts)
-
-        if not content:
-            # Empty response is now a Category 1 error (Self-correction)
-            info = getattr(response, "info", {})
-            if isinstance(info, dict) and "error" in info:
-                 raise LLMResponseError(f"API Error Info: {info['error']}")
-            raise LLMResponseError("Received empty response content.")
+            await self.initialize_session()
             
-        return content
+        # Log prompt to trace
+        if self.trace_path:
+            await asyncio.to_thread(self._append_to_trace, f"\n\n[PROMPT]\n{prompt}\n\n[ASSISTANT]\n")
+
+        # Track part states for trace logging
+        part_lengths = {}
+        seen_tool_parts = set()
+
+        # 1. Start event stream
+        # Use a separate client to avoid any potential deadlock
+        capture_client = AsyncOpencode(base_url=self.client.base_url, timeout=300.0)
+        try:
+            stream = await capture_client.event.list()
+            
+            # 2. Start chat in parallel
+            chat_task = asyncio.create_task(self.client.session.chat(
+                id=self.session.id,
+                model_id=self.model,
+                provider_id=self.provider,
+                system=self.system_prompt,
+                parts=[{"type": "text", "text": prompt}]
+            ))
+            
+            # 3. Consume stream for tracing in a separate task
+            async def consume_stream():
+                try:
+                    async for event in stream:
+                        if isinstance(event, EventMessagePartUpdated):
+                            part = event.properties.part
+                            if part.session_id == self.session.id:
+                                if isinstance(part, TextPart):
+                                    last_len = part_lengths.get(part.id, 0)
+                                    delta = part.text[last_len:]
+                                    if delta:
+                                        await asyncio.to_thread(self._append_to_trace, delta)
+                                        part_lengths[part.id] = len(part.text)
+                                
+                                elif isinstance(part, ToolPart):
+                                    state = part.state
+                                    status = state.status
+                                    key = f"{part.id}-{status}"
+                                    if key not in seen_tool_parts:
+                                        seen_tool_parts.add(key)
+                                        if isinstance(state, ToolStateRunning):
+                                            await asyncio.to_thread(self._append_to_trace, f"\n[TOOL CALL: {part.tool}({state.input})]\n")
+                                        elif isinstance(state, ToolStateCompleted):
+                                            await asyncio.to_thread(self._append_to_trace, f"\n[TOOL RESULT: {state.output}]\n")
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logging.debug(f"Trace stream consumer error: {e}")
+
+            consumer_task = asyncio.create_task(consume_stream())
+            
+            try:
+                # 4. Wait for chat to finish
+                await chat_task
+                
+                # Give the stream consumer a moment to process any final events
+                await asyncio.sleep(0.5)
+            finally:
+                consumer_task.cancel()
+                try:
+                    await consumer_task
+                except asyncio.CancelledError:
+                    pass
+                await stream.close()
+
+            # 5. Retrieve full message content for reliable return
+            # This ensures we get the final state of all parts using typed models
+            messages = await self.client.session.messages(id=self.session.id)
+            if not messages:
+                raise FatalAgentError(f"No messages found for Shark {self.agent_id} after chat call.")
+            
+            last_msg_item = messages[-1]
+            extracted_text = []
+            for part in last_msg_item.parts:
+                if isinstance(part, TextPart):
+                    extracted_text.append(part.text)
+            
+            content = "".join(extracted_text)
+            self._log_interaction(prompt, content)
+            
+            if not content:
+                raise FatalAgentError(f"Received empty response content from Shark {self.agent_id}.")
+
+            return content
+
+        except FatalAgentError:
+            raise
+        except Exception as e:
+            raise FatalAgentError(f"API call or processing failed for {self.agent_id}: {e}")
+        finally:
+            await capture_client.close()
 
     def _parse_action_response(self, content: str) -> AgentAction:
         """Helper to parse JSON from LLM content."""
@@ -254,7 +344,7 @@ You must output a single JSON object.
             lines.append(f"Your Wealth: {state.agents[self.agent_id].wealth}")
         else:
             lines.append("Your Wealth: 0")
-        
+            
         lines.append("\n=== Market Assets ===")
         
         # Determine current agent's candidate ID
@@ -278,6 +368,10 @@ You must output a single JSON object.
             
             line = f"- {aid}: {price:.3f} {path_info} ({asset.description})"
             if asset.type == "CANDIDATE":
+                # Check for verifier failures
+                failures = [v_id for key, failed in state.test_failures.items() if failed and key.endswith(f":{aid}") for v_id in [key.split(":")[0]]]
+                if failures:
+                    line += f" [FAILED TESTS: {', '.join(failures)}]"
                 candidates.append(line)
             else:
                 verifiers.append(line)
@@ -291,14 +385,6 @@ You must output a single JSON object.
         lines.append("\n-- Verifiers (Price = Probability this test is VALID) --")
         if verifiers:
             lines.extend(verifiers)
-        else:
-            lines.append("(None)")
-
-        lines.append("\n=== Test Failures ===")
-        if state.test_failures:
-            for fail_key, failed in state.test_failures.items():
-                if failed:
-                    lines.append(f"- {fail_key}")
         else:
             lines.append("(None)")
 
