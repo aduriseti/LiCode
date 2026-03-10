@@ -8,8 +8,10 @@ LiCode is a hybrid Python and TypeScript/Node.js project designed for highly con
 - **Concurrency:** `asyncio` for non-blocking orchestration of multiple agent sessions and market rounds.
 - **Economic Engine:** Custom implementation of the Logarithmic Market Scoring Rule (LMSR) with Batch Wager Clearing.
 - **Agent Orchestration:** `opencode-ai` for managing headless agent sessions and tool calls.
+- **Containerization:** Docker for executing tournaments in official task-specific environments (GHCR images).
 - **Reliability:** `tenacity` for robust error handling and retries during agent inference and tool execution.
 - **CLI/Logs:** `rich` for formatted logging and high-signal TUI feedback.
+- **Configuration:** `python-dotenv` for centralized environment variable management.
 
 ## Dashboard & Tooling (Node.js/TypeScript)
 - **Primary Language:** TypeScript

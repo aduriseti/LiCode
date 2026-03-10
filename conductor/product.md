@@ -23,11 +23,12 @@ A deductive "Whale" (Market Maker) enforces the logical consequences of test res
 ## Key Features
 - **Economic Alignment:** Agents gain wealth by making accurate predictions and lose it through an "inference tax" and bad bets.
 - **Adversarial Testing:** Agents are incentivized to find bugs in rivals' code and propose discriminating tests to profit from price movements.
+- **All-in-Container Execution:** High-fidelity evaluation where the entire tournament (orchestrator, agents, and verifiers) runs inside isolated, official SWE-bench Docker containers to ensure environment parity.
 - **Automated Convergence:** The market naturally terminates when prices stabilize, wealth concentrates, or agents go bankrupt.
 - **OpenCode Integration:** Deeply integrated into the OpenCode terminal environment as a custom tool.
 
 ## Tech Stack (Verified)
 - **Language:** Python (Main Orchestrator), TypeScript (OpenCode Plugin).
 - **Mechanism:** LMSR (Logarithmic Market Scoring Rule).
-- **Environment:** OpenCode Terminal / Headless Sessions.
+- **Environment:** Docker (Isolated Task Containers) / OpenCode Terminal.
 - **Testing:** Oracle-based execution of agent-proposed verifiers.
