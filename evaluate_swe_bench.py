@@ -272,10 +272,11 @@ async def run_market_on_instance(instance, args, semaphore):
                 return None
 
             update_status("Fixing Permissions for Host")
-            # Change ownership of /testbed contents back to the host user (1000:1000)
+            # Change ownership of /testbed contents back to the host user
             # so the host git can read/write the arena worktrees.
+            uid, gid = os.getuid(), os.getgid()
             chown_proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", container_id, "chown", "-R", "1000:1000", "/testbed",
+                "docker", "exec", container_id, "chown", "-R", f"{uid}:{gid}", "/testbed",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )

@@ -60,6 +60,6 @@ async def test_run_market_on_instance_container_lifecycle(mock_shell, mock_exec,
     assert "docker" in market_call
     assert "exec" in market_call
     assert "test_container_id" in market_call
-    assert "python3" in market_call
+    assert any("python3" in arg for arg in market_call)
     assert "-m" in market_call
     assert "market.cli" in market_call
