@@ -17,17 +17,17 @@
     - [x] Write test verifying command routing to container
     - [x] Refactor market command generation to use `docker exec` with mounted paths
 - [x] Task: Conductor - User Manual Verification 'Orchestration Refactor' (Protocol in workflow.md)
-
-#### Phase 3: Validation & Cleanup
-- [~] Task: End-to-End Validation
-    - [ ] Verify `astropy__astropy-13033` passes `pytest` (confirming `setuptools_scm` access)
-    - [ ] Verify `django__django-13195` string formatting matches container expectations
-    - [ ] Verify zero container leakage on process interruption
-- [ ] Task: Fix OpenCode Agent Startup Authentication
-    - [ ] Remove hardcoded `~/.local/share/opencode/auth.json` symlink logic from `market/runner.py`
-    - [ ] Ensure `OPENCODE_API_KEY` is passed via `docker exec` in `evaluate_swe_bench.py`
-- [ ] Task: Implement Centralized .env Configuration
-    - [ ] Create `.env.example` with standard LLM and OpenCode config placeholders
-    - [ ] Add `python-dotenv` to `requirements.txt`
-    - [ ] Integrate `load_dotenv()` into `evaluate_swe_bench.py` and `market/cli.py`
-- [ ] Task: Conductor - User Manual Verification 'Validation & Cleanup' (Protocol in workflow.md)
+#### Phase 3: Validation & Cleanup [checkpoint: a333365]
+- [x] Task: End-to-End Validation a333365
+    - [x] Verify `astropy__astropy-13033` passes `pytest` (confirming `setuptools_scm` access)
+    - [x] Verify `django__django-13195` string formatting matches container expectations
+    - [x] Verify zero container leakage on process interruption
+- [x] Task: Fix OpenCode Agent Startup Authentication a333365
+    - [x] Remove hardcoded `~/.local/share/opencode/auth.json` symlink logic from `market/runner.py`
+    - [x] Ensure `OPENCODE_API_KEY` is passed via `docker exec` in `evaluate_swe_bench.py`
+    - [x] Update `market/cli.py` default model to `gemini-2.5-flash`
+- [x] Task: Implement Centralized .env Configuration a333365
+    - [x] Create `.env.example` with standard LLM and OpenCode config placeholders
+    - [x] Add `python-dotenv` to `requirements.txt`
+    - [x] Integrate `load_dotenv()` into `evaluate_swe_bench.py` and `market/cli.py`
+- [x] Task: Conductor - User Manual Verification 'Validation & Cleanup' (Protocol in workflow.md) a333365

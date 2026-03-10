@@ -9,5 +9,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-- [~] **Track: Implement containerized inference for SWE-bench evaluation**
+- [x] **Track: Implement containerized inference for SWE-bench evaluation**
   *Link: [./tracks/containerized_inference_20260310/](./tracks/containerized_inference_20260310/)*
