@@ -20,6 +20,8 @@ class AgentAction:
     agent_id: str
     beliefs: Dict[str, float] = field(default_factory=dict)
     proposals: List[Dict] = field(default_factory=list) # e.g. {"type": "VERIFIER", "path": "..."}
+    error: Optional[str] = None
+    retry_count: int = 0
 
 DEFAULT_EXCLUDE_LIST = [".arenas", ".home"]
 
@@ -829,20 +831,21 @@ class Orchestrator:
                 result = subprocess.run(
                     ["git", "diff", "--cached", baseline_commit],
                     cwd=winner.code_path,
-                    capture_output=True,
-                    text=True
+                    capture_output=True
                 )
 
-                if not result.stdout.strip():
+                diff_text = result.stdout.decode(errors='replace')
+
+                if not diff_text.strip():
                     lines.append("_No changes made to the codebase._\n")
                     # Fallback to solution.py content
                     main_file = os.path.join(winner.code_path, "solution.py")
                     if os.path.exists(main_file):
-                        with open(main_file, "r") as f:
+                        with open(main_file, "r", errors='replace') as f:
                             lines.append(f"### Full Content of solution.py\n```python\n{f.read()}\n```\n")
                 else:
                     # Process Diff with Truncation
-                    full_diff = result.stdout
+                    full_diff = diff_text
                     processed_diff = []
                     current_file_lines = []
                     in_hunk = False

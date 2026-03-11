@@ -171,7 +171,7 @@ You must output a single JSON object.
                     content = await self._chat_with_network_retry(current_prompt, timeout=current_timeout)
                     
                     # 3. Parse and return if successful
-                    return self._parse_action_response(content)
+                    return self._parse_action_response(content, retry_count=retry_count)
                     
                 except (APITimeoutError, APIConnectionError) as e:
                     retry_count += 1
@@ -180,8 +180,8 @@ You must output a single JSON object.
                         await self.interrupt()
 
                     if retry_count > self.max_retries:
-                        logging.error(f"Shark {self.agent_id} network/timeout failed after {self.max_retries} retries: {e}")
-                        raise FatalAgentError(f"Shark {self.agent_id} network failure: {e}")
+                        logging.error(f"Shark {self.agent_id} network/timeout failed after {self.max_retries} retries: {e}. Falling back to empty action.")
+                        return AgentAction(agent_id=self.agent_id, error=str(e), retry_count=retry_count)
 
                     # Calculate timeout for the NEXT attempt
                     next_timeout = min(self.timeout * (2 ** retry_count), self.max_backoff)
@@ -198,13 +198,13 @@ You must output a single JSON object.
                 except LLMResponseError as e:
                     # Self-correction attempt (doesn't count towards network retries)
                     if attempt >= max_total_attempts + 2:
-                        logging.error(f"Shark {self.agent_id} failed parsing after multiple correction attempts: {e}")
-                        raise FatalAgentError(f"Shark {self.agent_id} failed to provide valid JSON: {e}")
+                        logging.error(f"Shark {self.agent_id} failed parsing after multiple correction attempts: {e}. Falling back to empty action.")
+                        return AgentAction(agent_id=self.agent_id, error=str(e), retry_count=retry_count)
 
                     logging.warning(f"Shark {self.agent_id} parsing failed. Sending error back for correction (Attempt {attempt+1})")
                     current_prompt = f"ERROR: Your previous response was invalid: {str(e)}\nPlease provide your updated beliefs and proposals in the correct JSON format."
             
-            return AgentAction(agent_id=self.agent_id)
+            return AgentAction(agent_id=self.agent_id, retry_count=retry_count)
             
         except FatalAgentError:
             raise
@@ -343,7 +343,7 @@ You must output a single JSON object.
             raise FatalAgentError(f"API call or processing failed for {self.agent_id}: {e}")
 
 
-    def _parse_action_response(self, content: str) -> AgentAction:
+    def _parse_action_response(self, content: str, retry_count: int = 0) -> AgentAction:
         """Helper to parse JSON from LLM content."""
         logging.info(f"Shark {self.agent_id} received {len(content)} chars from API.")
         
@@ -369,7 +369,8 @@ You must output a single JSON object.
             return AgentAction(
                 agent_id=self.agent_id,
                 beliefs=data.get("beliefs", {}),
-                proposals=data.get("proposals", [])
+                proposals=data.get("proposals", []),
+                retry_count=retry_count
             )
         except Exception as e:
             if isinstance(e, LLMResponseError):

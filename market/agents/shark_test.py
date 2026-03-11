@@ -258,9 +258,10 @@ class TestSharkActionParsing(unittest.IsolatedAsyncioTestCase):
         state = MarketState(round_num=1, liquidity_b=100.0)
         shark = Shark("agent_0")
         
-        # We expect FatalAgentError after all self-correction attempts fail
-        with self.assertRaises(FatalAgentError):
-            await shark.get_action(state)
+        # EXPECTATION: It should return empty AgentAction instead of raising FatalAgentError
+        action = await shark.get_action(state)
+        self.assertEqual(action.agent_id, "agent_0")
+        self.assertEqual(action.beliefs, {})
 
     @patch('market.agents.shark.AsyncOpencode')
     async def test_parsing_malformed_json_recovery(self, MockClient):
@@ -501,9 +502,9 @@ class TestSharkRetryLogic(unittest.IsolatedAsyncioTestCase):
             ]
             
             state = MarketState(round_num=1, liquidity_b=100.0)
-            from market.agents.shark import FatalAgentError
-            with self.assertRaises(FatalAgentError):
-                await shark.get_action(state)
+            action = await shark.get_action(state)
+            self.assertEqual(action.agent_id, "agent_0")
+            self.assertEqual(action.beliefs, {})
             
             self.assertEqual(mock_chat.call_count, 2)
             self.assertEqual(shark.interrupt.call_count, 2)
@@ -559,7 +560,7 @@ class TestSharkRetryLogic(unittest.IsolatedAsyncioTestCase):
     @patch('market.agents.shark.AsyncOpencode')
     @patch('market.agents.shark.asyncio.sleep')
     async def test_get_action_fatal_failure_on_short_timeout(self, mock_sleep, MockClient):
-        # Verify that repeated timeouts lead to FatalAgentError
+        # Verify that repeated timeouts lead to fallback AgentAction
         shark = Shark("agent_0", max_retries=1, timeout=0.1)
         shark.initialize_session = AsyncMock()
         shark.session = MagicMock()
@@ -569,9 +570,9 @@ class TestSharkRetryLogic(unittest.IsolatedAsyncioTestCase):
         # Mock _chat_with_network_retry to always timeout
         with patch.object(Shark, '_chat_with_network_retry', side_effect=APITimeoutError("Timeout")):
             state = MarketState(round_num=1, liquidity_b=100.0)
-            from market.agents.shark import FatalAgentError
-            with self.assertRaises(FatalAgentError):
-                await shark.get_action(state)
+            action = await shark.get_action(state)
+            self.assertEqual(action.agent_id, "agent_0")
+            self.assertEqual(action.beliefs, {})
             
             self.assertEqual(shark.interrupt.call_count, 2) # initial + 1 retry
 

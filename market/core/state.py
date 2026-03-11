@@ -39,6 +39,10 @@ class AgentPortfolio:
     # Let's stick to the convention: positive = YES shares, negative = NO shares.
     shares: Dict[str, float] = field(default_factory=dict)
     
+    # Robustness tracking
+    failure_count: int = 0
+    last_error: Optional[str] = None
+    
     def to_dict(self):
         return asdict(self)
     

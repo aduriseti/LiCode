@@ -14,7 +14,7 @@ from typing import List, Dict, Optional
 from collections import deque
 
 from .core.state import MarketState
-from .orchestrator import Orchestrator
+from .orchestrator import Orchestrator, AgentAction
 from .agents.shark import Shark
 
 class BufferedLogHandler(logging.Handler):
@@ -236,72 +236,186 @@ class MarketRunner:
         # 0. Initialize Orchestrator (clones workspaces in parallel)
         await self.orchestrator.initialize()
 
-        async def setup_agent(aid):
-            logging.info(f"Starting setup for agent {aid}...")
-            
-            async with self.port_lock:
-                port = self._find_free_port()
-            
-            agent_url = f"http://127.0.0.1:{port}"
-            server_proc = await self._start_agent_server(aid, port)
-            self.agent_servers[aid] = server_proc
-            
-            logging.info(f"Server for {aid} started on port {port}. Initializing Shark...")
-            sys.stderr.write(f"Server for {aid} started on port {port}. Initializing Shark...\n")
-            sys.stderr.flush()
-
-            # 2. Initialize Shark
-            log_path = os.path.join(self.sessions_dir, f"{aid}.log")
-            cand_id = aid.replace("agent", "cand")
-            trace_path = os.path.join(self.traces_dir, f"{cand_id}_stream.txt")
-            
-            shark = Shark(aid, model=self.model, provider=self.provider, api_url=agent_url, 
-                          log_path=log_path, timeout=self.agent_timeout, trace_path=trace_path,
-                          max_retries=self.max_retries, initial_backoff=self.initial_backoff,
-                          max_backoff=self.max_backoff)
-            self.sharks[aid] = shark
-            
-            # 3. Create Session
-            await shark.initialize_session()
-            session_id = None
-            if shark.session is not None and hasattr(shark.session, "id"):
-                session_id = str(shark.session.id)
-            
-            if session_id is None:
-                raise RuntimeError(f"Failed to initialize session for {aid}")
-            
-            logging.info(f"Session for {aid} initialized: {session_id}")
-            sys.stderr.write(f"Session for {aid} initialized: {session_id}\n")
-            sys.stderr.flush()
-
-            # Emit init event for dashboard
-            event = {
-                "type": "agent_init", 
-                "agent_id": aid, 
-                "session_id": session_id,
-                "api_url": agent_url,
-                "arena_dir": self.arena_dir
-            }
-            if json_logs:
-                print(json.dumps(event))
-                sys.stdout.flush()
+    async def _setup_agent(self, aid: str, json_logs: bool = False):
+        """Initializes a single agent with retries."""
+        for attempt in range(3):
+            try:
+                logging.info(f"Starting setup for agent {aid} (Attempt {attempt+1}/3)...")
                 
-            await self._send_to_dashboard("/api/agent", event)
-            await self._send_to_dashboard("/api/log", event)
+                async with self.port_lock:
+                    port = self._find_free_port()
+                
+                agent_url = f"http://127.0.0.1:{port}"
+                server_proc = await self._start_agent_server(aid, port)
+                self.agent_servers[aid] = server_proc
+                
+                logging.info(f"Server for {aid} started on port {port}. Initializing Shark...")
 
-            return aid, {
-                "session_id": session_id,
-                "api_url": agent_url,
-                "log_path": os.path.relpath(shark.log_path, self.arena_dir) if shark.log_path else None
-            }
+                # 2. Initialize Shark
+                log_path = os.path.join(self.sessions_dir, f"{aid}.log")
+                cand_id = aid.replace("agent", "cand")
+                trace_path = os.path.join(self.traces_dir, f"{cand_id}_stream.txt")
+                
+                shark = Shark(aid, model=self.model, provider=self.provider, api_url=agent_url, 
+                              log_path=log_path, timeout=self.agent_timeout, trace_path=trace_path,
+                              max_retries=self.max_retries, initial_backoff=self.initial_backoff,
+                              max_backoff=self.max_backoff)
+                
+                # 3. Create Session
+                await shark.initialize_session()
+                self.sharks[aid] = shark
+                
+                session_id = None
+                if shark.session is not None and hasattr(shark.session, "id"):
+                    session_id = str(shark.session.id)
+                
+                if session_id is None:
+                    raise RuntimeError(f"Failed to initialize session for {aid}")
+                
+                logging.info(f"Session for {aid} initialized: {session_id}")
+
+                # Emit init event for dashboard
+                event = {
+                    "type": "agent_init", 
+                    "agent_id": aid, 
+                    "session_id": session_id,
+                    "api_url": agent_url,
+                    "arena_dir": self.arena_dir
+                }
+                if json_logs:
+                    print(json.dumps(event))
+                    sys.stdout.flush()
+                    
+                await self._send_to_dashboard("/api/agent", event)
+                await self._send_to_dashboard("/api/log", event)
+
+                return aid, {
+                    "session_id": session_id,
+                    "api_url": agent_url,
+                    "log_path": os.path.relpath(shark.log_path, self.arena_dir) if shark.log_path else None
+                }
+            except Exception as e:
+                logging.error(f"Failed to setup agent {aid} on attempt {attempt+1}: {e}")
+                # Cleanup if partially initialized
+                if aid in self.sharks:
+                    await self.sharks[aid].shutdown()
+                    del self.sharks[aid]
+                if aid in self.agent_servers:
+                    proc = self.agent_servers[aid]
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    except:
+                        proc.terminate()
+                    del self.agent_servers[aid]
+                
+                if attempt == 2:
+                    logging.error(f"Agent {aid} failed setup after 3 attempts. Proceeding without it.")
+                    return None
+
+    async def initialize(self, json_logs: bool = False):
+        """Async initialization of agent servers and sessions."""
+        self.main_loop = asyncio.get_running_loop()
+        
+        rel_path = os.path.relpath(self.arena_dir, os.getcwd())
+        if json_logs:
+            print(json.dumps({"type": "log", "message": f"Tournament Arena initialized at: {rel_path}"}))
+            sys.stdout.flush()
+        else:
+            print(f"Tournament Arena initialized at: {rel_path}")
+        logging.info(f"Tournament Arena initialized at: {rel_path}")
+
+        if self.dashboard:
+            port = self._find_free_port()
+            self.dashboard_url = f"http://localhost:{port}"
+            
+            # Use __file__ to reliably find the script regardless of CWD
+            market_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(market_dir)
+            dashboard_script = os.path.join(project_root, ".opencode", "lib", "dashboard-server.ts")
+            
+            env = os.environ.copy()
+            env["DASHBOARD_PORT"] = str(port)
+            
+            dash_log_path = os.path.join(self.arena_dir, "dashboard_server.log")
+            self.dash_log_file = open(dash_log_path, "w")
+
+            self.dashboard_proc = await asyncio.create_subprocess_exec(
+                "bun", dashboard_script,
+                env=env,
+                stdout=self.dash_log_file,
+                stderr=asyncio.subprocess.PIPE, # Capture stderr for diagnosis
+                stdin=asyncio.subprocess.PIPE,
+                limit=1024 * 1024 * 32,
+            )
+            
+            # Start a background task to proxy dashboard stderr for diagnosis
+            async def proxy_dash_stderr():
+                while self.dashboard_proc and self.dashboard_proc.returncode is None:
+                    try:
+                        line = await self.dashboard_proc.stderr.readline()
+                        if not line: break
+                        sys.stderr.write(f"[DASHBOARD ERROR] {line.decode('utf-8')}")
+                        sys.stderr.flush()
+                    except: break
+            
+            if self.main_loop and self.main_loop.is_running():
+                self.main_loop.create_task(proxy_dash_stderr())
+            
+            # Start Heartbeat Task to keep stdin pipe alive
+            async def dashboard_heartbeat():
+                while self.dashboard_proc and self.dashboard_proc.returncode is None:
+                    try:
+                        if self.dashboard_proc.stdin and not self.dashboard_proc.stdin.is_closing():
+                            self.dashboard_proc.stdin.write(b"heartbeat\n")
+                            await self.dashboard_proc.stdin.drain()
+                        else:
+                            break
+                    except (ConnectionResetError, BrokenPipeError):
+                        break
+                    except Exception:
+                        break
+                    await asyncio.sleep(2.0)
+            
+            if self.main_loop and self.main_loop.is_running():
+                self.main_loop.create_task(dashboard_heartbeat())
+            
+            # Wait for ready (Increased to 150 attempts @ 0.1s = 15s)
+            for _ in range(150):
+                try:
+                    _, writer = await asyncio.open_connection("127.0.0.1", port)
+                    writer.close()
+                    await writer.wait_closed()
+                    
+                    # Attach handler to forward Python logs to dashboard
+                    dash_handler = DashboardLogHandler(self)
+                    dash_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S'))
+                    logging.getLogger().addHandler(dash_handler)
+                    break
+                except:
+                    await asyncio.sleep(0.1)
+
+            if json_logs:
+                print(json.dumps({"type": "log", "message": f"Dashboard active at {self.dashboard_url}"}))
+                sys.stdout.flush()
+            else:
+                sys.stderr.write(f"Dashboard active at {self.dashboard_url}\n")
+                sys.stderr.flush()
+            
+            logging.info(f"Dashboard active at {self.dashboard_url}")
+
+        logging.info(f"Initializing tournament for run_id: {self.run_id}")
+            
+        # 0. Initialize Orchestrator (clones workspaces in parallel)
+        await self.orchestrator.initialize()
 
         # Run setups concurrently
-        tasks = [setup_agent(aid) for aid in self.orchestrator.state.agents.keys()]
+        tasks = [self._setup_agent(aid, json_logs=json_logs) for aid in self.orchestrator.state.agents.keys()]
         results = await asyncio.gather(*tasks)
         
-        session_map = dict(results)
+        # Filter out failed setups (None)
+        session_map = {res[0]: res[1] for res in results if res is not None}
 
-        logging.info("All agents initialized.")
+        logging.info(f"Initialized {len(self.sharks)} agents.")
 
         # Emit Initial State
         if json_logs:
@@ -448,7 +562,7 @@ class MarketRunner:
             
             # Wait for port to open
             start_time = time.time()
-            while time.time() - start_time < 10:
+            while time.time() - start_time < 30:
                 if getattr(proc, 'returncode', None) is not None:
                     raise RuntimeError(f"Server for {agent_id} failed to start. See {agent_log}")
                 try:
@@ -497,15 +611,42 @@ class MarketRunner:
                     sys.stdout.flush()
                 
                 tasks = []
+                agent_ids = []
                 for aid, shark in self.sharks.items():
                     if aid in self.orchestrator.state.agents:
                         tasks.append(shark.get_action(self.orchestrator.state))
+                        agent_ids.append(aid)
                 
-                actions = await asyncio.gather(*tasks)
+                # return_exceptions=True ensures one agent crash doesn't kill the tournament
+                results = await asyncio.gather(*tasks, return_exceptions=True)
                 
-                for action in actions:
-                    if action.beliefs:
-                        logging.info(f"Agent {action.agent_id} Beliefs: {action.beliefs}")
+                actions = []
+                for aid, result in zip(agent_ids, results):
+                    if isinstance(result, Exception):
+                        logging.error(f"Agent {aid} failed during action collection: {result}")
+                        # Fallback to empty action
+                        action = AgentAction(agent_id=aid, error=str(result))
+                        actions.append(action)
+                    else:
+                        action = result
+                        actions.append(action)
+                        if result.beliefs:
+                            logging.info(f"Agent {aid} Beliefs: {result.beliefs}")
+                    
+                    # Update state with failure info if present
+                    if action.error:
+                        portfolio = self.orchestrator.state.agents.get(aid)
+                        if portfolio:
+                            portfolio.failure_count += 1
+                            portfolio.last_error = action.error
+                        
+                        # Report failure to dashboard
+                        await self._send_to_dashboard("/api/log", {
+                            "type": "agent_error",
+                            "agent_id": aid,
+                            "error": action.error,
+                            "round": i + 1
+                        })
                 
                 logging.info(f"Round {i+1}: All agents decided.")
                 
