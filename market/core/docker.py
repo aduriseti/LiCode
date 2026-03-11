@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import uuid
 
 def get_image_name(instance_id: str) -> str:
     """
@@ -28,10 +29,11 @@ async def start_container(image_name: str, workspace_host_path: str, licode_host
     Starts a background Docker container tailored for SWE-bench execution.
     Returns the running container ID.
     """
+    unique_id = uuid.uuid4().hex[:6]
     args = [
         "docker", "run", "-d",
         "--init",
-        "--name", f"licode-eval-{image_name.split('.')[-1].replace(':', '-')}",
+        "--name", f"licode-eval-{image_name.split('.')[-1].replace(':', '-')}-{unique_id}",
         "-v", f"{workspace_host_path}:/testbed"
     ]
 

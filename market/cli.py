@@ -101,8 +101,9 @@ def main():
     run_parser.add_argument("--max-retries", type=int, default=2, help="Max timeout retries per round (default 2 results in 3 attempts: 2m, 4m, 8m)")
     run_parser.add_argument("--initial-backoff", type=float, default=120.0, help="Deprecated: use --timeout instead")
     run_parser.add_argument("--max-backoff", type=float, default=1000.0, help="Maximum timeout ceiling in seconds")
-    run_parser.add_argument("--api-url", type=str, default="http://127.0.0.1:4096")
-    run_parser.add_argument("--model", type=str, default="gemini-2.5-flash")
+    run_parser.add_argument("--api-url", type=str, default=os.environ.get("OPENCODE_API_URL"), 
+                            help="API URL for the induction engine (defaults to cloud or $OPENCODE_API_URL)")
+    run_parser.add_argument("--model", type=str, default="gemini-3-flash")
     run_parser.add_argument("--provider", type=str, default="opencode")
     run_parser.add_argument("--json-logs", action="store_true", help="Output JSON logs to stdout instead of TUI")
     run_parser.add_argument("--dashboard", action="store_true", help="Launch and log to the local web dashboard")

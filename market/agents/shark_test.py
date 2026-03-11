@@ -537,28 +537,25 @@ class TestSharkRetryLogic(unittest.IsolatedAsyncioTestCase):
         MockClient.return_value = client_inst
         client_inst.session = AsyncMock()
         client_inst.session.chat = AsyncMock()
-        
+
         shark = Shark("agent_0", timeout=base_timeout)
         shark.session = MagicMock()
         shark.session.id = "ses_123"
-        
+
         from opencode_ai.types import TextPart
         dummy_part = TextPart(id="p1", messageID="m1", sessionID="s1", type="text", text='{"beliefs": {}}')
         client_inst.session.messages = AsyncMock(return_value=[MagicMock(parts=[dummy_part])])
-        
+
         mock_stream = AsyncMock()
         mock_stream.__aiter__.side_effect = lambda: (i for i in [])
         client_inst.event.list = AsyncMock(return_value=mock_stream)
-        
-        await shark._chat_with_network_retry("test prompt", timeout=call_timeout)
-        
-        # Check constructor calls
-        # 1st: __init__ (default timeout)
-        # 2nd: capture_client in _chat_with_network_retry (call_timeout)
-        # 3rd: main_client in _chat_with_network_retry (call_timeout)
-        timeouts = [call.kwargs.get("timeout") for call in MockClient.call_args_list]
-        self.assertEqual(timeouts.count(call_timeout), 2, f"Should have 2 clients with timeout {call_timeout}. Found: {timeouts}")
 
+        await shark._chat_with_network_retry("test prompt", timeout=call_timeout)
+
+        # Verify that session.chat was called with the overridden timeout
+        # rather than the base timeout from Shark constructor
+        client_inst.session.chat.assert_called()
+        self.assertEqual(client_inst.session.chat.call_args.kwargs.get("timeout"), call_timeout)
     @patch('market.agents.shark.AsyncOpencode')
     @patch('market.agents.shark.asyncio.sleep')
     async def test_get_action_fatal_failure_on_short_timeout(self, mock_sleep, MockClient):

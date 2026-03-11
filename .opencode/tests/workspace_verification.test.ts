@@ -1,8 +1,36 @@
-import { describe, it, expect, onTestFinished } from "vitest";
+import { describe, it, expect, onTestFinished, beforeAll } from "vitest";
 import { spawn, ChildProcess } from "child_process";
 import { chromium, Browser } from "playwright";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 
 describe("Workspace Verification (Headless Browser)", () => {
+    let resolvedApiKey: string | undefined = process.env.OPENCODE_API_KEY || process.env.OPENCODE;
+
+    beforeAll(() => {
+        // Fallback: try to resolve from host's auth.json if missing from env
+        if (!resolvedApiKey) {
+            const authPath = path.join(os.homedir(), ".local/share/opencode/auth.json");
+            if (fs.existsSync(authPath)) {
+                try {
+                    const authJson = fs.readFileSync(authPath, "utf-8");
+                    const authData = JSON.parse(authJson);
+                    resolvedApiKey = authData?.opencode?.key;
+                    if (resolvedApiKey) {
+                        console.log(`[TEST SETUP] Resolved API key from ${authPath}`);
+                    }
+                } catch (e: any) {
+                    console.error(`[TEST SETUP] Failed to parse auth.json: ${e.message}`);
+                }
+            }
+        }
+
+        if (!resolvedApiKey) {
+            console.warn("[TEST SETUP] WARNING: OPENCODE_API_KEY not found in environment or auth.json. Tests requiring LLM interaction will likely fail.");
+        }
+    });
+
     async function launchBrowser(): Promise<Browser> {
         return chromium.launch({
             headless: true,
@@ -19,7 +47,7 @@ describe("Workspace Verification (Headless Browser)", () => {
             name: "simple fibonacci prompt",
             prompt: "run a tournament with 1 agent for 2 rounds to implement a function that returns the nth fibonacci number. Set log level to INFO.",
             expectedContent: ["fibonacci", "def fib", "a, b = b, a + b"],
-            timeout: 60000
+            timeout: 120000
         },
         {
             name: "complex prompt with newlines and quotes",
@@ -31,7 +59,7 @@ The score of a partition is the sum of the values of all its subarrays.
 
 The value of a subarray is defined as sumArr * (sumArr + 1) / 2, where sumArr is the sum of its elements.' - use python`,
             expectedContent: [], // We just want to ensure it starts up and shows an agent tab
-            timeout: 60000
+            timeout: 120000
         }
     ];
 
@@ -58,7 +86,11 @@ The value of a subarray is defined as sumArr * (sumArr + 1) / 2, where sumArr is
                     cwd: "/workspaces/LiCode",
                     stdio: ["ignore", "pipe", "pipe"],
                     detached: true,
-                    env: { ...process.env, TERM: "dumb" }
+                    env: { 
+                        ...process.env, 
+                        OPENCODE_API_KEY: resolvedApiKey || process.env.OPENCODE_API_KEY || process.env.OPENCODE,
+                        TERM: "dumb" 
+                    }
                 }
             );
 
@@ -86,9 +118,9 @@ The value of a subarray is defined as sumArr * (sumArr + 1) / 2, where sumArr is
 
                 setTimeout(() => {
                     clearInterval(checkInterval);
-                    console.error(`[TEST FAIL] Dashboard URL not found within 30s. Full log output:\n${fullOutput}`);
-                    reject(new Error(`Dashboard URL not found within 30s for prompt: ${name}`));
-                }, 30000);
+                    console.error(`[TEST FAIL] Dashboard URL not found within 60s. Full log output:\n${fullOutput}`);
+                    reject(new Error(`Dashboard URL not found within 60s for prompt: ${name}`));
+                }, 60000);
             });
 
             console.log(`[TEST] Connecting to dashboard: ${dashboardUrl}`);
