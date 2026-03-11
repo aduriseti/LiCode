@@ -11,3 +11,8 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 - [x] **Track: Implement robust retries and fallbacks for agent timeouts and connection errors.**
   *Link: [./archive/agent_robustness_20260311/](./archive/agent_robustness_20260311/)*
+
+---
+
+- [ ] **Track: Implement asynchronous event-driven market execution with a 2-agent batching threshold**
+  *Link: [./tracks/async_market_20260311/](./tracks/async_market_20260311/)*
