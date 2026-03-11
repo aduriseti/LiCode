@@ -65,7 +65,7 @@ class MarketRunner:
     Handles the game loop, agent orchestration, convergence checks,
     and the local OpenCode API server.
     """
-    def __init__(self, prompt: str, n_agents: int, budget: float, api_url: str = "http://127.0.0.1", 
+    def __init__(self, prompt: str, n_agents: int, budget: float, api_url: Optional[str] = None, 
                  model: str = "gemini-3-flash", provider: str = "opencode", 
                  agent_timeout: float = 300.0, dashboard: bool = False,
                  max_retries: int = 3, initial_backoff: float = 120.0, 
@@ -360,6 +360,40 @@ class MarketRunner:
         
         env["HOME"] = agent_home
         env["PORT"] = str(port)
+
+        # Plumb OPENCODE_API_KEY from environment to auth.json inside the sandbox
+        opencode_key = env.get("OPENCODE_API_KEY")
+        if not opencode_key:
+            # Fallback: try to resolve from host's auth.json
+            auth_path = os.path.expanduser("~/.local/share/opencode/auth.json")
+            if os.path.exists(auth_path):
+                try:
+                    with open(auth_path, "r") as f:
+                        data = json.load(f)
+                        opencode_key = data.get("opencode", {}).get("key")
+                except Exception:
+                    pass
+
+        if opencode_key:
+            try:
+                # Standard location for root user inside container or local user
+                dest_auth_dir = os.path.join(agent_home, ".local", "share", "opencode")
+                os.makedirs(dest_auth_dir, exist_ok=True)
+                auth_data = {
+                    "opencode": {
+                        "type": "api",
+                        "key": opencode_key
+                    }
+                }
+                with open(os.path.join(dest_auth_dir, "auth.json"), "w") as f:
+                    json.dump(auth_data, f)
+                
+                # Also map it to OPENCODE for potential plugin usage
+                env["OPENCODE"] = opencode_key
+                # Ensure it's in env for the subprocess as well
+                env["OPENCODE_API_KEY"] = opencode_key
+            except Exception as e:
+                logging.warning(f"Failed to plumb OPENCODE_API_KEY to agent sandbox: {e}")
         
         # Security & Automation:
         # - Auto-deny external directory access (fails immediately instead of hanging)

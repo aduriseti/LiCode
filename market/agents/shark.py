@@ -213,11 +213,14 @@ You must output a single JSON object.
             raise FatalAgentError(f"Shark {self.agent_id} experienced a critical failure: {e}")
 
     async def _chat_with_network_retry(self, prompt: str, timeout: Optional[float] = None) -> str:
-        """Sends a message to the OpenCode session with trace capture. Retries are handled by get_action."""
+        """Sends a message to the OpenCode session with trace capture."""
         logging.info(f"Shark {self.agent_id} calling API...")
         if not self.session:
             await self.initialize_session()
             
+        # Use provided timeout or default
+        call_timeout = timeout or self.timeout
+        
         # Log prompt to trace
         if self.trace_path:
             await asyncio.to_thread(self._append_to_trace, f"\n\n[PROMPT]\n{prompt}\n\n[ASSISTANT]\n")
@@ -226,25 +229,21 @@ You must output a single JSON object.
         part_lengths = {}
         seen_tool_parts = set()
 
-        # Use provided timeout or default
-        call_timeout = timeout or self.timeout
-
-        # 1. Start event stream
-        # Use a separate client to avoid any potential deadlock
-        capture_client = AsyncOpencode(base_url=self.client.base_url, timeout=call_timeout)
-        # Main client also needs to respect the dynamic timeout for this call
-        main_client = AsyncOpencode(base_url=self.client.base_url, timeout=call_timeout)
-        
         try:
-            stream = await capture_client.event.list()
+            # 1. Start event stream for tracing
+            # We use the existing self.client for both to avoid extra overhead
+            # and potential connection pool issues.
+            stream = await self.client.event.list()
             
             # 2. Start chat in parallel
-            chat_task = asyncio.create_task(main_client.session.chat(
+            # We use self.client.session.chat directly
+            chat_task = asyncio.create_task(self.client.session.chat(
                 id=self.session.id,
                 model_id=self.model,
                 provider_id=self.provider,
                 system=self.system_prompt,
-                parts=[{"type": "text", "text": prompt}]
+                parts=[{"type": "text", "text": prompt}],
+                timeout=call_timeout
             ))
             
             # 3. Consume stream for tracing in a separate task
@@ -280,7 +279,8 @@ You must output a single JSON object.
             
             try:
                 # 4. Wait for chat to finish
-                await chat_task
+                # If this fails with a JSON error, it means the server returned an empty or malformed body
+                chat_response = await chat_task
                 
                 # Give the stream consumer a moment to process any final events
                 await asyncio.sleep(0.5)
@@ -292,22 +292,39 @@ You must output a single JSON object.
                     pass
                 await stream.close()
 
-            # 5. Retrieve full message content for reliable return
-            # This ensures we get the final state of all parts using typed models
-            messages = await main_client.session.messages(id=self.session.id)
-            if not messages:
-                raise FatalAgentError(f"No messages found for Shark {self.agent_id} after chat call.")
-            
-            last_msg_item = messages[-1]
+            # 5. Extract text from the chat response
+            # Using the response object directly is more robust than re-fetching messages
             extracted_text = []
-            for part in last_msg_item.parts:
-                if isinstance(part, TextPart):
-                    extracted_text.append(part.text)
+            if chat_response and hasattr(chat_response, "parts"):
+                for part in chat_response.parts:
+                    if isinstance(part, TextPart):
+                        extracted_text.append(part.text)
             
             content = "".join(extracted_text)
+            
+            # Fallback: if chat_response failed to provide text, try fetching messages as a last resort
+            if not content:
+                logging.warning(f"Shark {self.agent_id} chat response had no text. Attempting message list fallback...")
+                messages = await self.client.session.messages(id=self.session.id)
+                if messages:
+                    last_msg_item = messages[-1]
+                    for part in last_msg_item.parts:
+                        if isinstance(part, TextPart):
+                            extracted_text.append(part.text)
+                    content = "".join(extracted_text)
+            
             self._log_interaction(prompt, content)
             
             if not content:
+                # If we still have no content, it might be that the model just returned an empty string 
+                # (e.g. if it only called tools and then stopped).
+                # We check for tool calls in the response.
+                has_tools = any(isinstance(part, ToolPart) for part in getattr(chat_response, "parts", []))
+                if has_tools:
+                    logging.warning(f"Shark {self.agent_id} returned tool calls but no final text. This might happen if the model is in a tool-use loop.")
+                    # Return a placeholder to allow the tournament to continue (it will likely retry or fix itself in next step)
+                    return "{}"
+                
                 raise FatalAgentError(f"Received empty response content from Shark {self.agent_id}.")
 
             return content
@@ -315,10 +332,16 @@ You must output a single JSON object.
         except (FatalAgentError, APITimeoutError, APIConnectionError):
             raise
         except Exception as e:
+            # Check if this is an API/JSON error that should be retried (e.g. auth failure or 503 returning HTML)
+            err_str = str(e)
+            if "Expecting value" in err_str or "JSONDecodeError" in type(e).__name__:
+                logging.warning(f"Shark {self.agent_id} received malformed JSON (likely auth error or transient failure). Treating as connection error to trigger retry: {e}")
+                raise APIConnectionError(request=None)
+
+            # Log the full exception for diagnosis
+            logging.error(f"API call or processing failed for {self.agent_id}: {str(e)}")
             raise FatalAgentError(f"API call or processing failed for {self.agent_id}: {e}")
-        finally:
-            await capture_client.close()
-            await main_client.close()
+
 
     def _parse_action_response(self, content: str) -> AgentAction:
         """Helper to parse JSON from LLM content."""

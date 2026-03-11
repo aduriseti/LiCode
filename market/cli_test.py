@@ -31,7 +31,7 @@ class TestCLI(unittest.TestCase):
             
         # Verify MarketRunner initialized correctly
         MockRunner.assert_called_with(
-            "foo", 3, 1000.0, "http://127.0.0.1:4096", 
+            "foo", 3, 1000.0, None, 
             model="gemini-3-flash", provider="opencode", 
             agent_timeout=120.0, dashboard=False,
             max_retries=2, initial_backoff=120.0, max_backoff=1000.0

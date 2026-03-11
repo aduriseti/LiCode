@@ -15,6 +15,19 @@ from dotenv import load_dotenv
 # Load environment variables from .env if it exists
 load_dotenv()
 
+# Resolve OPENCODE_API_KEY from host-side auth.json if not in environment
+# This allows plumbing it to the Docker container via docker exec -e
+if not os.environ.get("OPENCODE_API_KEY"):
+    auth_path = os.path.expanduser("~/.local/share/opencode/auth.json")
+    if os.path.exists(auth_path):
+        try:
+            with open(auth_path, "r") as f:
+                auth_data = json.load(f)
+            if "opencode" in auth_data and "key" in auth_data["opencode"]:
+                os.environ["OPENCODE_API_KEY"] = auth_data["opencode"]["key"]
+        except Exception as e:
+            print(f"Warning: Could not load host-side OPENCODE_API_KEY from {auth_path}: {e}")
+
 from rich.live import Live
 from rich.table import Table
 from rich.console import Console
@@ -173,6 +186,39 @@ async def run_market_on_instance(instance, args, semaphore):
             )
             await bootstrap_proc.communicate()
 
+            # 3. Install Bun if dashboard is requested
+            if getattr(args, 'dashboard', False):
+                update_status("Installing Dependencies (unzip, curl, nodejs)")
+                apt_proc = await asyncio.create_subprocess_exec(
+                    "docker", "exec", container_id, "bash", "-c", "apt-get update && apt-get install -y unzip curl ca-certificates nodejs",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                await apt_proc.communicate()
+
+                update_status("Installing Bun (Dashboard)")
+                # Install bun via official script
+                bun_install_proc = await asyncio.create_subprocess_exec(
+                    "docker", "exec", container_id, "bash", "-c", "curl -fsSL https://bun.sh/install | bash",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await bun_install_proc.communicate()
+                if bun_install_proc.returncode != 0:
+                    update_status(f"Bun Install Failed: {stderr.decode()}")
+                else:
+                    # Verify bun installation
+                    verify_proc = await asyncio.create_subprocess_exec(
+                        "docker", "exec", container_id, "ls", "-la", "/root/.bun/bin/bun",
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE
+                    )
+                    v_stdout, v_stderr = await verify_proc.communicate()
+                    if verify_proc.returncode != 0:
+                        update_status(f"Bun Verify Failed: {v_stderr.decode()}")
+                    else:
+                        update_status("Bun Installed & Verified")
+
             if args.dummy:
                 update_status("Dummy Mode: Returning Empty Patch")
                 await asyncio.sleep(1)
@@ -192,7 +238,7 @@ async def run_market_on_instance(instance, args, semaphore):
             market_cmd = [
                 "docker", "exec", "-w", "/testbed",
                 "-e", "PYTHONPATH=/licode",
-                "-e", "PATH=/.opencode/bin:/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "-e", "PATH=/root/.bun/bin:/.opencode/bin:/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 "-e", f"OPENAI_API_KEY={os.environ.get('OPENAI_API_KEY', '')}",
                 "-e", f"ANTHROPIC_API_KEY={os.environ.get('ANTHROPIC_API_KEY', '')}",
                 "-e", f"GEMINI_API_KEY={os.environ.get('GEMINI_API_KEY', '')}",
@@ -356,8 +402,15 @@ async def async_main():
     parser.add_argument("--initial-backoff", type=float, default=120.0, help="Initial timeout in seconds")
     parser.add_argument("--max-backoff", type=float, default=1000.0, help="Maximum timeout ceiling")
     parser.add_argument("--run-id", type=str, help="Unique identifier for this run. Used for folder naming.")
-    
+
     args = parser.parse_args()
+
+    # Fail immediately if OPENCODE_API_KEY is not set (and not in dummy mode)
+    if not args.dummy and not os.environ.get("OPENCODE_API_KEY"):
+        print("\n[ERROR] OPENCODE_API_KEY not found.")
+        print("Please set it in your environment, .env file,")
+        print("or ensure you are logged in via 'opencode auth login'.\n")
+        sys.exit(1)
 
     if not args.run_id:
         mode = "dummy" if args.dummy else "market"

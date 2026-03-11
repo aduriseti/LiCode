@@ -209,16 +209,15 @@ async def test_real_dashboard_startup():
     import tempfile
     import shutil
     
-    # Use a minimal tournament
+    # Use a tournament prompt that requires a tool call (modifying a file)
     cmd = [
         sys.executable, "-m", "market.cli", "run",
-        "--prompt", "return 42",
+        "--prompt", "create a file named success.txt with content 'it worked'",
         "--agents", "1",
         "--rounds", "1",
         "--dashboard",
         "--json-logs"
     ]
-    
     env = os.environ.copy()
     env["PYTHONPATH"] = os.getcwd()
     

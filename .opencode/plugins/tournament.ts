@@ -26,7 +26,7 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
             return new Promise<string>((resolve, reject) => {
                 const env: NodeJS.ProcessEnv = { 
                     ...process.env, 
-                    OPENCODE_API_KEY: process.env.OPENCODE,
+                    OPENCODE_API_KEY: process.env.OPENCODE_API_KEY || process.env.OPENCODE,
                     FORCE_COLOR: '1',
                     PYTHONUNBUFFERED: '1'
                 };
