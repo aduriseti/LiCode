@@ -21,7 +21,7 @@ class AgentAction:
     beliefs: Dict[str, float] = field(default_factory=dict)
     proposals: List[Dict] = field(default_factory=list) # e.g. {"type": "VERIFIER", "path": "..."}
 
-DEFAULT_EXCLUDE_LIST = [".arenas", ".home"]
+DEFAULT_EXCLUDE_LIST = [".arenas", ".home", "bun.lock", "package.json", "package-lock.json"]
 
 class Orchestrator:
     def __init__(self, prompt: str, n_agents: int, budget: float = 1000.0, state: Optional[MarketState] = None, base_dir: str = "/tmp/market"):

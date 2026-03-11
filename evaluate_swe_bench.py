@@ -84,8 +84,9 @@ def get_patch_from_winner(work_dir, report, state_dict):
 
     # Get the patch
     subprocess.run(["git", "add", "."], cwd=code_path, capture_output=True)
-    # Remove problem.md from staging so it's not in the diff
-    subprocess.run(["git", "reset", baseline_commit, "problem.md"], cwd=code_path, capture_output=True)
+    # Remove problem.md and other junk from staging so it's not in the diff
+    for file in ["problem.md", "bun.lock", "package.json", "package-lock.json"]:
+        subprocess.run(["git", "reset", baseline_commit, file], cwd=code_path, capture_output=True)
     
     diff_res = subprocess.run(["git", "diff", "--cached", baseline_commit], cwd=code_path, capture_output=True, text=True)
     return diff_res.stdout
