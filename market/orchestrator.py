@@ -23,7 +23,7 @@ class AgentAction:
     error: Optional[str] = None
     retry_count: int = 0
 
-DEFAULT_EXCLUDE_LIST = [".arenas", ".home"]
+DEFAULT_EXCLUDE_LIST = [".arenas", ".home", "bun.lock", "package.json", "package-lock.json"]
 
 class Orchestrator:
     def __init__(self, prompt: str, n_agents: int, budget: float = 1000.0, state: Optional[MarketState] = None, base_dir: str = "/tmp/market"):
