@@ -136,9 +136,12 @@ class TestShutdownHygiene(unittest.IsolatedAsyncioTestCase):
         
         await runner.initialize(json_logs=True)
         
-        with self.assertRaises(RuntimeError):
-            await runner.run_loop(max_rounds=1, stream_ui=False, json_logs=True)
+        # EXPECTATION: The loop should now complete even if an agent fails,
+        # so we don't expect RuntimeError to be raised here anymore.
+        await runner.run_loop(max_rounds=1, stream_ui=False, json_logs=True)
             
+        # Verify that failure was recorded and agent was still shutdown.
+        self.assertEqual(runner.orchestrator.state.agents["agent_0"].failure_count, 1)
         shark_instance.shutdown.assert_called_once()
 
 if __name__ == '__main__':
