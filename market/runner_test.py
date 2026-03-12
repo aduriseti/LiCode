@@ -5,7 +5,26 @@ from market.runner import MarketRunner
 from market.orchestrator import AgentAction
 
 class TestMarketRunner(unittest.IsolatedAsyncioTestCase):
-    
+
+    @patch('market.runner.Shark')
+    @patch('market.runner.MarketRunner._start_agent_server')
+    async def test_model_multiplexing_round_robin(self, mock_start_agent_server, MockShark):
+        runner = MarketRunner("Test", n_agents=3, budget=100.0, api_url="http://mock", model="modelA, modelB")
+        self.assertEqual(runner.models, ["modelA", "modelB"])
+
+        runner._find_free_port = MagicMock(return_value=8080)
+
+        await runner._setup_agent("agent_0")
+        mock_start_agent_server.assert_called_with("agent_0", 8080, model="modelA")
+
+        mock_start_agent_server.reset_mock()
+        await runner._setup_agent("agent_1")
+        mock_start_agent_server.assert_called_with("agent_1", 8080, model="modelB")
+
+        mock_start_agent_server.reset_mock()
+        await runner._setup_agent("agent_2")
+        mock_start_agent_server.assert_called_with("agent_2", 8080, model="modelA")
+
     @patch('market.runner.Shark')
     @patch('market.runner.socket.create_connection')
     @patch('market.runner.subprocess.Popen')

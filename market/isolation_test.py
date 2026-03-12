@@ -102,7 +102,7 @@ class TestIsolationRegression(unittest.IsolatedAsyncioTestCase):
                 # Mock port finding
                 runner._find_free_port = mock.MagicMock(return_value=1234)
                 
-                await runner._start_agent_server("agent_0", 1234)
+                await runner._start_agent_server("agent_0", 1234, model="test-model")
                 
                 # Check environment passed to exec
                 _, kwargs = mock_exec.call_args
@@ -144,7 +144,7 @@ class TestIsolationRegression(unittest.IsolatedAsyncioTestCase):
                 os.makedirs(cand_dir, exist_ok=True)
                 runner._find_free_port = mock.MagicMock(return_value=1234)
                 
-                await runner._start_agent_server("agent_0", 1234)
+                await runner._start_agent_server("agent_0", 1234, model=test_model)
                 
                 _, kwargs = mock_exec.call_args
                 env = kwargs.get("env", {})
@@ -186,7 +186,7 @@ class TestIsolationRegression(unittest.IsolatedAsyncioTestCase):
                 os.makedirs(cand_dir, exist_ok=True)
                 runner._find_free_port = mock.MagicMock(return_value=1234)
                 
-                await runner._start_agent_server("agent_0", 1234)
+                await runner._start_agent_server("agent_0", 1234, model="gemini")
                 
                 _, kwargs = mock_exec.call_args
                 env = kwargs.get("env", {})

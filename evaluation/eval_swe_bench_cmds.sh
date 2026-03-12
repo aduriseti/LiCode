@@ -97,3 +97,15 @@ python3 evaluate_swe_bench.py \
    --provider opencode \
    --model gemini-3-flash \
    --dashboard
+
+python evaluate_swe_bench.py \
+    --repo pallets/flask \
+    --limit 3 \
+    --agents 5 \
+    --rounds 3 \
+    --parallel 3 \
+    --run-eval \
+    --eval-workers 2 \
+    --provider opencode \
+    --model "gemini-3-pro,claude-sonnet-4.5,gpt-5.4-pro,minimax-m2.1,qwen3-coder" \
+    --dashboard

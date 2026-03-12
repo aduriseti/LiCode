@@ -83,6 +83,7 @@ class MarketRunner:
         self.price_history: List[Dict[str, float]] = [] 
         self.api_url = api_url
         self.model = model
+        self.models = [m.strip() for m in model.split(",")] if "," in model else [model]
         self.provider = provider
         self.agent_timeout = agent_timeout
         self.max_retries = max_retries
@@ -245,18 +246,27 @@ class MarketRunner:
                 async with self.port_lock:
                     port = self._find_free_port()
                 
+                # Determine model based on agent index (round-robin)
+                agent_index = int(aid.split('_')[-1])
+                agent_model_raw = self.models[agent_index % len(self.models)]
+
+                if '/' in agent_model_raw:
+                    agent_provider, agent_model = agent_model_raw.split('/', 1)
+                else:
+                    agent_provider, agent_model = self.provider, agent_model_raw
+
                 agent_url = f"http://127.0.0.1:{port}"
-                server_proc = await self._start_agent_server(aid, port)
+                server_proc = await self._start_agent_server(aid, port, model=agent_model, provider=agent_provider)
                 self.agent_servers[aid] = server_proc
                 
-                logging.info(f"Server for {aid} started on port {port}. Initializing Shark...")
+                logging.info(f"Server for {aid} started on port {port} with model {agent_model} (provider {agent_provider}). Initializing Shark...")
 
                 # 2. Initialize Shark
                 log_path = os.path.join(self.sessions_dir, f"{aid}.log")
                 cand_id = aid.replace("agent", "cand")
                 trace_path = os.path.join(self.traces_dir, f"{cand_id}_stream.txt")
                 
-                shark = Shark(aid, model=self.model, provider=self.provider, api_url=agent_url, 
+                shark = Shark(aid, model=agent_model, provider=agent_provider, api_url=agent_url, 
                               log_path=log_path, timeout=self.agent_timeout, trace_path=trace_path,
                               max_retries=self.max_retries, initial_backoff=self.initial_backoff,
                               max_backoff=self.max_backoff)
@@ -446,7 +456,7 @@ class MarketRunner:
             s.bind(('', 0))
             return s.getsockname()[1]
 
-    async def _start_agent_server(self, agent_id: str, port: int) -> asyncio.subprocess.Process:
+    async def _start_agent_server(self, agent_id: str, port: int, model: str, provider: str = None) -> asyncio.subprocess.Process:
         """Starts a dedicated OpenCode server for a specific agent."""
         # Use the candidate worktree as the agent's workspace
         cand_id = agent_id.replace("agent", "cand")
@@ -521,8 +531,10 @@ class MarketRunner:
             "doom_loop": "allow",
             "*": "allow",
         }
+        
+        provider_id = provider or self.provider
         config_data = {
-            "model": f"{self.provider}/{self.model}",
+            "model": f"{provider_id}/{model}",
             "snapshot": False,
             "agent": {
                 "general": {
