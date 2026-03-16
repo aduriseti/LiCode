@@ -33,7 +33,7 @@ describe("E2E Terminal WebSocket Proxy", () => {
 
         // 2. Start a real opencode serve instance
         const { spawn } = await import("child_process");
-        const srvProc = spawn("/home/codespace/.opencode/bin/opencode", ["serve", "--port", "0"], {
+        const srvProc = spawn("opencode", ["serve", "--port", "0"], {
             stdio: ["ignore", "pipe", "pipe"],
             env: { ...process.env, TERM: "dumb" }
         });
@@ -117,7 +117,7 @@ describe("E2E Terminal WebSocket Proxy", () => {
         });
 
         const { spawn } = await import("child_process");
-        const srvProc = spawn("/home/codespace/.opencode/bin/opencode", ["serve", "--port", "0"], {
+        const srvProc = spawn("opencode", ["serve", "--port", "0"], {
             stdio: ["ignore", "pipe", "pipe"],
             env: { ...process.env, TERM: "dumb" }
         });

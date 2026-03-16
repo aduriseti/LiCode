@@ -80,7 +80,7 @@ The value of a subarray is defined as sumArr * (sumArr + 1) / 2, where sumArr is
             console.log(`[TEST] Spawning opencode for case: ${name}...`);
             
             ocProcess = spawn(
-                "/home/codespace/.opencode/bin/opencode",
+                "opencode",
                 ["run", "--print-logs", prompt],
                 {
                     cwd: "/workspaces/LiCode",
