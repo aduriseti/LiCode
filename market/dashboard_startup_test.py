@@ -227,7 +227,12 @@ async def test_real_dashboard_startup():
     subprocess.run(["git", "init"], cwd=temp_dir, check=True, capture_output=True)
     with open(os.path.join(temp_dir, "dummy.txt"), "w") as f:
         f.write("dummy")
-    subprocess.run(["git", "add", "dummy.txt"], cwd=temp_dir, check=True, capture_output=True)
+    
+    # ADDED: Create .gitignore to prevent recursive cloning of .arenas
+    with open(os.path.join(temp_dir, ".gitignore"), "w") as f:
+        f.write(".arenas/\n.home/\n*.log\n")
+        
+    subprocess.run(["git", "add", "dummy.txt", ".gitignore"], cwd=temp_dir, check=True, capture_output=True)
     # Configure user name and email for the temp git repo to allow committing
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=temp_dir, check=True, capture_output=True)
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=temp_dir, check=True, capture_output=True)
@@ -324,15 +329,16 @@ async def test_real_dashboard_startup():
             
             # Poll for trace content (capture thread might take a moment to start and flush)
             content = ""
-            for _ in range(30): # Wait up to 30s for AI to think and act
+            for _ in range(60): # Wait up to 60s for AI to think and act
                 stream_traces = [f for f in os.listdir(traces_dir) if f.endswith("_stream.txt")]
                 if stream_traces:
                     with open(os.path.join(traces_dir, stream_traces[0]), "r") as f:
                         content = f.read()
-                        # Check if we have anything after [ASSISTANT]
-                        if "[ASSISTANT]" in content:
-                            parts = content.split("[ASSISTANT]")
-                            if len(parts) > 1 and parts[1].strip():
+                        # Wait for the complete cycle: Thinking -> Action -> Result
+                        if "[ASSISTANT]" in content and "[TOOL CALL:" in content and "[TOOL RESULT:" in content:
+                            # Ensure the tool result content (including the closing bracket) has been flushed
+                            parts = content.split("[TOOL RESULT:")
+                            if len(parts) > 1 and "]" in parts[1]:
                                 break
                 await asyncio.sleep(1.0)
             
@@ -347,6 +353,32 @@ async def test_real_dashboard_startup():
             # Verify tool usage is captured
             assert "[TOOL CALL:" in content, "Trace missing [TOOL CALL:] marker"
             assert "[TOOL RESULT:" in content, "Trace missing [TOOL RESULT:] marker"
+            
+            # Specific E2E Verification: Check worktree for expected changes and no leaks
+            # Locate cand_0 worktree
+            cand_0_dir = os.path.join(run_dir, "worktrees", "cand_0")
+            assert os.path.exists(cand_0_dir), "Agent worktree cand_0 not found"
+            
+            # Check success.txt
+            success_file = os.path.join(cand_0_dir, "success.txt")
+            assert os.path.exists(success_file), "Agent failed to create success.txt"
+            with open(success_file, "r") as f:
+                assert "it worked" in f.read()
+                
+            # Verify no distraction leaks or recursive clones
+            # Root items should only be committed files + our success.txt + agent's sandbox (.home)
+            root_items = os.listdir(cand_0_dir)
+            assert ".arenas" not in root_items, "Worktree contains leaked recursive .arenas directory"
+            
+            # Verify that .home is ignored by git (should not appear in untracked files)
+            proc = subprocess.run(["git", "ls-files", "-o", "--exclude-standard"], cwd=cand_0_dir, capture_output=True, text=True)
+            untracked_files = proc.stdout.splitlines()
+            
+            # The agent might have created success.txt but not staged it yet, or staged it.
+            # We want to ensure NO internal state files are untracked/tracked.
+            for f_path in untracked_files:
+                if "opencode.db" in f_path or ".home" in f_path:
+                    pytest.fail(f"Worktree contains untracked internal state file: {f_path}")
             
             print(f"\n[VERIFIED] Streaming trace found with {len(content)} characters, including prompts and tools.")
             # 4. Persistence Check
