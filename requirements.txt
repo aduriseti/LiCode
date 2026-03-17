@@ -11,3 +11,5 @@ aiohttp
 
 playwright
 pytest-playwright
+datasets
+swebench
