@@ -460,6 +460,33 @@ class MarketRunner:
         agent_home = os.path.join(agent_dir, ".home")
         os.makedirs(agent_home, exist_ok=True)
         
+        # Fast Startup: Symlink host node_modules into the agent's workspace.
+        # This prevents 'opencode serve' from re-downloading 200MB+ of dependencies (like playwright)
+        # for every single agent, which takes 60s+ and causes test timeouts.
+        host_root = os.getcwd()
+        
+        # 1. Symlink root node_modules
+        host_nm = os.path.join(host_root, "node_modules")
+        agent_nm = os.path.join(agent_dir, "node_modules")
+        if os.path.exists(host_nm) and not os.path.exists(agent_nm):
+            try:
+                os.symlink(host_nm, agent_nm)
+            except FileExistsError:
+                pass
+                
+        # 2. Symlink .opencode/node_modules
+        host_opencode_nm = os.path.join(host_root, ".opencode", "node_modules")
+        agent_opencode_dir = os.path.join(agent_dir, ".opencode")
+        agent_opencode_nm = os.path.join(agent_opencode_dir, "node_modules")
+        
+        if os.path.exists(host_opencode_nm):
+            os.makedirs(agent_opencode_dir, exist_ok=True)
+            if not os.path.exists(agent_opencode_nm):
+                try:
+                    os.symlink(host_opencode_nm, agent_opencode_nm)
+                except FileExistsError:
+                    pass
+
         # Environment setup
         env = os.environ.copy()
         

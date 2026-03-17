@@ -1,8 +1,18 @@
-.PHONY: setup test
+.PHONY: setup test-python test-js test-all test
 
 setup:
 	pip install -r requirements.txt
+	pip install -e .
 	python3 -m playwright install chromium
+	cd .opencode && npm install
+	[ -f .env ] || cp .env.example .env
 
-test:
-	export PYTHONPATH=$${PYTHONPATH}:$$(pwd) && export PATH=$${PATH}:$$(pwd)/.opencode/node_modules/.bin && pytest market/ tests/
+test-python:
+	pytest market/ tests/
+
+test-js:
+	cd .opencode && npx vitest run
+
+test-all: test-python test-js
+
+test: test-all

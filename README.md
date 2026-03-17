@@ -30,6 +30,34 @@ During the tournament, a `session_map.json` file is created in the arena directo
 - `session_file`: Path to the actual JSON file containing the session history within the arena.
 - `log_path`: Path to the human-readable log for that agent.
 
+---
+
+## Development
+
+### Setup
+Ensure you have Python 3.10+ and Node.js 18+ installed.
+
+```bash
+make setup
+```
+
+This will:
+1. Install Python dependencies and perform an editable install of the project.
+2. Install Playwright browsers.
+3. Install Node.js dependencies in `.opencode/`.
+4. Create a `.env` file from `.env.example`.
+
+### Testing
+You can run tests using the Makefile:
+
+```bash
+make test-python  # Run Python tests (pytest)
+make test-js      # Run JS/TS tests (vitest)
+make test-all     # Run both
+```
+
+Because of the editable install, you can also run `pytest` directly from the root directory. For JS tests, use `npx vitest` from within the `.opencode/` directory.
+
 ### Observing the Tournament
 The tournament tool executes in your current TUI, blocking it until completion. To "swap in" and see what agents are doing live, you must use a **second terminal**.
 
@@ -61,5 +89,33 @@ During the tournament, a `session_map.json` file is created in the arena directo
 - `session_id`: The OpenCode session ID.
 - `session_file`: Path to the actual JSON file containing the session history within the arena.
 - `log_path`: Path to the human-readable log for that agent.
+
+---
+
+## Development
+
+### Setup
+Ensure you have Python 3.10+ and Node.js 18+ installed.
+
+```bash
+make setup
+```
+
+This will:
+1. Install Python dependencies and perform an editable install of the project.
+2. Install Playwright browsers.
+3. Install Node.js dependencies in `.opencode/`.
+4. Create a `.env` file from `.env.example`.
+
+### Testing
+You can run tests using the Makefile:
+
+```bash
+make test-python  # Run Python tests (pytest)
+make test-js      # Run JS/TS tests (vitest)
+make test-all     # Run both
+```
+
+Because of the editable install, you can also run `pytest` directly from the root directory. For JS tests, use `npx vitest` from within the `.opencode/` directory.
 
 ---
