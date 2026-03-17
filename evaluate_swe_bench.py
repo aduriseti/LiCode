@@ -253,9 +253,15 @@ async def run_market_on_instance(instance, args, semaphore):
             ]
 
             if getattr(args, 'provider', None):
-                market_cmd.extend(["--provider", args.provider])
+                if isinstance(args.provider, list):
+                    market_cmd.extend(["--provider"] + args.provider)
+                else:
+                    market_cmd.extend(["--provider", args.provider])
             if getattr(args, 'model', None):
-                market_cmd.extend(["--model", args.model])
+                if isinstance(args.model, list):
+                    market_cmd.extend(["--model"] + args.model)
+                else:
+                    market_cmd.extend(["--model", args.model])
             if getattr(args, 'dashboard', False):
                 market_cmd.append("--dashboard")
             
@@ -391,8 +397,8 @@ async def async_main():
     parser.add_argument("--limit", type=int, default=3, help="Max instances to evaluate")
     parser.add_argument("--agents", type=int, default=3, help="Number of market agents")
     parser.add_argument("--rounds", type=int, default=5, help="Number of market rounds")
-    parser.add_argument("--provider", type=str, help="LLM Provider")
-    parser.add_argument("--model", type=str, help="LLM Model")
+    parser.add_argument("--provider", type=str, nargs='+', help="LLM Provider(s)")
+    parser.add_argument("--model", type=str, nargs='+', help="LLM Model(s)")
     parser.add_argument("--output", type=str, help="Output JSONL file (defaults to swe_bench_results/<run_id>/predictions.jsonl)")
     parser.add_argument("--dummy", action="store_true", help="Run a dummy evaluation returning empty patches without invoking agents.")
     parser.add_argument("--dashboard", action="store_true", help="Launch and show dashboard URLs for each instance.")

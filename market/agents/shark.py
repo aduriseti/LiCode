@@ -31,7 +31,8 @@ class Shark:
     An Inductive Agent (Shark) powered by an LLM via OpenCode API.
     """
     def __init__(self, agent_id: str, model: str = "gemini-3-flash", provider: str = "opencode", 
-                 api_url: str = "http://127.0.0.1:4096", log_path: Optional[str] = None, 
+                 api_url: str = "http://127.0.0.1:4096", 
+                 log_path: Optional[str] = None, 
                  timeout: float = 300.0, trace_path: Optional[str] = None,
                  max_retries: int = 3, initial_backoff: float = 120.0, 
                  max_backoff: float = 1000.0):

@@ -97,3 +97,15 @@ python3 evaluate_swe_bench.py \
    --provider opencode \
    --model gemini-3-flash \
    --dashboard
+
+# 5 SOTA Models Tournament Evaluation (March 2026)
+python evaluate_swe_bench.py \
+   --task-ids "django__django-11133,django__django-16527,astropy__astropy-12907,scikit-learn__scikit-learn-10297,sympy__sympy-16792" \
+   --agents 5 \
+   --rounds 3 \
+   --parallel 5 \
+   --run-eval \
+   --eval-workers 5 \
+   --provider opencode \
+   --model opencode/gpt-5.3-codex opencode/claude-4.6-opus opencode/gemini-3.1-pro opencode/grok-4-fast opencode/deepseek-v3.2 \
+   --dashboard

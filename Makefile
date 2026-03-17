@@ -16,3 +16,6 @@ test-js:
 test-all: test-python test-js
 
 test: test-all
+
+test-fib:
+	npx opencode run "run a tournament with 3 agents for 1 round to compute fibonacci #s"

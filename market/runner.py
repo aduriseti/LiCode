@@ -10,7 +10,7 @@ import asyncio
 import json
 import glob
 import signal
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Union
 from collections import deque
 
 from .core.state import MarketState
@@ -66,7 +66,8 @@ class MarketRunner:
     and the local OpenCode API server.
     """
     def __init__(self, prompt: str, n_agents: int, budget: float, api_url: Optional[str] = None, 
-                 model: str = "gemini-3-flash", provider: str = "opencode", 
+                 model: Union[str, List[str]] = "gemini-3-flash", 
+                 provider: Union[str, List[str]] = "opencode", 
                  agent_timeout: float = 300.0, dashboard: bool = False,
                  max_retries: int = 3, initial_backoff: float = 120.0, 
                  max_backoff: float = 1000.0):
@@ -82,8 +83,11 @@ class MarketRunner:
         self.agent_servers: Dict[str, asyncio.subprocess.Process] = {}
         self.price_history: List[Dict[str, float]] = [] 
         self.api_url = api_url
-        self.model = model
-        self.provider = provider
+        
+        # Standardize models and providers as lists
+        self.models = [model] if isinstance(model, str) else list(model)
+        self.providers = [provider] if isinstance(provider, str) else list(provider)
+        
         self.agent_timeout = agent_timeout
         self.max_retries = max_retries
         self.initial_backoff = initial_backoff
@@ -236,27 +240,57 @@ class MarketRunner:
         # 0. Initialize Orchestrator (clones workspaces in parallel)
         await self.orchestrator.initialize()
 
+        # Run setups concurrently
+        tasks = [self._setup_agent(aid, json_logs=json_logs) for aid in self.orchestrator.state.agents.keys()]
+        results = await asyncio.gather(*tasks)
+        
+        # Filter out failed setups (None)
+        session_map = {res[0]: res[1] for res in results if res is not None}
+
+        logging.info(f"Initialized {len(self.sharks)} agents.")
+
+        # Emit Initial State
+        if json_logs:
+            print(json.dumps({
+                "type": "state",
+                **json.loads(self.orchestrator.state.to_json())
+            }))
+            sys.stdout.flush()
+
+        # Write session map
+        with open(os.path.join(self.arena_dir, "session_map.json"), "w") as f:
+            json.dump(session_map, f, indent=2)
+
     async def _setup_agent(self, aid: str, json_logs: bool = False):
         """Initializes a single agent with retries."""
         for attempt in range(3):
             try:
                 logging.info(f"Starting setup for agent {aid} (Attempt {attempt+1}/3)...")
                 
+                # Determine model and provider for this specific agent
+                try:
+                    agent_idx = int(aid.split("_")[-1])
+                except (ValueError, IndexError):
+                    agent_idx = 0
+                
+                agent_model = self.models[agent_idx % len(self.models)]
+                agent_provider = self.providers[agent_idx % len(self.providers)]
+                
                 async with self.port_lock:
                     port = self._find_free_port()
                 
                 agent_url = f"http://127.0.0.1:{port}"
-                server_proc = await self._start_agent_server(aid, port)
+                server_proc = await self._start_agent_server(aid, port, model=agent_model, provider=agent_provider)
                 self.agent_servers[aid] = server_proc
                 
-                logging.info(f"Server for {aid} started on port {port}. Initializing Shark...")
+                logging.info(f"Server for {aid} started on port {port} with {agent_provider}/{agent_model}. Initializing Shark...")
 
                 # 2. Initialize Shark
                 log_path = os.path.join(self.sessions_dir, f"{aid}.log")
                 cand_id = aid.replace("agent", "cand")
                 trace_path = os.path.join(self.traces_dir, f"{cand_id}_stream.txt")
                 
-                shark = Shark(aid, model=self.model, provider=self.provider, api_url=agent_url, 
+                shark = Shark(aid, model=agent_model, provider=agent_provider, api_url=agent_url, 
                               log_path=log_path, timeout=self.agent_timeout, trace_path=trace_path,
                               max_retries=self.max_retries, initial_backoff=self.initial_backoff,
                               max_backoff=self.max_backoff)
@@ -312,123 +346,6 @@ class MarketRunner:
                     logging.error(f"Agent {aid} failed setup after 3 attempts. Proceeding without it.")
                     return None
 
-    async def initialize(self, json_logs: bool = False):
-        """Async initialization of agent servers and sessions."""
-        self.main_loop = asyncio.get_running_loop()
-        
-        rel_path = os.path.relpath(self.arena_dir, os.getcwd())
-        if json_logs:
-            print(json.dumps({"type": "log", "message": f"Tournament Arena initialized at: {rel_path}"}))
-            sys.stdout.flush()
-        else:
-            print(f"Tournament Arena initialized at: {rel_path}")
-        logging.info(f"Tournament Arena initialized at: {rel_path}")
-
-        if self.dashboard:
-            port = self._find_free_port()
-            self.dashboard_url = f"http://localhost:{port}"
-            
-            # Use __file__ to reliably find the script regardless of CWD
-            market_dir = os.path.dirname(os.path.abspath(__file__))
-            project_root = os.path.dirname(market_dir)
-            dashboard_script = os.path.join(project_root, ".opencode", "lib", "dashboard-server.ts")
-            
-            env = os.environ.copy()
-            env["DASHBOARD_PORT"] = str(port)
-            
-            dash_log_path = os.path.join(self.arena_dir, "dashboard_server.log")
-            self.dash_log_file = open(dash_log_path, "w")
-
-            self.dashboard_proc = await asyncio.create_subprocess_exec(
-                "bun", dashboard_script,
-                env=env,
-                stdout=self.dash_log_file,
-                stderr=asyncio.subprocess.PIPE, # Capture stderr for diagnosis
-                stdin=asyncio.subprocess.PIPE,
-                limit=1024 * 1024 * 32,
-            )
-            
-            # Start a background task to proxy dashboard stderr for diagnosis
-            async def proxy_dash_stderr():
-                while self.dashboard_proc and self.dashboard_proc.returncode is None:
-                    try:
-                        line = await self.dashboard_proc.stderr.readline()
-                        if not line: break
-                        sys.stderr.write(f"[DASHBOARD ERROR] {line.decode('utf-8')}")
-                        sys.stderr.flush()
-                    except: break
-            
-            if self.main_loop and self.main_loop.is_running():
-                self.main_loop.create_task(proxy_dash_stderr())
-            
-            # Start Heartbeat Task to keep stdin pipe alive
-            async def dashboard_heartbeat():
-                while self.dashboard_proc and self.dashboard_proc.returncode is None:
-                    try:
-                        if self.dashboard_proc.stdin and not self.dashboard_proc.stdin.is_closing():
-                            self.dashboard_proc.stdin.write(b"heartbeat\n")
-                            await self.dashboard_proc.stdin.drain()
-                        else:
-                            break
-                    except (ConnectionResetError, BrokenPipeError):
-                        break
-                    except Exception:
-                        break
-                    await asyncio.sleep(2.0)
-            
-            if self.main_loop and self.main_loop.is_running():
-                self.main_loop.create_task(dashboard_heartbeat())
-            
-            # Wait for ready (Increased to 150 attempts @ 0.1s = 15s)
-            for _ in range(150):
-                try:
-                    _, writer = await asyncio.open_connection("127.0.0.1", port)
-                    writer.close()
-                    await writer.wait_closed()
-                    
-                    # Attach handler to forward Python logs to dashboard
-                    dash_handler = DashboardLogHandler(self)
-                    dash_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s', datefmt='%H:%M:%S'))
-                    logging.getLogger().addHandler(dash_handler)
-                    break
-                except:
-                    await asyncio.sleep(0.1)
-
-            if json_logs:
-                print(json.dumps({"type": "log", "message": f"Dashboard active at {self.dashboard_url}"}))
-                sys.stdout.flush()
-            else:
-                sys.stderr.write(f"Dashboard active at {self.dashboard_url}\n")
-                sys.stderr.flush()
-            
-            logging.info(f"Dashboard active at {self.dashboard_url}")
-
-        logging.info(f"Initializing tournament for run_id: {self.run_id}")
-            
-        # 0. Initialize Orchestrator (clones workspaces in parallel)
-        await self.orchestrator.initialize()
-
-        # Run setups concurrently
-        tasks = [self._setup_agent(aid, json_logs=json_logs) for aid in self.orchestrator.state.agents.keys()]
-        results = await asyncio.gather(*tasks)
-        
-        # Filter out failed setups (None)
-        session_map = {res[0]: res[1] for res in results if res is not None}
-
-        logging.info(f"Initialized {len(self.sharks)} agents.")
-
-        # Emit Initial State
-        if json_logs:
-            print(json.dumps({
-                "type": "state",
-                **json.loads(self.orchestrator.state.to_json())
-            }))
-            sys.stdout.flush()
-
-        # Write session map
-        with open(os.path.join(self.arena_dir, "session_map.json"), "w") as f:
-            json.dump(session_map, f, indent=2)
-
     def _find_free_port(self) -> int:
         import socket
         import random
@@ -446,25 +363,25 @@ class MarketRunner:
             s.bind(('', 0))
             return s.getsockname()[1]
 
-    async def _start_agent_server(self, agent_id: str, port: int) -> asyncio.subprocess.Process:
+    async def _start_agent_server(self, agent_id: str, port: int, model: str, provider: str) -> asyncio.subprocess.Process:
         """Starts a dedicated OpenCode server for a specific agent."""
         # Use the candidate worktree as the agent's workspace
         cand_id = agent_id.replace("agent", "cand")
         agent_dir = os.path.join(self.arena_dir, "worktrees", cand_id)
-        
+
         # Ensure the directory exists (should be created by Orchestrator)
         if not os.path.exists(agent_dir):
             os.makedirs(agent_dir, exist_ok=True)
-        
+
         # Sandbox HOME inside the candidate worktree
         agent_home = os.path.join(agent_dir, ".home")
         os.makedirs(agent_home, exist_ok=True)
-        
+
         # Fast Startup: Symlink host node_modules into the agent's workspace.
         # This prevents 'opencode serve' from re-downloading 200MB+ of dependencies (like playwright)
         # for every single agent, which takes 60s+ and causes test timeouts.
         host_root = os.getcwd()
-        
+
         # 1. Symlink root node_modules
         host_nm = os.path.join(host_root, "node_modules")
         agent_nm = os.path.join(agent_dir, "node_modules")
@@ -473,12 +390,12 @@ class MarketRunner:
                 os.symlink(host_nm, agent_nm)
             except FileExistsError:
                 pass
-                
+
         # 2. Symlink .opencode/node_modules
         host_opencode_nm = os.path.join(host_root, ".opencode", "node_modules")
         agent_opencode_dir = os.path.join(agent_dir, ".opencode")
         agent_opencode_nm = os.path.join(agent_opencode_dir, "node_modules")
-        
+
         if os.path.exists(host_opencode_nm):
             os.makedirs(agent_opencode_dir, exist_ok=True)
             if not os.path.exists(agent_opencode_nm):
@@ -489,22 +406,26 @@ class MarketRunner:
 
         # Environment setup
         env = os.environ.copy()
-        
+
         # Ensure API keys are correctly mapped for different providers
         if "GEMINI_API_KEY" in env and "GOOGLE_GENERATIVE_AI_API_KEY" not in env:
             env["GOOGLE_GENERATIVE_AI_API_KEY"] = env["GEMINI_API_KEY"]
-            
+
         # Ensure /.opencode/bin is in the PATH if we are in a container
         if "/.opencode/bin" in env.get("PATH", "") or os.path.exists("/.opencode/bin"):
             if "/.opencode/bin" not in env.get("PATH", ""):
                 env["PATH"] = f"/.opencode/bin:{env.get('PATH', '')}"
-        
+
         env["HOME"] = agent_home
         env["PORT"] = str(port)
 
         # Plumb OPENCODE_API_KEY from environment to auth.json inside the sandbox
-        opencode_key = env.get("OPENCODE_API_KEY")
-        if not opencode_key:
+        raw_opencode_key = env.get("OPENCODE_API_KEY")
+        opencode_key = None
+        
+        if raw_opencode_key:
+            opencode_key = raw_opencode_key.strip("\"' \n\r\t")
+        else:
             # Fallback: try to resolve from host's auth.json
             auth_path = os.path.expanduser("~/.local/share/opencode/auth.json")
             if os.path.exists(auth_path):
@@ -512,6 +433,8 @@ class MarketRunner:
                     with open(auth_path, "r") as f:
                         data = json.load(f)
                         opencode_key = data.get("opencode", {}).get("key")
+                        if opencode_key:
+                            opencode_key = opencode_key.strip("\"' \n\r\t")
                 except Exception:
                     pass
 
@@ -528,14 +451,14 @@ class MarketRunner:
                 }
                 with open(os.path.join(dest_auth_dir, "auth.json"), "w") as f:
                     json.dump(auth_data, f)
-                
+
                 # Also map it to OPENCODE for potential plugin usage
                 env["OPENCODE"] = opencode_key
                 # Ensure it's in env for the subprocess as well
                 env["OPENCODE_API_KEY"] = opencode_key
             except Exception as e:
                 logging.warning(f"Failed to plumb OPENCODE_API_KEY to agent sandbox: {e}")
-        
+
         # Security & Automation:
         # - Auto-deny external directory access (fails immediately instead of hanging)
         # - Auto-allow doom_loop and bash (prevents hanging on long tasks)
@@ -548,8 +471,15 @@ class MarketRunner:
             "doom_loop": "allow",
             "*": "allow",
         }
+        
+        # Consistent provider/model format for the OpenCode config
+        if model.startswith(f"{provider}/"):
+            full_model_name = model
+        else:
+            full_model_name = f"{provider}/{model}"
+        
         config_data = {
-            "model": f"{self.provider}/{self.model}",
+            "model": full_model_name,
             "snapshot": False,
             "agent": {
                 "general": {
@@ -558,7 +488,6 @@ class MarketRunner:
                 },
             }
         }
-        
         # Validate and serialize configuration
         config_obj = Config(**config_data)
         # Use model_dump to avoid Pydantic v2 serialization issues with Mocks in tests

@@ -102,7 +102,7 @@ class TestIsolationRegression(unittest.IsolatedAsyncioTestCase):
                 # Mock port finding
                 runner._find_free_port = mock.MagicMock(return_value=1234)
                 
-                await runner._start_agent_server("agent_0", 1234)
+                await runner._start_agent_server("agent_0", 1234, model=runner.models[0], provider=runner.providers[0])
                 
                 # Check environment passed to exec
                 _, kwargs = mock_exec.call_args
@@ -144,7 +144,7 @@ class TestIsolationRegression(unittest.IsolatedAsyncioTestCase):
                 os.makedirs(cand_dir, exist_ok=True)
                 runner._find_free_port = mock.MagicMock(return_value=1234)
                 
-                await runner._start_agent_server("agent_0", 1234)
+                await runner._start_agent_server("agent_0", 1234, model=runner.models[0], provider=runner.providers[0])
                 
                 _, kwargs = mock_exec.call_args
                 env = kwargs.get("env", {})
@@ -186,7 +186,7 @@ class TestIsolationRegression(unittest.IsolatedAsyncioTestCase):
                 os.makedirs(cand_dir, exist_ok=True)
                 runner._find_free_port = mock.MagicMock(return_value=1234)
                 
-                await runner._start_agent_server("agent_0", 1234)
+                await runner._start_agent_server("agent_0", 1234, model=runner.models[0], provider=runner.providers[0])
                 
                 _, kwargs = mock_exec.call_args
                 env = kwargs.get("env", {})
@@ -197,10 +197,60 @@ class TestIsolationRegression(unittest.IsolatedAsyncioTestCase):
                     config_obj = StrictConfig.model_validate_json(config_json)
                     self.assertIsInstance(config_obj, Config)
                     self.assertEqual(getattr(config_obj, "model", None), "google/gemini")
-                    # Verify snapshot is explicitly False
+                    # Verify that snapshot is explicitly False
                     self.assertFalse(getattr(config_obj, "snapshot", True))
                 except Exception as e:
                     self.fail(f"Config validation failed (STRICT MODE). JSON: {config_json}. Error: {e}")
+
+    async def test_runner_multiple_configs(self):
+        """Verifies that multiple models and providers are assigned correctly to agents."""
+        models = ["model-a", "model-b"]
+        providers = ["provider-1", "provider-2"]
+        # 3 agents to test modulo: agent_0 (a/1), agent_1 (b/2), agent_2 (a/1)
+        runner = MarketRunner("test", 3, 1000.0, model=models, provider=providers)
+        
+        with mock.patch("asyncio.create_subprocess_exec") as mock_exec, \
+             mock.patch("asyncio.open_connection") as mock_connect:
+            
+            # Setup mocks
+            mock_proc = mock.MagicMock()
+            mock_proc.returncode = None
+            mock_proc.poll.return_value = None
+            mock_proc.wait = mock.AsyncMock()
+            mock_exec.return_value = mock_proc
+
+            mock_writer = mock.MagicMock()
+            mock_writer.wait_closed = mock.AsyncMock()
+            mock_connect.return_value = (mock.MagicMock(), mock_writer)
+
+            # Ensure worktree dirs exist
+            for i in range(3):
+                os.makedirs(os.path.join(runner.arena_dir, "worktrees", f"cand_{i}"), exist_ok=True)
+            
+            runner._find_free_port = mock.MagicMock(side_effect=[1000, 1001, 1002])
+            
+            # Start servers for 3 agents
+            await runner._start_agent_server("agent_0", 1000, model="model-a", provider="provider-1")
+            await runner._start_agent_server("agent_1", 1001, model="model-b", provider="provider-2")
+            await runner._start_agent_server("agent_2", 1002, model="model-a", provider="provider-1")
+            
+            # Verify calls
+            self.assertEqual(mock_exec.call_count, 3)
+            
+            # Check agent_0
+            _, kwargs0 = mock_exec.call_args_list[0]
+            config0 = json.loads(kwargs0["env"]["OPENCODE_CONFIG_CONTENT"])
+            self.assertEqual(config0["model"], "provider-1/model-a")
+            
+            # Check agent_1
+            _, kwargs1 = mock_exec.call_args_list[1]
+            config1 = json.loads(kwargs1["env"]["OPENCODE_CONFIG_CONTENT"])
+            self.assertEqual(config1["model"], "provider-2/model-b")
+            
+            # Check agent_2
+            _, kwargs2 = mock_exec.call_args_list[2]
+            config2 = json.loads(kwargs2["env"]["OPENCODE_CONFIG_CONTENT"])
+            self.assertEqual(config2["model"], "provider-1/model-a")
 
     async def test_shark_path_masking(self):
         """Verifies Shark masks absolute paths in the state prompt."""

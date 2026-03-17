@@ -11,6 +11,10 @@ from dotenv import load_dotenv
 # Load environment variables from .env if it exists
 load_dotenv()
 
+# Clean up API key from environment to prevent literal quotes or whitespace issues
+if "OPENCODE_API_KEY" in os.environ:
+    os.environ["OPENCODE_API_KEY"] = os.environ["OPENCODE_API_KEY"].strip("\"' \n\r\t")
+
 from market.orchestrator import Orchestrator
 from market.runner import MarketRunner
 
@@ -74,7 +78,113 @@ class MarketArgumentParser(argparse.ArgumentParser):
             sys.stderr.write(f"{error_msg}\n")
         sys.exit(2)
 
-def main():
+from pydantic import BaseModel, ConfigDict
+from typing import List, Dict, Any, Optional, Union
+from opencode_ai import AsyncOpencode
+from opencode_ai.types import Model, Provider
+import difflib
+
+class StrictModel(Model):
+    model_config = ConfigDict(extra='ignore')
+
+class StrictProvider(Provider):
+    model_config = ConfigDict(extra='ignore')
+
+class TournamentConfig(BaseModel):
+    models: List[Union[StrictModel, Model]]
+    providers: List[Union[StrictProvider, Provider]]
+
+async def validate_config_with_api(args, parser):
+    """
+    Dynamically fetches available models/providers from a temporary local OpenCode API 
+    instance to ensure absolute isolation and validation accuracy.
+    """
+    import socket
+    import time
+    
+    # 1. Find a free local port
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(('127.0.0.1', 0))
+        port = s.getsockname()[1]
+    
+    api_url = f"http://127.0.0.1:{port}"
+    
+    # 2. Spawn ephemeral lookup server
+    # We use npx to ensure we use the project-local OpenCode binary
+    process = await asyncio.create_subprocess_exec(
+        "npx", "opencode", "serve", "--port", str(port), "--hostname", "127.0.0.1",
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE
+    )
+    
+    try:
+        # Wait for server to be ready (poll for up to 10s)
+        client = AsyncOpencode(base_url=api_url, timeout=2.0)
+        all_providers = {}
+        
+        start_wait = time.time()
+        while (time.time() - start_wait) < 10:
+            try:
+                res = await client.app.providers()
+                if res.providers:
+                    all_providers = {p.id: p for p in res.providers}
+                    break
+            except Exception:
+                await asyncio.sleep(0.2)
+        
+        if not all_providers:
+            parser.error(f"Failed to initialize ephemeral OpenCode API for validation on port {port}.")
+
+        hydrated_models = []
+        hydrated_providers = []
+
+        # 1. Hydrate Providers
+        for p_id in args.provider:
+            if p_id not in all_providers:
+                close_matches = difflib.get_close_matches(p_id, list(all_providers.keys()))
+                suggestion = f" Did you mean: {', '.join(close_matches)}?" if close_matches else ""
+                parser.error(f"Provider '{p_id}' not found in OpenCode API.{suggestion} Available: {sorted(all_providers.keys())}")
+            
+            p_obj = all_providers[p_id]
+            hydrated_providers.append(p_obj)
+
+        # 2. Hydrate Models
+        for m_str in args.model:
+            parts = m_str.split('/')
+            target_p = parts[0] if len(parts) > 1 else args.provider[0]
+            target_m = parts[1] if len(parts) > 1 else m_str
+
+            if target_p not in all_providers:
+                 close_matches = difflib.get_close_matches(target_p, list(all_providers.keys()))
+                 suggestion = f" Did you mean: {', '.join(close_matches)}?" if close_matches else ""
+                 parser.error(f"Model '{m_str}' references unknown provider '{target_p}'.{suggestion} Available: {sorted(all_providers.keys())}")
+            
+            provider_models = all_providers[target_p].models
+            if target_m not in provider_models:
+                close_matches = difflib.get_close_matches(target_m, list(provider_models.keys()))
+                suggestion = f" Did you mean: {', '.join(close_matches)}?" if close_matches else ""
+                parser.error(f"Model '{target_m}' not found for provider '{target_p}'.{suggestion} Available: {sorted(provider_models.keys())}")
+            
+            m_obj = provider_models[target_m]
+            hydrated_models.append(m_obj)
+
+        # 3. Final Pydantic Structural Validation
+        try:
+            TournamentConfig(models=hydrated_models, providers=hydrated_providers)
+        except Exception as e:
+            parser.error(f"Configuration structural mismatch with OpenCode schemas: {e}")
+
+    finally:
+        # 4. Guaranteed Cleanup of ephemeral server
+        if process.returncode is None:
+            try:
+                process.terminate()
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+            except Exception:
+                try: process.kill()
+                except: pass
+
+async def async_main():
     parser = MarketArgumentParser(description="Logical Induction Market CLI")
     parser.add_argument("--log-level", type=lambda x: x.upper(), default=os.environ.get("LOG_LEVEL", "INFO"), 
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
@@ -103,8 +213,8 @@ def main():
     run_parser.add_argument("--max-backoff", type=float, default=1000.0, help="Maximum timeout ceiling in seconds")
     run_parser.add_argument("--api-url", type=str, default=os.environ.get("OPENCODE_API_URL"), 
                             help="API URL for the induction engine (defaults to cloud or $OPENCODE_API_URL)")
-    run_parser.add_argument("--model", type=str, default="gemini-3-flash")
-    run_parser.add_argument("--provider", type=str, default="opencode")
+    run_parser.add_argument("--model", type=str, nargs='+', default=["gemini-3-flash", "claude-sonnet-4-6", "glm-5"])
+    run_parser.add_argument("--provider", type=str, nargs='+', default=["opencode"])
     run_parser.add_argument("--json-logs", action="store_true", help="Output JSON logs to stdout instead of TUI")
     run_parser.add_argument("--dashboard", action="store_true", help="Launch and log to the local web dashboard")
     run_parser.add_argument("--log-level", type=lambda x: x.upper(), 
@@ -113,15 +223,28 @@ def main():
     
     args = parser.parse_args()
 
+    # Flatten potential comma-separated strings in model and provider lists
+    if hasattr(args, 'model') and args.model:
+        flattened_models = []
+        for m in args.model:
+            flattened_models.extend([item.strip() for item in m.split(',')])
+        args.model = flattened_models
+        
+    if hasattr(args, 'provider') and args.provider:
+        flattened_providers = []
+        for p in args.provider:
+            flattened_providers.extend([item.strip() for item in p.split(',')])
+        args.provider = flattened_providers
+
+    # Dynamic Pre-flight Validation
+    if args.command == "run":
+        await validate_config_with_api(args, parser)
+
     # Configure Logging
-    # Prioritize subparser arg, then top-level arg, then env
-    # Because of how argparse handles shadowing, we may need to check the raw sys.argv 
-    # if it's not set in the subparser but was passed as a global.
     log_level_name = None
     if getattr(args, 'log_level', None):
         log_level_name = args.log_level.upper()
     else:
-        # Check if --log-level was passed globally (before subcommand)
         for i, arg in enumerate(sys.argv):
             if arg == "--log-level" and i + 1 < len(sys.argv):
                 log_level_name = sys.argv[i+1].upper()
@@ -131,17 +254,12 @@ def main():
         log_level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
         
     log_level = getattr(logging, log_level_name, logging.ERROR)
-    
-    # Use custom handler and formatter
     handler = UnbufferedStreamHandler(sys.stderr)
     formatter = WrappingFormatter(fmt='%(asctime)s - %(levelname)s - %(message)s', width=100)
     handler.setFormatter(formatter)
     
-    # Configure the root logger so all logging calls in the project are captured
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
-    
-    # Remove existing handlers to avoid duplicates
     if root_logger.hasHandlers():
         root_logger.handlers.clear()
     root_logger.addHandler(handler)
@@ -165,24 +283,19 @@ def main():
             max_backoff=args.max_backoff
         )
         
-        async def run_tournament():
-            try:
-                await runner.initialize(json_logs=args.json_logs)
-                await runner.run_loop(args.rounds, stream_ui=not args.json_logs, json_logs=args.json_logs)
-            finally:
-                if not args.dashboard:
-                    await runner.close()
-
-        asyncio.run(run_tournament())
+        try:
+            await runner.initialize(json_logs=args.json_logs)
+            await runner.run_loop(args.rounds, stream_ui=not args.json_logs, json_logs=args.json_logs)
+        finally:
+            if not args.dashboard:
+                await runner.close()
         
-        # Construct final output
         report = runner.orchestrator.get_final_report()
         output = {
             "state": json.loads(runner.orchestrator.state.to_json()),
             "report": report
         }
 
-        # Dump report to disk for inspection
         try:
             report_path = os.path.join(runner.arena_dir, "TOURNAMENT_REPORT.md")
             with open(report_path, "w") as f:
@@ -193,6 +306,9 @@ def main():
 
         if not args.json_logs:
             print(json.dumps(output))
+
+def main():
+    asyncio.run(async_main())
 
 if __name__ == "__main__":
     main()

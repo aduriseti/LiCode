@@ -6,30 +6,15 @@ import * as path from "path";
 import * as os from "os";
 
 describe("Workspace Verification (Headless Browser)", () => {
-    let resolvedApiKey: string | undefined = process.env.OPENCODE_API_KEY || process.env.OPENCODE;
-
-    beforeAll(() => {
-        // Fallback: try to resolve from host's auth.json if missing from env
-        if (!resolvedApiKey) {
-            const authPath = path.join(os.homedir(), ".local/share/opencode/auth.json");
-            if (fs.existsSync(authPath)) {
-                try {
-                    const authJson = fs.readFileSync(authPath, "utf-8");
-                    const authData = JSON.parse(authJson);
-                    resolvedApiKey = authData?.opencode?.key;
-                    if (resolvedApiKey) {
-                        console.log(`[TEST SETUP] Resolved API key from ${authPath}`);
-                    }
-                } catch (e: any) {
-                    console.error(`[TEST SETUP] Failed to parse auth.json: ${e.message}`);
-                }
-            }
+    function getLocalApiKey(): string {
+        const envPath = "/workspaces/LiCode/.env";
+        if (fs.existsSync(envPath)) {
+            const content = fs.readFileSync(envPath, "utf-8");
+            const match = content.match(/^OPENCODE_API_KEY=["']?(.*?)["']?$/m);
+            if (match && match[1]) return match[1];
         }
-
-        if (!resolvedApiKey) {
-            console.warn("[TEST SETUP] WARNING: OPENCODE_API_KEY not found in environment or auth.json. Tests requiring LLM interaction will likely fail.");
-        }
-    });
+        throw new Error(`OPENCODE_API_KEY not found in ${envPath}. Cannot run LLM-based verification tests.`);
+    }
 
     async function launchBrowser(): Promise<Browser> {
         return chromium.launch({
@@ -79,16 +64,17 @@ The value of a subarray is defined as sumArr * (sumArr + 1) / 2, where sumArr is
 
             console.log(`[TEST] Spawning opencode for case: ${name}...`);
             
+            const apiKey = getLocalApiKey();
             ocProcess = spawn(
-                "opencode",
-                ["run", "--print-logs", prompt],
+                "npx",
+                ["opencode", "run", "--model", "opencode/gemini-3-flash", "--print-logs", prompt],
                 {
                     cwd: "/workspaces/LiCode",
                     stdio: ["ignore", "pipe", "pipe"],
                     detached: true,
                     env: { 
                         ...process.env, 
-                        OPENCODE_API_KEY: resolvedApiKey || process.env.OPENCODE_API_KEY || process.env.OPENCODE,
+                        OPENCODE_API_KEY: apiKey,
                         TERM: "dumb" 
                     }
                 }

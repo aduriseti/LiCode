@@ -2,7 +2,7 @@ import os
 import sys
 import pytest
 import asyncio
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 from argparse import Namespace
 
 # Add project root to sys.path so we can import evaluate_swe_bench
@@ -305,3 +305,91 @@ async def test_run_market_protocol_fix(tmp_path):
             assert result is not None
             assert result['instance_id'] == 'test_repo__test_issue-456'
             assert result['model_patch'] == 'fake-patch'
+
+@pytest.mark.asyncio
+async def test_run_market_multiple_configs(tmp_path):
+    """
+    Test that run_market_on_instance correctly passes multiple models and providers
+    to the market CLI command.
+    """
+    instance = {
+        'instance_id': 'test_repo__test_issue-789',
+        'repo': 'test/repo',
+        'base_commit': 'abcdef123456',
+        'problem_statement': 'Fix the bug.'
+    }
+    
+    args = Namespace(
+        dummy=False,
+        agents=2,
+        rounds=1,
+        provider=['provider-a', 'provider-b'],
+        model=['model-1', 'model-2'],
+        output=str(tmp_path / "run_folder" / "predictions.jsonl"),
+        dashboard=False,
+        max_retries=1,
+        initial_backoff=120.0,
+        max_backoff=1000.0
+    )
+    semaphore = asyncio.Semaphore(1)
+    
+    mock_output = {
+        "state": {"round_num": 1, "assets": {"winner": {"type": "CANDIDATE", "code_path": "/tmp"}}},
+        "report": "**Winner:** winner"
+    }
+    
+    with patch('evaluate_swe_bench.asyncio.create_subprocess_exec') as mock_exec, \
+         patch('evaluate_swe_bench.get_patch_from_winner', return_value="fake-patch"), \
+         patch('evaluate_swe_bench.docker') as mock_docker:
+        
+        async def mock_async_val(val): return val
+        async def mock_async_none(*args, **kwargs): return None
+            
+        mock_docker.get_image_name.return_value = "test_image"
+        mock_docker.pull_image = mock_async_none
+        mock_docker.start_container = MagicMock(side_effect=lambda *args: mock_async_val("test_container_id"))
+        mock_docker.stop_container = mock_async_none
+    
+        mock_market = MagicMock()
+        mock_market.wait = mock_async_none
+        mock_market.returncode = 0
+        mock_stdout = MagicMock()
+        mock_stdout.readline = AsyncMock(side_effect=[json.dumps(mock_output).encode() + b"\n", b""])
+        mock_market.stdout = mock_stdout
+        
+        # We only care about the market.cli call
+        def exec_side_effect(*cmd, **kwargs):
+            if "market.cli" in cmd:
+                return mock_market
+            m = MagicMock()
+            m.communicate = mock_async_none
+            m.wait = mock_async_none
+            m.returncode = 0
+            return m
+            
+        mock_exec.side_effect = exec_side_effect
+        
+        with patch('evaluate_swe_bench.os.makedirs'), \
+             patch('evaluate_swe_bench.open', MagicMock()):
+            
+            await evaluate_swe_bench.run_market_on_instance(instance, args, semaphore)
+            
+            # Find market.cli call and verify args
+            market_call = None
+            for call in mock_exec.call_args_list:
+                if "market.cli" in call[0]:
+                    market_call = call[0]
+                    break
+            
+            assert market_call is not None
+            # Check for multiple --model and --provider arguments
+            # market_cmd.extend(["--provider"] + args.provider) -> ... --provider provider-a provider-b
+            market_call_list = list(market_call)
+            
+            prov_idx = market_call_list.index("--provider")
+            assert market_call_list[prov_idx+1] == "provider-a"
+            assert market_call_list[prov_idx+2] == "provider-b"
+            
+            model_idx = market_call_list.index("--model")
+            assert market_call_list[model_idx+1] == "model-1"
+            assert market_call_list[model_idx+2] == "model-2"

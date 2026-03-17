@@ -8,17 +8,15 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
   return {
     tool: {
       tournament: tool({
-        description: "Runs a Logical Induction Market tournament with a live web dashboard. ALWAYS use 'opencode' provider and 'gemini-3-flash' model to utilize available credits.",
+        description: "Runs a Logical Induction Market tournament with a live web dashboard. Supports heterogeneous agents using multiple models and providers.",
         args: {
             prompt: tool.schema.string().describe("The coding task"),
             rounds: tool.schema.number().default(2),
             agents: tool.schema.number().default(3),
-            model: tool.schema.string().default("gemini-3-flash").describe("The LLM model ID. Defaults to 'gemini-3-flash'."),
-            provider: tool.schema.string().default("opencode").describe("The LLM provider ID. MUST be 'opencode' to use credits."),
             log_level: tool.schema.string().default("INFO").describe("Logging level (DEBUG, INFO, WARNING, ERROR). Defaults to INFO."),
             timeout: tool.schema.number().default(300.0).describe("Timeout for each agent's response in seconds. Increase for complex tasks.")
         },
-        async execute({ prompt, rounds, agents, model, provider, log_level, timeout }, ctx: ToolContext) {
+        async execute({ prompt, rounds, agents, log_level, timeout }, ctx: ToolContext) {
             const log = (level: "debug" | "info" | "warn" | "error", message: string) => {
                 client.app.log({ body: { service: "tournament-tool", level, message } }).catch(() => {});
             };
@@ -38,8 +36,6 @@ export const tournamentPlugin: Plugin = async ({ client, $ }) => {
                     "--prompt", prompt,
                     "--rounds", String(rounds),
                     "--agents", String(agents),
-                    "--model", model,
-                    "--provider", provider,
                     "--timeout", String(timeout),
                     "--json-logs",
                     "--dashboard"
