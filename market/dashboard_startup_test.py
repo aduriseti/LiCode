@@ -32,7 +32,8 @@ async def test_dashboard_history_replay():
         "bun", dashboard_script,
         env=env,
         stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True
     )
     
     try:
@@ -81,7 +82,8 @@ async def test_dashboard_history_replay():
         
     finally:
         try:
-            process.kill()
+            import signal
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
             await process.wait()
         except: pass
 
@@ -126,7 +128,8 @@ async def test_agent_terminal_connection():
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
-        cwd=temp_dir
+        cwd=temp_dir,
+        start_new_session=True
     )
     
     try:
@@ -186,10 +189,12 @@ async def test_agent_terminal_connection():
             assert found, f"Target content not found in UI terminal within 45s. Got: {terminal_text[:200]}"
 
     finally:
-        try: 
-            process.kill()
+        try:
+            import signal
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
             await asyncio.wait_for(process.wait(), timeout=2.0)
         except: pass
+
         try: shutil.rmtree(temp_dir)
         except: pass
 
@@ -235,7 +240,8 @@ async def test_multi_model_terminal_content():
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
-        cwd=temp_dir
+        cwd=temp_dir,
+        start_new_session=True
     )
     
     try:
@@ -305,10 +311,12 @@ async def test_multi_model_terminal_content():
             await browser.close()
 
     finally:
-        try: 
-            process.kill()
+        try:
+            import signal
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
             await process.wait()
         except: pass
+
         try: shutil.rmtree(temp_dir)
         except: pass
 
@@ -361,7 +369,8 @@ async def test_real_dashboard_startup():
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=temp_dir,
-        env=env
+        env=env,
+        start_new_session=True
     )
     
     dashboard_url_found_stdout = False
@@ -509,7 +518,8 @@ async def test_real_dashboard_startup():
     finally:
         # 3. Cleanup
         try:
-            process.kill()
+            import signal
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
             await asyncio.wait_for(process.wait(), timeout=2.0)
         except: pass
         # try:
@@ -553,7 +563,8 @@ async def test_multi_model_startup():
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=temp_dir,
-        env=env
+        env=env,
+        start_new_session=True
     )
     
     try:
@@ -602,7 +613,8 @@ async def test_multi_model_startup():
 
     finally:
         try:
-            process.kill()
+            import signal
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
             await process.wait()
         except: pass
         try: shutil.rmtree(temp_dir)

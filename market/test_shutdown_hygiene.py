@@ -74,7 +74,7 @@ class TestShutdownHygiene(unittest.IsolatedAsyncioTestCase):
         shark_instance.shutdown.assert_called_once()
         
         # Verify that process group termination was attempted
-        mock_killpg.assert_called_with(12345, signal.SIGTERM)
+        mock_killpg.assert_called_with(12345, signal.SIGKILL)
         
         # If we reached here without a RuntimeError, the fix is likely working 
         # (though in a test environment the loop might be managed differently).
@@ -92,7 +92,7 @@ class TestShutdownHygiene(unittest.IsolatedAsyncioTestCase):
         runner._stop_servers()
         
         mock_getpgid.assert_called_once_with(9999)
-        mock_killpg.assert_called_once_with(12345, signal.SIGTERM)
+        mock_killpg.assert_called_once_with(12345, signal.SIGKILL)
         self.assertEqual(len(runner.agent_servers), 0)
 
     @patch('market.runner.Shark')

@@ -178,6 +178,7 @@ class MarketRunner:
                 stderr=asyncio.subprocess.PIPE, # Capture stderr for diagnosis
                 stdin=asyncio.subprocess.PIPE,
                 limit=1024 * 1024 * 32,
+                start_new_session=True
             )
             
             # Start a background task to proxy dashboard stderr for diagnosis
@@ -536,7 +537,9 @@ class MarketRunner:
         for aid, proc in self.agent_servers.items():
             logging.info(f"Stopping server for {aid}...")
             try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                pgid = os.getpgid(proc.pid)
+                os.killpg(pgid, signal.SIGKILL)
+                # No await in sync _stop_servers, but it's a kill -9 so it's immediate
             except:
                 try:
                     proc.terminate()
@@ -663,11 +666,14 @@ class MarketRunner:
         
         if self.dashboard_proc:
             try:
-                self.dashboard_proc.terminate()
+                pgid = os.getpgid(self.dashboard_proc.pid)
+                os.killpg(pgid, signal.SIGTERM)
                 await asyncio.wait_for(self.dashboard_proc.wait(), timeout=2.0)
             except:
                 if self.dashboard_proc:
-                    try: self.dashboard_proc.kill()
+                    try: 
+                        pgid = os.getpgid(self.dashboard_proc.pid)
+                        os.killpg(pgid, signal.SIGKILL)
                     except: pass
             
             if hasattr(self, "dash_log_file") and self.dash_log_file:

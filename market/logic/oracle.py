@@ -86,13 +86,15 @@ class Oracle:
             cmd = ["./run.sh"]
             
             import logging
+            import signal
             logging.info(f"Oracle: Starting test {os.path.basename(verifier_dir)} on worktree {os.path.basename(candidate_dir)}")
             
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=temp_dir,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL
+                stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True
             )
             
             try:
@@ -106,7 +108,8 @@ class Oracle:
             except asyncio.TimeoutError:
                 if process:
                     try:
-                        process.kill()
+                        pgid = os.getpgid(process.pid)
+                        os.killpg(pgid, signal.SIGKILL)
                         await process.wait()
                     except ProcessLookupError:
                         pass
@@ -114,11 +117,13 @@ class Oracle:
                 
         except Exception as e:
             import logging
+            import signal
             logging.error(f"Oracle Execution Error: {e}")
             # Ensure process is reaped if it was created
             if process:
                 try:
-                    process.kill()
+                    pgid = os.getpgid(process.pid)
+                    os.killpg(pgid, signal.SIGKILL)
                     await process.wait()
                 except:
                     pass
