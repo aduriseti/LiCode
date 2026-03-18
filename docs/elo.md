@@ -17,15 +17,12 @@ Instead of market prices, we use the **Glicko-2** rating system to rank candidat
 - **Matches:** A "match" occurs whenever a verifier (test) is executed against a candidate.
   - **Win:** Candidate passes the test.
   - **Loss:** Candidate fails the test.
-  - **Draw:** Occurs if a verifier's patch fails to apply to a candidate.
 - **Rating Updates:** Ratings are updated periodically or after a batch of test results. Pass/fail results against different tests are weighted by the "difficulty" (easiness determined by relative ELO rating) or "authority" of the test.
 - **Volatility:** Captures erratic changes in performance (e.g., a massive refactor that fixes many bugs or introduces new ones).
 
 ## 3. Asynchronous Execution & Notifications
 
-The tournament transitions from "rounds" to a continuous stream of events. Agents operate independently and are notified of significant changes in the environment via an interruption mechanism (similar to pressing the ESC key in a terminal), which sends a message directly to the agent session.
-
-<!-- its interrupt then send a mesasge to the agent -->
+The tournament transitions from "rounds" to a continuous stream of events. Agents operate independently and are notified of significant changes in the environment via an interruption mechanism (similar to pressing the ESC key in a terminal). The orchestrator interrupts the current process and then sends a message directly to the agent session.
 
 ### Notification System:
 Agents are subscribed to an event bus and receive notifications that trigger new inference/action cycles:
@@ -33,13 +30,11 @@ Agents are subscribed to an event bus and receive notifications that trigger new
 1.  **Submission Notification:** 
     - *Trigger:* "Candidate X (a rival) has submitted a new version of their code."
     - *Action:* The orchestrator calculates the diff using the existing diff logic and sends it to rival agents. Agents may choose to analyze the new code for vulnerabilities or inspiration.
-<!-- also need to write full candidate diff to a location in agent worktree  -->
-    <!-- add prompt content here - diff will be t runcated but written to location in worktree also -->
+    - *Prompt Content:* The diff provided in the prompt is truncated to preserve context, but the full candidate diff is written to a specific location in the agent's worktree for comprehensive analysis.
 2.  **Failure Notification (Self):**
     - *Trigger:* "Your current submission failed Test Y."
     - *Action:* To avoid over-interrupting agents, the orchestrator sends a batch of the $k=3$ easiest tests the agent is currently failing every minute.
-    - *Prompt Content:* The notification includes the verifier diff and the `stderr/stdout` from the test log. This information is truncated in the prompt to preserve context but written in full to a specific location in the agent's worktree for detailed analysis.
-
+    - *Prompt Content:* The notification includes the verifier diff and the `stderr/stdout` from the test log. This information is truncated in the prompt but written in full to a specific location in the agent's worktree for detailed analysis.
 
 ## 4. Verifier and Agent Interfaces
 
@@ -51,8 +46,7 @@ Verifiers are defined as a combination of a git patch and an entrypoint command.
   3. Apply the verifier's git patch.
   4. Run the entrypoint command.
   5. Delete the temporary folder.
-  <!-- actually instead of a draw just dont perform any rating update -->
-- **Result:** Exit code 0 indicates a **Win** for the candidate (Pass); non-zero indicates a **Loss** (Fail). If the verifier's patch fails to apply, the result is a **Draw**.
+- **Result:** Exit code 0 indicates a **Win** for the candidate (Pass); non-zero indicates a **Loss** (Fail). If the verifier's patch fails to apply, **no rating update is performed** for that match.
 
 ### Agent Interface & Types:
 The system executes two types of agents in parallel, borrowing the existing state machine and timeout/retry logic from the current orchestrator:
@@ -73,17 +67,19 @@ The Orchestrator is responsible for:
 ## 6. Verifiers and Baselines
 
 ### Native Test Suite as a Verifier:
-An LLM is used to analyze the codebase and identify the correct entrypoint into the native test suite. Otherwise treated as any other verifier.
+The project's existing test suite is included as a high-authority verifier. An LLM is used to analyze the codebase and identify the correct entrypoint into the native test suite. Otherwise, it is treated like any other verifier.
 
 ### The "Empty Candidate" (Baseline):
 A "No-Change" candidate representing the original codebase is included. It serves as a lower-bound baseline; any candidate with a rating lower than the baseline has regressed the code. Rivals are incentivized to at least beat the baseline rating.
 
-<!-- include a sectin on se bench integration and ui - i dont want to have a dashboard for this - lets just rely on trace logging and other logs for now - lets clone swe bench script for this to accompade differences in interface -->
+## 7. SWE-bench Integration and UI
 
-## 7. Winning Criteria
+To maintain simplicity and focus on diagnostic depth, the ELO tournament will not utilize a live dashboard. Instead, the system will rely on exhaustive trace logging and standard output logs for monitoring and post-hoc analysis. The existing `eval_swe_bench` script will be cloned and modified to accommodate the unique asynchronous interface and notification requirements of this tournament structure.
+
+## 8. Winning Criteria
 
 The tournament concludes based on:
 1.  **Time Limit:** A default hard limit of (by default) 3 minutes.
 2.  **Rating Stability:** Convergence of Glicko-2 ratings (low $RD$) for the top-tier candidates.
 
-The winner is the candidate with the **highest Glicko-2 rating**, provided they pass a minimum threshold of native tests.
+The winner is the candidate with the **highest Glicko-2 rating**.
