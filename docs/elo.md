@@ -17,70 +17,73 @@ Instead of market prices, we use the **Glicko-2** rating system to rank candidat
 - **Matches:** A "match" occurs whenever a verifier (test) is executed against a candidate.
   - **Win:** Candidate passes the test.
   - **Loss:** Candidate fails the test.
-- **Rating Updates:** Ratings are updated periodically or after a batch of test results. Pass/fail results against different tests are weighted by the "difficulty" or "authority" of the test (see Section 4).
+  - **Draw:** Occurs if a verifier's patch fails to apply to a candidate.
+- **Rating Updates:** Ratings are updated periodically or after a batch of test results. Pass/fail results against different tests are weighted by the "difficulty" (easiness determined by relative ELO rating) or "authority" of the test.
 - **Volatility:** Captures erratic changes in performance (e.g., a massive refactor that fixes many bugs or introduces new ones).
 
 ## 3. Asynchronous Execution & Notifications
 
-The tournament transitions from "rounds" to a continuous stream of events. Agents operate independently and are notified of significant changes in the environment.
+The tournament transitions from "rounds" to a continuous stream of events. Agents operate independently and are notified of significant changes in the environment via an interruption mechanism (similar to pressing the ESC key in a terminal), which sends a message directly to the agent session.
+
+<!-- its interrupt then send a mesasge to the agent -->
 
 ### Notification System:
-<!-- notifications function by interupting the agent (as if esc key is pressed - and sending a message) -->
 Agents are subscribed to an event bus and receive notifications that trigger new inference/action cycles:
 
 1.  **Submission Notification:** 
     - *Trigger:* "Candidate X (a rival) has submitted a new version of their code."
-    - *Action:* Rival agents may choose to analyze the new code for vulnerabilities or inspiration.
-<!-- easiness determined by relative elo rating - we can send the agent the k=3 easiest tests it failed every minute to avoid interrupting it too much-->
+    - *Action:* The orchestrator calculates the diff using the existing diff logic and sends it to rival agents. Agents may choose to analyze the new code for vulnerabilities or inspiration.
+<!-- also need to write full candidate diff to a location in agent worktree  -->
+    <!-- add prompt content here - diff will be t runcated but written to location in worktree also -->
 2.  **Failure Notification (Self):**
-    - *Trigger:* "Your current submission failed Test Y (an 'Easy' or 'Native' test)."
-    - *Action:* The agent is immediately prompted to fix the failing test. This creates a tight feedback loop for basic correctness.
-
-<!-- need a discussion on prompt and what prompt contains for each notificatoin - reuse the existing diff calculatoin logic - when candidate proposes new code - send the diff just or that candidate - when verifier fails test - send verifier diff + stderr/stdout from the log - all of this needs to be truncated in prompt but also written to a location in agent wroktree where it can read the full output -->
-
-<!-- this will require a different notificatoin system when making a dispaly for evalswe bench -->
+    - *Trigger:* "Your current submission failed Test Y."
+    - *Action:* To avoid over-interrupting agents, the orchestrator sends a batch of the $k=3$ easiest tests the agent is currently failing every minute.
+    - *Prompt Content:* The notification includes the verifier diff and the `stderr/stdout` from the test log. This information is truncated in the prompt to preserve context but written in full to a specific location in the agent's worktree for detailed analysis.
 
 
-<!-- need a sectoin on verifier interface - i think it needs to be a git patch + an entrypoint command - if patch fails to apply treat as draw - otherwise use exit code to determine win/loss -->
-<!-- discuss hwo verifiers will be executed - whic his copy to a folder, patch agent, patch diff, run verifier - delete folder  -->
-## 4. Verifiers and Baselines
+## 4. Verifier and Agent Interfaces
 
-To ensure a high standard of quality and a stable ground truth, the tournament incorporates specific "non-agent" participants.
+### Verifier Interface & Execution:
+Verifiers are defined as a combination of a git patch and an entrypoint command.
+- **Execution Flow:**
+  1. Copy the candidate's worktree to a temporary execution folder.
+  2. Apply the candidate's code changes.
+  3. Apply the verifier's git patch.
+  4. Run the entrypoint command.
+  5. Delete the temporary folder.
+  <!-- actually instead of a draw just dont perform any rating update -->
+- **Result:** Exit code 0 indicates a **Win** for the candidate (Pass); non-zero indicates a **Loss** (Fail). If the verifier's patch fails to apply, the result is a **Draw**.
 
-<!-- just a regular verifier - elo rating determined like any other - probably need to have an llm produce verifier to identify the entrypoint into the test suite -->
+### Agent Interface & Types:
+The system executes two types of agents in parallel, borrowing the existing state machine and timeout/retry logic from the current orchestrator:
+- **Candidate Agents:** Primary goal is to improve their solution. Valid action: `update_candidate`.
+- **Testing Agents:** Primary goal is to find bugs in other solutions. Valid action: `propose_new_test`.
+
+### Permissions & Isolation:
+Agents are strictly restricted to their own workspace. They are not permitted to look outside their `.` folder. This isolation is enforced using OpenCode's internal permission system and OS-level user groups.
+
+## 5. Orchestration
+
+The Orchestrator is responsible for:
+- Starting the tournament and sending initial problem prompts.
+- Sending interrupts and updated prompts based on event triggers.
+- Scheduling and running tests. By default, every available test is executed against every candidate whenever a candidate submits an update.
+- Managing the state machine and handling agent timeouts.
+
+## 6. Verifiers and Baselines
+
 ### Native Test Suite as a Verifier:
-- The project's existing test suite (if any) is included as a high-authority verifier.
-- Failing a native test results in a significant rating penalty.
-- Passing all native tests is a prerequisite for a high ELO rating.
+An LLM is used to analyze the codebase and identify the correct entrypoint into the native test suite. Otherwise treated as any other verifier.
 
 ### The "Empty Candidate" (Baseline):
-- A "No-Change" candidate (the original codebase) is included as a participant.
-- It never updates its code.
-- It serves as a **lower-bound baseline**. Any candidate with a rating lower than the "Empty Candidate" is considered to have regressed the codebase.
-- Rivals are incentivized to at least beat the baseline.
+A "No-Change" candidate representing the original codebase is included. It serves as a lower-bound baseline; any candidate with a rating lower than the baseline has regressed the code. Rivals are incentivized to at least beat the baseline rating.
 
-<!-- also need a section on agent interface - need to discuss actions, state machine , timeout/retry logic (whcih we can borrow from existing ocde) - i also want 2 kinds of agetns to execute in parallel - one working on candidates one working on tests - valid actions are update candidate for the candidate agens, and propose new test for the testing agents -->
+<!-- include a sectin on se bench integration and ui - i dont want to have a dashboard for this - lets just rely on trace logging and other logs for now - lets clone swe bench script for this to accompade differences in interface -->
 
-<!-- agents need to only have access to their own workspace - they will not be allowed to look outside their `.` folder - accomplish this w/ opencode permissions and user groups -->
+## 7. Winning Criteria
 
-<!-- also need a section on orchestration - responsible for starting torunamne,t sending intial prompts, sending interrupts and updatd prompts on updates, scheduling and running tests, for now execute every test avaialble on every candidate update -->
-
-## 5. Winning Criteria
-
-<!-- lets just start w/ a time limit for now - by default lets have it be 3m -->
-The tournament concludes when:
-1.  **Rating Stability:** Ratings for the top candidates have converged (low $RD$).
-2.  **Time/Budget Limit:** A hard limit is reached.
+The tournament concludes based on:
+1.  **Time Limit:** A default hard limit of (by default) 3 minutes.
+2.  **Rating Stability:** Convergence of Glicko-2 ratings (low $RD$) for the top-tier candidates.
 
 The winner is the candidate with the **highest Glicko-2 rating**, provided they pass a minimum threshold of native tests.
-
-## 6. Comparison of Models
-<!-- can delete this section -->
-| Feature | LMSR Market (Design 1) | ELO Asynchronous (Design 2) |
-| :--- | :--- | :--- |
-| **Pace** | Synchronous Rounds (Wait for all) | Asynchronous (Fast feedback) |
-| **Ranking** | Market Price (Credence) | Glicko-2 Rating (Skill) |
-| **Feedback** | End of round summary | Real-time notifications |
-| **Baseline** | Implicit (Whale prior) | Explicit (Empty Candidate) |
-| **Complexity** | High (Economic theory) | Medium (Rating systems) |
-| **Incentives** | Profit/Loss (Wealth) | Rating/Rank (Prestige/Survival) |
