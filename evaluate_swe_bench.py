@@ -10,7 +10,11 @@ import time
 import threading
 import math
 import webbrowser
+import logging
 from dotenv import load_dotenv
+
+# Setup global logger
+logger = logging.getLogger(__name__)
 
 # Load environment variables from .env if it exists
 load_dotenv()
@@ -45,6 +49,7 @@ except ImportError:
 console = Console()
 status_map = {}
 status_lock = threading.Lock()
+setup_lock = asyncio.Lock()
 
 def get_patch_from_winner(work_dir, report, state_dict):
     # Reconstruct MarketState and Orchestrator to reuse logic
@@ -107,16 +112,18 @@ async def run_market_on_instance(instance, args, semaphore):
             }
 
     def update_status(new_status):
+        # Truncate to first line for dashboard
+        display_status = str(new_status).split('\n')[0]
         with status_lock:
             info = status_map[instance_id]
             now = time.time()
             if info["stages"]:
                 last_stage = info["stages"][-1]
                 last_stage["duration"] = now - last_stage["start_time"]
-            
-            info["status"] = new_status
+
+            info["status"] = display_status
             info["stages"].append({
-                "name": new_status,
+                "name": display_status,
                 "start_time": now,
                 "duration": 0
             })
@@ -136,7 +143,11 @@ async def run_market_on_instance(instance, args, semaphore):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            await clone_proc.communicate()
+            c_stdout, c_stderr = await clone_proc.communicate()
+            if clone_proc.returncode != 0:
+                update_status(f"Clone Failed (Exit Code: {clone_proc.returncode})")
+                logger.error(f"Clone failed for {instance_id} ({repo}):\nSTDOUT: {c_stdout.decode()}\nSTDERR: {c_stderr.decode()}")
+                return None
 
             # Ensure .arenas/ and other critical system dirs are ignored by adding them to git/info/exclude
             exclude_path = os.path.join(work_dir, ".git", "info", "exclude")
@@ -152,8 +163,11 @@ async def run_market_on_instance(instance, args, semaphore):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            await checkout_proc.communicate()
-            
+            co_stdout, co_stderr = await checkout_proc.communicate()
+            if checkout_proc.returncode != 0:
+                update_status(f"Checkout Failed (Exit Code: {checkout_proc.returncode})")
+                logger.error(f"Checkout failed for {instance_id} at {base_commit}:\nSTDOUT: {co_stdout.decode()}\nSTDERR: {co_stderr.decode()}")
+                return None            
             # Save problem statement
             problem_path = os.path.join(work_dir, "problem.md")
             with open(problem_path, "w") as f:
@@ -171,54 +185,51 @@ async def run_market_on_instance(instance, args, semaphore):
 
             update_status("Bootstrapping Dependencies")
             # 1. Fix Git Ownership (Necessary for cloning mounted volumes)
-            # Use '*' to allow all mounted directories to be treated as safe
             git_safe_proc = await asyncio.create_subprocess_exec(
                 "docker", "exec", container_id, "git", "config", "--global", "--add", "safe.directory", "*",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            await git_safe_proc.communicate()
+            gs_stdout, gs_stderr = await git_safe_proc.communicate()
+            if git_safe_proc.returncode != 0:
+                update_status(f"Git Ownership Fix Failed (Exit Code: {git_safe_proc.returncode})")
+                logger.error(f"Git ownership fix failed for {instance_id}:\nSTDOUT: {gs_stdout.decode()}\nSTDERR: {gs_stderr.decode()}")
+                return None
 
-            # 2. Install LiCode Deps in base env
-            bootstrap_proc = await asyncio.create_subprocess_exec(
-                "docker", "exec", container_id, "/opt/miniconda3/bin/pip", "install", "-r", "/licode/requirements.txt",
+            # 2. Run Comprehensive Setup via Makefile
+            update_status("Waiting for Setup Lock")
+            async with setup_lock:
+                update_status("Running Container Setup (make setup)")
+                # Standard path for SWE-bench images plus our expected bun path
+                setup_env = "PATH=/root/.bun/bin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+                bootstrap_proc = await asyncio.create_subprocess_exec(
+                    "docker", "exec", "-w", "/licode", "-e", setup_env,
+                    container_id, "make", "setup", "PIP=/opt/miniconda3/bin/pip", "PYTHON=/opt/miniconda3/bin/python3",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, stderr = await bootstrap_proc.communicate()
+                if bootstrap_proc.returncode != 0:
+                    update_status(f"Container Setup Failed (Exit Code: {bootstrap_proc.returncode})")
+                    logger.error(f"Make setup failed for {instance_id}:\nSTDOUT: {stdout.decode()}\nSTDERR: {stderr.decode()}")
+                    return None
+                else:
+                    logger.info(f"Make setup succeeded for {instance_id}:\nSTDOUT: {stdout.decode()}\nSTDERR: {stderr.decode()}")
+
+            # 3. Verify Environment (Check if opencode is in PATH and functional)
+            update_status("Verifying Environment")
+            # Explicitly include the path where opencode binary is expected
+            full_setup_env = f"PATH=/licode/.opencode/node_modules/.bin:{setup_env}"
+            verify_proc = await asyncio.create_subprocess_exec(
+                "docker", "exec", "-e", full_setup_env, container_id, "opencode", "--version",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            await bootstrap_proc.communicate()
-
-            # 3. Install Bun if dashboard is requested
-            if getattr(args, 'dashboard', False):
-                update_status("Installing Dependencies (unzip, curl, nodejs)")
-                apt_proc = await asyncio.create_subprocess_exec(
-                    "docker", "exec", container_id, "bash", "-c", "apt-get update && apt-get install -y unzip curl ca-certificates nodejs",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                await apt_proc.communicate()
-
-                update_status("Installing Bun (Dashboard)")
-                # Install bun via official script
-                bun_install_proc = await asyncio.create_subprocess_exec(
-                    "docker", "exec", container_id, "bash", "-c", "curl -fsSL https://bun.sh/install | bash",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await bun_install_proc.communicate()
-                if bun_install_proc.returncode != 0:
-                    update_status(f"Bun Install Failed: {stderr.decode()}")
-                else:
-                    # Verify bun installation
-                    verify_proc = await asyncio.create_subprocess_exec(
-                        "docker", "exec", container_id, "ls", "-la", "/root/.bun/bin/bun",
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                    v_stdout, v_stderr = await verify_proc.communicate()
-                    if verify_proc.returncode != 0:
-                        update_status(f"Bun Verify Failed: {v_stderr.decode()}")
-                    else:
-                        update_status("Bun Installed & Verified")
+            v_stdout, v_stderr = await verify_proc.communicate()
+            if verify_proc.returncode != 0:
+                update_status(f"Environment Verification Failed (Exit Code: {verify_proc.returncode})")
+                logger.error(f"Environment verification failed for {instance_id}:\nSTDOUT: {v_stdout.decode()}\nSTDERR: {v_stderr.decode()}\nUsed PATH: {full_setup_env}")
+                return None
 
             if args.dummy:
                 update_status("Dummy Mode: Returning Empty Patch")
@@ -239,7 +250,7 @@ async def run_market_on_instance(instance, args, semaphore):
             market_cmd = [
                 "docker", "exec", "-w", "/testbed",
                 "-e", "PYTHONPATH=/licode",
-                "-e", "PATH=/root/.bun/bin:/.opencode/bin:/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "-e", "PATH=/root/.bun/bin:/licode/.opencode/node_modules/.bin:/licode/node_modules/.bin:/.opencode/bin:/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 "-e", f"OPENAI_API_KEY={os.environ.get('OPENAI_API_KEY', '')}",
                 "-e", f"ANTHROPIC_API_KEY={os.environ.get('ANTHROPIC_API_KEY', '')}",
                 "-e", f"GEMINI_API_KEY={os.environ.get('GEMINI_API_KEY', '')}",
@@ -264,6 +275,8 @@ async def run_market_on_instance(instance, args, semaphore):
                     market_cmd.extend(["--model", args.model])
             if getattr(args, 'dashboard', False):
                 market_cmd.append("--dashboard")
+            if getattr(args, 'skip_validation', False):
+                market_cmd.append("--skip-validation")
             
             market_cmd.extend([
                 "--max-retries", str(args.max_retries),
@@ -402,6 +415,7 @@ async def async_main():
     parser.add_argument("--output", type=str, help="Output JSONL file (defaults to swe_bench_results/<run_id>/predictions.jsonl)")
     parser.add_argument("--dummy", action="store_true", help="Run a dummy evaluation returning empty patches without invoking agents.")
     parser.add_argument("--dashboard", action="store_true", help="Launch and show dashboard URLs for each instance.")
+    parser.add_argument("--skip-validation", action="store_true", help="Skip dynamic pre-flight model/provider validation inside the container.")
     parser.add_argument("--parallel", type=int, default=3, help="Number of instances to evaluate in parallel during generation.")
     parser.add_argument("--run-eval", action="store_true", help="Automatically run the SWE-bench evaluation harness after generation.")
     parser.add_argument("--eval-workers", type=int, default=2, help="Number of workers for the evaluation harness (Docker containers).")
@@ -430,15 +444,23 @@ async def async_main():
     os.makedirs(run_dir, exist_ok=True)
     
     main_log_path = os.path.join(run_dir, "main.log")
-    main_log = open(main_log_path, "a")
+    
+    # Configure root logger
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(main_log_path),
+            logging.StreamHandler(sys.stderr)
+        ]
+    )
 
     def log_print(msg, style=None):
         if style:
             console.print(msg, style=style)
         else:
             console.print(msg)
-        main_log.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} - {msg}\n")
-        main_log.flush()
+        logger.info(msg)
 
     if os.path.exists(args.output):
         os.remove(args.output)
@@ -449,6 +471,15 @@ async def async_main():
     if args.task_ids:
         target_ids = set(id.strip() for id in args.task_ids.split(","))
         instances = [i for i in ds if i['instance_id'] in target_ids]
+        
+        found_ids = set(i['instance_id'] for i in instances)
+        missing_ids = target_ids - found_ids
+        if missing_ids:
+            log_print(f"Warning: {len(missing_ids)} task IDs not found in dataset {args.dataset}: {sorted(list(missing_ids))}", style="bold yellow")
+        
+        if not instances:
+            log_print(f"Error: No matching instances found for the provided task IDs in {args.dataset}.", style="bold red")
+            sys.exit(1)
     elif args.repo:
         instances = [i for i in ds if args.repo in i['repo']]
         instances = instances[:args.limit]
@@ -486,11 +517,13 @@ async def async_main():
         output_dir = os.path.dirname(os.path.abspath(args.output))
         eval_cmd = [
             sys.executable, "-m", "swebench.harness.run_evaluation",
-            "--dataset_name", "princeton-nlp/SWE-bench_Verified",
+            "--dataset_name", args.dataset,
             "--predictions_path", os.path.abspath(args.output),
             "--max_workers", str(args.eval_workers),
             "--run_id", args.run_id,
-            "--report_dir", "."
+            "--report_dir", ".",
+            "--cache_level", "instance",
+            "--namespace", "ghcr.io/epoch-research"
         ]
         log_print(f"Executing: {' '.join(eval_cmd)}")
         
@@ -513,15 +546,12 @@ async def async_main():
             line = line_bytes.decode('utf-8', errors='replace')
             sys.stdout.write(line)
             sys.stdout.flush()
-            main_log.write(line)
-            main_log.flush()
+            logger.info(line.strip())
 
         await eval_proc.wait()
     else:
         log_print(f"\nTo evaluate manually, run the SWE-bench harness:", style="bold yellow")
-        log_print(f"python -m swebench.harness.run_evaluation --dataset_name princeton-nlp/SWE-bench_Verified --predictions_path {os.path.abspath(args.output)} --max_workers {args.eval_workers} --run_id {args.run_id} --report_dir {os.path.dirname(os.path.abspath(args.output))}")
-
-    main_log.close()
+        log_print(f"python -m swebench.harness.run_evaluation --dataset_name {args.dataset} --predictions_path {os.path.abspath(args.output)} --max_workers {args.eval_workers} --run_id {args.run_id} --report_dir {os.path.dirname(os.path.abspath(args.output))} --cache_level instance --namespace ghcr.io/epoch-research")
 
 if __name__ == "__main__":
     asyncio.run(async_main())

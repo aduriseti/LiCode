@@ -1,11 +1,35 @@
-.PHONY: setup test-python test-js test-all test
+PYTHON ?= python3
+PIP ?= pip
+# Prefer bun for setup if it exists
+NPM ?= $(shell if [ -f /root/.bun/bin/bun ]; then echo /root/.bun/bin/bun; else echo npm; fi)
 
-setup:
-	pip install -r requirements.txt
-	pip install -e .
-	python3 -m playwright install chromium
-	cd .opencode && npm install
+.PHONY: setup system-setup python-setup node-setup test-python test-js test-all test
+
+# Full setup for a new container environment
+setup: system-setup python-setup node-setup
+
+# Install OS-level dependencies (Node.js 20, Bun, etc.)
+system-setup:
+	@echo "Installing OS-level dependencies..."
+	apt-get update && apt-get install -y curl ca-certificates unzip
+	curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+	apt-get install -y nodejs
+	@echo "Installing Bun..."
+	curl -fsSL https://bun.sh/install | bash
+
+# Python-specific setup
+python-setup:
+	@echo "Installing Python dependencies..."
+	$(PIP) install -r requirements.txt
+	$(PIP) install -e .
+	$(PYTHON) -m playwright install chromium
+
+# Node.js-specific setup
+node-setup:
+	@echo "Installing Node.js dependencies..."
 	[ -f .env ] || cp .env.example .env
+	# Add bun to PATH if it was just installed (standard location is /root/.bun/bin)
+	export PATH="/root/.bun/bin:$$PATH" && cd .opencode && $(NPM) install
 
 test-python:
 	pytest market/ tests/

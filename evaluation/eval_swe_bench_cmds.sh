@@ -1,4 +1,5 @@
  python evaluate_swe_bench.py \
+   --dataset princeton-nlp/SWE-bench_Verified \
    --repo pallets/flask \
    --limit 3 \
    --agents 3 \
@@ -11,6 +12,7 @@
    --dashboard
 
 python evaluate_swe_bench.py \
+   --dataset princeton-nlp/SWE-bench_Verified \
    --repo scikit-learn/scikit-learn \
    --limit 3 \
    --agents 3 \
@@ -64,6 +66,7 @@ python evaluate_swe_bench.py \
 30,marshmallow-code__marshmallow-602,High Scope: Deep refactor of schema validation logic. Requires changing 15+ functions simultaneously.					
 
 python evaluate_swe_bench.py \
+   --dataset princeton-nlp/SWE-bench_Verified \
    --task-ids django__django-11133,django__django-13768,django__django-14752 \
    --agents 3 \
    --rounds 3 \
@@ -76,6 +79,7 @@ python evaluate_swe_bench.py \
 
 
 python evaluate_swe_bench.py \
+   --dataset princeton-nlp/SWE-bench_Verified \
    --task-ids django__django-11133,django__django-16527,astropy__astropy-12907,scikit-learn__scikit-learn-10297,sympy__sympy-16792,pytest-dev__pytest-7205,matplotlib__matplotlib-23562,pylint-dev__pylint-6528,django__django-14752,sphinx-doc__sphinx-8721,scikit-learn__scikit-learn-25570,sympy__sympy-13437,django__django-11583,pytest-dev__pytest-11148,scikit-learn__scikit-learn-12471,django__django-13658,sympy__sympy-13878,matplotlib__matplotlib-23964,django__django-12482,sphinx-doc__sphinx-8506,astropy__astropy-13033,django__django-16046,scikit-learn__scikit-learn-11040,sympy__sympy-14396,pytest-dev__pytest-7432,django__django-15347,requests__requests-3362,django__django-14855,sympy__sympy-22914,marshmallow-code__marshmallow-602 \
    --agents 3 \
    --rounds 3 \
@@ -100,12 +104,13 @@ python3 evaluate_swe_bench.py \
 
 # 5 SOTA Models Tournament Evaluation (March 2026)
 python evaluate_swe_bench.py \
-   --task-ids "django__django-11133,django__django-16527,astropy__astropy-12907,scikit-learn__scikit-learn-10297,sympy__sympy-16792" \
+   --dataset princeton-nlp/SWE-bench_Verified \
+   --task-ids "django__django-16263,django__django-13513,astropy__astropy-13033,django__django-15098,django__django-13195,django__django-13512,sphinx-doc__sphinx-9461,sphinx-doc__sphinx-9229,django__django-13794,django__django-14170" \
    --agents 5 \
    --rounds 3 \
    --parallel 5 \
    --run-eval \
    --eval-workers 5 \
    --provider opencode \
-   --model opencode/gpt-5.3-codex opencode/claude-4.6-opus opencode/gemini-3.1-pro opencode/grok-4-fast opencode/deepseek-v3.2 \
+   --model opencode/gemini-3-flash,opencode/claude-sonnet-4-6,opencode/gpt-5.3-codex,opencode/kimi-k2.5,opencode/glm-5 \
    --dashboard

@@ -39,3 +39,4 @@ verifiers/
 *.db
 swe_bench_results/
 eval_workspaces/
+logs

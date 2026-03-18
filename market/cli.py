@@ -6,6 +6,7 @@ import os
 import json
 import textwrap
 import io
+import shutil
 from dotenv import load_dotenv
 
 # Load environment variables from .env if it exists
@@ -110,9 +111,18 @@ async def validate_config_with_api(args, parser):
     api_url = f"http://127.0.0.1:{port}"
     
     # 2. Spawn ephemeral lookup server
-    # We use npx to ensure we use the project-local OpenCode binary
+    # We try to use 'opencode' directly if it's in PATH (e.g., from our bootstrap)
+    # otherwise we fall back to npx.
+    opencode_bin = shutil.which("opencode")
+    if opencode_bin:
+        cmd_args = [opencode_bin, "serve", "--port", str(port), "--hostname", "127.0.0.1"]
+    elif shutil.which("npx"):
+        cmd_args = ["npx", "opencode", "serve", "--port", str(port), "--hostname", "127.0.0.1"]
+    else:
+        raise RuntimeError("Fatal: Neither 'opencode' nor 'npx' found in PATH. Ensure Node.js and the opencode package are installed.")
+
     process = await asyncio.create_subprocess_exec(
-        "npx", "opencode", "serve", "--port", str(port), "--hostname", "127.0.0.1",
+        *cmd_args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
@@ -133,7 +143,14 @@ async def validate_config_with_api(args, parser):
                 await asyncio.sleep(0.2)
         
         if not all_providers:
-            parser.error(f"Failed to initialize ephemeral OpenCode API for validation on port {port}.")
+            stdout_text = (await process.stdout.read()).decode()
+            stderr_text = (await process.stderr.read()).decode()
+            error_msg = f"Failed to initialize ephemeral OpenCode API for validation on port {port}."
+            if stdout_text:
+                error_msg += f"\nStdout: {stdout_text}"
+            if stderr_text:
+                error_msg += f"\nStderr: {stderr_text}"
+            parser.error(error_msg)
 
         hydrated_models = []
         hydrated_providers = []
@@ -186,10 +203,30 @@ async def validate_config_with_api(args, parser):
 
 async def async_main():
     parser = MarketArgumentParser(description="Logical Induction Market CLI")
-    parser.add_argument("--log-level", type=lambda x: x.upper(), default=os.environ.get("LOG_LEVEL", "INFO"), 
-                        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-                        help="Set logging level (default: INFO or $LOG_LEVEL)")
     
+    # 1. Immediate Logging Configuration
+    # We do this FIRST so that even validation errors can be logged if needed,
+    # and because the UnbufferedStreamHandler is critical for TUI/Log streaming.
+    log_level_name = "INFO"
+    for i, arg in enumerate(sys.argv):
+        if arg == "--log-level" and i + 1 < len(sys.argv):
+            log_level_name = sys.argv[i+1].upper()
+            break
+    if not log_level_name:
+        log_level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
+        
+    log_level = getattr(logging, log_level_name, logging.INFO)
+    handler = UnbufferedStreamHandler(sys.stderr)
+    formatter = WrappingFormatter(fmt='%(asctime)s - %(levelname)s - %(message)s', width=100)
+    handler.setFormatter(formatter)
+    
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    if root_logger.hasHandlers():
+        root_logger.handlers.clear()
+    root_logger.addHandler(handler)
+
+    # 2. Argument Parsing
     subparsers = parser.add_subparsers(dest="command", required=True)
     
     # INIT
@@ -217,6 +254,7 @@ async def async_main():
     run_parser.add_argument("--provider", type=str, nargs='+', default=["opencode"])
     run_parser.add_argument("--json-logs", action="store_true", help="Output JSON logs to stdout instead of TUI")
     run_parser.add_argument("--dashboard", action="store_true", help="Launch and log to the local web dashboard")
+    run_parser.add_argument("--skip-validation", action="store_true", help="Skip dynamic pre-flight model/provider validation")
     run_parser.add_argument("--log-level", type=lambda x: x.upper(), 
                             choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                             help="Set logging level")
@@ -237,32 +275,11 @@ async def async_main():
         args.provider = flattened_providers
 
     # Dynamic Pre-flight Validation
-    if args.command == "run":
-        await validate_config_with_api(args, parser)
-
-    # Configure Logging
-    log_level_name = None
-    if getattr(args, 'log_level', None):
-        log_level_name = args.log_level.upper()
-    else:
-        for i, arg in enumerate(sys.argv):
-            if arg == "--log-level" and i + 1 < len(sys.argv):
-                log_level_name = sys.argv[i+1].upper()
-                break
-    
-    if not log_level_name:
-        log_level_name = os.environ.get("LOG_LEVEL", "INFO").upper()
-        
-    log_level = getattr(logging, log_level_name, logging.ERROR)
-    handler = UnbufferedStreamHandler(sys.stderr)
-    formatter = WrappingFormatter(fmt='%(asctime)s - %(levelname)s - %(message)s', width=100)
-    handler.setFormatter(formatter)
-    
-    root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
-    if root_logger.hasHandlers():
-        root_logger.handlers.clear()
-    root_logger.addHandler(handler)
+    if args.command == "run" and not getattr(args, "skip_validation", False):
+        try:
+            await asyncio.wait_for(validate_config_with_api(args, parser), timeout=120.0)
+        except asyncio.TimeoutError:
+            parser.error("Pre-flight validation timed out after 120 seconds. The ephemeral OpenCode server failed to respond.")
     
     if args.command == "init":
         orch = Orchestrator(args.prompt, args.agents, args.budget)
