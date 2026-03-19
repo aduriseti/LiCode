@@ -55,14 +55,28 @@ Verifiers are defined as a combination of a git patch and an entrypoint command.
   - **Skip (currently just PATCH_ERROR):** If a verifier's patch fails to apply (PATCH_ERROR). **No rating update is performed.**
 
 ### Agent Interface & Types:
-The system executes two types of agents in parallel, borrowing the existing state machine and timeout/retry logic from the current orchestrator. Agents are restricted to a specific set of allowed actions:
+The system executes two types of agents in parallel, borrowing the existing state machine and timeout/retry logic from the current orchestrator.
 
-- **Candidate Agents:** Primary goal is to improve their solution. 
-    - **Allowed Action:** `update_candidate`.
-- **Testing Agents:** Primary goal is to find bugs in other solutions. 
-    - **Allowed Action:** `propose_test`.
+- **Candidate Agents:** Primary goal is to improve their solution by modifying their own code and fixing reported bugs.
+- **Testing Agents:** Primary goal is to act as **Verifiers** by writing tests that can accurately distinguish between correct solutions and buggy ones. They are not direct rivals to the candidates; instead, they are rated on the authority and discriminative power of their tests.
 
-**Note:** `add_candidate` is an internal orchestrator method and is **not** an allowed action for agents.
+### Agent Action Interface:
+Agents interact with the tournament by modifying their local directory (workspace) and then submitting a single JSON action in their final response.
+
+1.  **`update_candidate`**: Used by Candidate Agents to submit a new version of their solution.
+    - **Mechanism:** The system computes the diff between the agent's current workspace and the original codebase. This diff becomes the new "Version".
+    - **Required JSON:** `{"action": "update_candidate", "message": "Summary of changes"}`
+2.  **`propose_test`**: Used by Testing Agents to submit a new verifier to the tournament.
+    - **Mechanism (The Overlay):** 
+        1. The system computes the diff of the testing agent's workspace.
+        2. This diff (the "test package") is bundled together.
+        3. To run the test against a rival: A clean copy of the rival's candidate worktree is created.
+        4. The "test package" is **overlaid** (applied) onto that copy.
+        5. The `entrypoint` command is executed from the root of that project.
+    - **Required JSON:** `{"action": "propose_test", "entrypoint": "bash run_my_test.sh"}`
+
+### Permissions & Isolation:
+Agents are strictly restricted to their own workspace (e.g., `/workspaces/LiCode/.arenas/elo_run_1773939483/worktrees/candidate_0`). They are not permitted to look outside their assigned folder. This isolation is enforced using OpenCode's internal permission system and OS-level user groups. All actions, including code modifications and test submissions, are performed within this isolated environment.
 
 ### Agent State Machine & Lifecycle:
 Agents are managed via an explicit state machine to ensure robust behavior and clean termination:

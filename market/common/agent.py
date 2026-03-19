@@ -3,8 +3,8 @@ import logging
 import os
 import asyncio
 import time
-from enum import Enum
-from typing import Dict, Any, Optional, List, Tuple
+from enum import Enum, StrEnum
+from typing import Dict, Any, Optional, List, Tuple, Union
 from opencode_ai import AsyncOpencode, APITimeoutError, APIConnectionError
 from opencode_ai.types import (
     TextPart, 
@@ -16,13 +16,28 @@ from opencode_ai.types.event_list_response import EventMessagePartUpdated
 from chompjs import parse_js_objects
 from json_repair import loads as repair_loads
 
-class AgentState(Enum):
+class AgentState(StrEnum):
     UNINITIALIZED = "uninitialized"
     INITIALIZING = "initializing"
     THINKING = "thinking"
     WAITING = "waiting"
     ERROR = "error"
     TERMINATED = "terminated"
+
+class AgentType(StrEnum):
+    CANDIDATE = "candidate"
+    TESTER = "tester"
+    SHARK = "shark"
+
+class AgentActionType(StrEnum):
+    UPDATE_CANDIDATE = "update_candidate"
+    PROPOSE_TEST = "propose_test"
+    PROPOSE_VERIFIER = "VERIFIER" # For Shark JSON consistency
+
+class InterruptType(StrEnum):
+    RIVAL_UPDATE = "rival_update"
+    FAILURE_NOTIFICATION = "failure_notification"
+    GENERIC = "generic"
 
 class LLMResponseError(Exception):
     """Raised when the LLM returns an invalid or non-JSON response."""
@@ -35,6 +50,7 @@ class FatalAgentError(Exception):
 class BaseAgent:
     """
     Base class for robust OpenCode agents with a formal state machine.
+    Provides core API and session management logic.
     """
     def __init__(self, agent_id: str, model: str, provider: str, 
                  api_url: str, timeout: float = 300.0,
@@ -153,7 +169,6 @@ class BaseAgent:
             
             try:
                 chat_response = await chat_task
-                # Give a small window for the last stream events to arrive
                 await asyncio.sleep(0.8) 
             finally:
                 consumer_task.cancel()
@@ -161,10 +176,7 @@ class BaseAgent:
                 except asyncio.CancelledError: pass
                 await stream.close()
 
-            # Content Source 1: The Stream (Most reliable for real-time capture)
             content = "".join(stream_text_chunks)
-            
-            # Content Source 2: The Final Response Object (Fallback)
             if not content and chat_response and hasattr(chat_response, "parts"):
                 extracted_text = []
                 for part in chat_response.parts:
@@ -173,7 +185,6 @@ class BaseAgent:
                 content = "".join(extracted_text)
             
             if not content:
-                # Check for tool use to allow loop to continue even if text is empty
                 has_tools = any(isinstance(part, ToolPart) for part in getattr(chat_response, "parts", []))
                 if has_tools:
                     return "{}"
@@ -222,12 +233,11 @@ class BaseAgent:
         await self.interrupt()
         await self.client.close()
 
-class AgentSession(BaseAgent):
+class EloAgent(BaseAgent):
     """
-    Handles a headless OpenCode session for an agent, implementing an action loop.
-    Dedicated to ELO-style continuous tournaments.
+    Base class for ELO agents. Handles server management and common action loop logic.
     """
-    def __init__(self, agent_id: str, worktree_dir: str, agent_type: str = "candidate", 
+    def __init__(self, agent_id: str, worktree_dir: str, agent_type: AgentType,
                  model: str = "gemini-3-flash", provider: str = "opencode", traces_dir: str = "/tmp",
                  orchestrator: Any = None):
         log_path = os.path.join(worktree_dir, f"{agent_id}.log")
@@ -245,40 +255,14 @@ class AgentSession(BaseAgent):
         self._loop_task: Optional[asyncio.Task] = None
 
     def _get_system_prompt(self) -> str:
-        if self.agent_type == "candidate":
-            return f"""You are a Candidate Agent ({self.agent_id}). 
-Your goal is to modify the files in your workspace to solve the given problem and fix any failing tests.
-You have access to tools to read and write files. 
-
-CRITICAL: You must output your final decision as a JSON object in your FINAL TEXT RESPONSE. 
-DO NOT use tools like 'echo' to output this JSON. It MUST be in your direct text reply to the user.
-Format:
-{{
-  "action": "update_candidate",
-  "message": "Summary of changes made."
-}}"""
-        else:
-            return f"""You are a Testing Agent ({self.agent_id}).
-Your goal is to write a script or patch that verifies if the candidate codebase correctly solves the problem.
-1. Write your test files (e.g. `test.sh` or `patch.diff`) in your workspace using tools.
-2. If using a script, it should exit 0 on success, non-zero on failure.
-
-CRITICAL: You must output your final decision as a JSON object in your FINAL TEXT RESPONSE. 
-DO NOT use tools like 'echo' to output this JSON. It MUST be in your direct text reply to the user.
-Format:
-{{
-  "action": "propose_test",
-  "entrypoint": "bash test.sh", // Command to run your test
-  "patch_path": "patch.diff" // (Optional) path to a git patch to apply before running
-}}"""
+        """Leaf classes must implement this."""
+        raise NotImplementedError("EloAgent is a base class. Use CandidateAgent or TesterAgent.")
 
     async def start(self, initial_prompt: str):
         """Starts the headless server and begins the action loop."""
         from market.common.server import start_opencode_server, find_free_port
-        logging.info(f"Starting session for {self.agent_type} agent {self.agent_id}")
+        logging.info(f"Starting session for {self.agent_type.value} agent {self.agent_id}")
         self.port = find_free_port()
-        
-        # Re-initialize client with correct base_url now that we have the port
         self.client = AsyncOpencode(base_url=f"http://127.0.0.1:{self.port}", timeout=self.timeout, max_retries=0)
         
         self.process = await start_opencode_server(
@@ -293,52 +277,23 @@ Format:
         await self.initialize_session(self._get_system_prompt())
         self._loop_task = asyncio.create_task(self._run_loop(initial_prompt))
 
+    async def _handle_action(self, action: str, data: Dict[str, Any]) -> str:
+        """Leaf classes must implement specific action handling."""
+        raise NotImplementedError()
+
     async def _run_loop(self, current_prompt: str):
         """Continuous action loop."""
         system_prompt = self._get_system_prompt()
         while self.state != AgentState.TERMINATED:
             try:
                 content = await self.chat_robust(current_prompt, system_prompt=system_prompt)
-                
                 try:
                     data = self.parse_json_action(content, ["action"])
                     action = data.get("action")
-                    
-                    if self.agent_type == "candidate" and action == "update_candidate":
-                        message = data.get('message', 'No summary provided')
-                        logging.info(f"Agent {self.agent_id} submitted candidate update: {message}")
-                        
-                        if self.orchestrator:
-                            await self.orchestrator.submit_update(self.agent_id, message)
-                            
-                        self._transition(AgentState.WAITING)
-                        current_prompt = "Update submitted. Awaiting next event."
-                        await asyncio.sleep(60) 
-                        
-                    elif self.agent_type == "testing" and action == "propose_test":
-                        entrypoint = data.get("entrypoint")
-                        patch_path = data.get("patch_path")
-                        logging.info(f"Agent {self.agent_id} proposed test: {entrypoint}")
-                        
-                        patch_content = None
-                        if patch_path and os.path.exists(os.path.join(self.worktree_dir, patch_path)):
-                            with open(os.path.join(self.worktree_dir, patch_path), "r") as f:
-                                patch_content = f.read()
-                                
-                        if self.orchestrator:
-                            vid = f"test_{self.agent_id}_{int(time.time())}"
-                            asyncio.create_task(self.orchestrator.add_verifier(vid, patch_content, entrypoint))
-                        
-                        # Stay in THINKING (BaseAgent.chat_robust already managed this)
-                        current_prompt = "Test proposed. You may propose more or wait."
-                        
-                    else:
-                        raise LLMResponseError(f"Invalid action '{action}' for role '{self.agent_type}'.")
-                        
+                    current_prompt = await self._handle_action(action, data)
                 except LLMResponseError as e:
                     logging.warning(f"Agent {self.agent_id} parsing failed: {e}")
                     current_prompt = f"ERROR: Your response was invalid: {str(e)}\nYou MUST output your final decision as a JSON object in your FINAL TEXT RESPONSE (not via a tool)."
-                    
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -346,9 +301,7 @@ Format:
                 await asyncio.sleep(5)
 
     async def interrupt(self, message: Optional[str] = None, data: Optional[Dict] = None):
-        """
-        The Pivot: Interrupt current thinking or waiting and restart with new data.
-        """
+        """The Pivot: Interrupt current thinking or waiting and restart with new data."""
         if data and self.worktree_dir:
             interrupts_dir = os.path.join(self.worktree_dir, ".interrupts")
             os.makedirs(interrupts_dir, exist_ok=True)
@@ -356,14 +309,10 @@ Format:
             with open(filepath, "w") as f:
                 json.dump({"message": message, "data": data}, f, indent=2)
 
-        # Abort remote LLM task
         await super().interrupt()
-
-        # Cancel local Python loop task
         if self._loop_task and not self._loop_task.done():
             self._loop_task.cancel()
 
-        # Restart loop if a message was provided (The Pivot)
         if message and self.state != AgentState.TERMINATED:
             self._transition(AgentState.THINKING)
             self._loop_task = asyncio.create_task(self._run_loop(message))
@@ -376,3 +325,105 @@ Format:
         await super().shutdown()
         stop_server(self.process)
         self.process = None
+
+class CandidateAgent(EloAgent):
+    def __init__(self, agent_id: str, worktree_dir: str, model: str = "gemini-3-flash", 
+                 provider: str = "opencode", traces_dir: str = "/tmp", orchestrator: Any = None):
+        super().__init__(agent_id, worktree_dir, AgentType.CANDIDATE, model, provider, traces_dir, orchestrator)
+
+    def _get_system_prompt(self) -> str:
+        return f"""You are a Candidate Agent ({self.agent_id}). 
+Your goal is to modify the files in your workspace (e.g., `./`) to solve the given problem and fix any failing tests.
+
+### The ELO Tournament System:
+- **Asynchronous & Continuous:** This is a live, ongoing tournament. There are no fixed "rounds."
+- **Glicko-2 Ratings:** Your "skill" (code quality) is estimated using the Glicko-2 rating system. Passing tests increases your rating; failing them decreases it.
+- **Versioning:** Every time you submit an update, a new **Version** is created. Your rating is inherited from the previous version, but uncertainty (RD) is reset to allow for rapid movement.
+- **Reactive Execution:** When you submit, the system automatically runs ALL available tests against your new code.
+- **Notifications:** You will be "interrupted" (your current task aborted and restarted) when:
+    1. A rival candidate submits an update (so you can analyze their progress).
+    2. Your current submission fails a test (so you can fix the bug).
+
+### Submission Process:
+1. Modify your code using tools (e.g., `write_file`).
+2. Once your changes are ready, send the `update_candidate` action.
+The system will automatically compute the diff between your current workspace and the original codebase to create a versioned submission.
+
+CRITICAL: You must output your final decision as a JSON object in your FINAL TEXT RESPONSE. 
+DO NOT use tools like 'echo' to output this JSON. It MUST be in your direct text reply to the user.
+Format:
+{{
+  "action": "update_candidate",
+  "message": "Summary of changes made."
+}}"""
+
+    async def _handle_action(self, action: str, data: Dict[str, Any]) -> str:
+        if action == AgentActionType.UPDATE_CANDIDATE.value:
+            message = data.get('message', 'No summary provided')
+            logging.info(f"Agent {self.agent_id} submitted candidate update: {message}")
+            if self.orchestrator:
+                await self.orchestrator.submit_update(self.agent_id, message)
+            self._transition(AgentState.WAITING)
+            # Waiting for next event (interrupt)
+            await asyncio.sleep(60)
+            return "Update submitted. Awaiting next event."
+        raise LLMResponseError(f"Invalid action '{action}' for CandidateAgent.")
+
+class TesterAgent(EloAgent):
+    def __init__(self, agent_id: str, worktree_dir: str, model: str = "gemini-3-flash", 
+                 provider: str = "opencode", traces_dir: str = "/tmp", orchestrator: Any = None):
+        super().__init__(agent_id, worktree_dir, AgentType.TESTER, model, provider, traces_dir, orchestrator)
+
+    def _get_system_prompt(self) -> str:
+        return f"""You are a Testing Agent ({self.agent_id}).
+Your goal is to write a script that verifies if a codebase correctly solves the problem or exposes a specific bug.
+
+### Your Role:
+You are NOT a rival to the candidates. You are a **Verifier**. Your goal is to produce high-quality tests that can distinguish between a correct solution and a buggy one. Your tests also have an ELO rating based on their "authority" and discriminative power.
+
+### The ELO Tournament System:
+- **Asynchronous:** This is an ongoing tournament. You can submit tests at any time.
+- **Reactive:** Whenever you submit a new test, it is automatically executed against the latest version of ALL current candidates.
+- **The Overlay Mechanism:**
+    1. You write your test files (e.g., `test.sh`, `tests/v1.py`) in your own workspace (e.g., `./`).
+    2. When you submit your action, the system bundles ALL your workspace changes (your diff) into a "Test Package".
+    3. To execute your test against a candidate: 
+       - The system creates a clean copy of the candidate's worktree.
+       - Your "Test Package" is **overlaid** (dropped) into the root of their project.
+       - Your `entrypoint` command is then executed.
+
+### Submission Process:
+1. Create your test files in your workspace.
+2. Once ready, send the `propose_test` action specifying the command to run your test.
+Your `entrypoint` should exit 0 on success, non-zero on failure.
+
+CRITICAL: You must output your final decision as a JSON object in your FINAL TEXT RESPONSE. 
+DO NOT use tools like 'echo' to output this JSON. It MUST be in your direct text reply to the user.
+Format:
+{{
+  "action": "propose_test",
+  "entrypoint": "bash test.sh" // Command to run your test from the project root
+}}"""
+
+    async def _handle_action(self, action: str, data: Dict[str, Any]) -> str:
+        if action == AgentActionType.PROPOSE_TEST.value:
+            entrypoint = data.get("entrypoint")
+            logging.info(f"Agent {self.agent_id} proposed test: {entrypoint}")
+            if self.orchestrator:
+                vid = f"test_{self.agent_id}_{int(time.time())}"
+                # Get current workspace diff as patch
+                patch_content = self.orchestrator.workspace_mgr.get_diff(self.worktree_dir)
+                asyncio.create_task(self.orchestrator.add_verifier(vid, patch_content, entrypoint))
+            return "Test proposed. You may propose more or wait."
+        raise LLMResponseError(f"Invalid action '{action}' for TesterAgent.")
+
+# Deprecated alias for backward compatibility
+def AgentSession(agent_id: str, worktree_dir: str, agent_type: Union[str, AgentType] = "candidate", **kwargs):
+    if isinstance(agent_type, str):
+        agent_type = AgentType(agent_type)
+    if agent_type == AgentType.CANDIDATE:
+        return CandidateAgent(agent_id, worktree_dir, **kwargs)
+    elif agent_type == AgentType.TESTER:
+        return TesterAgent(agent_id, worktree_dir, **kwargs)
+    else:
+        raise ValueError(f"Unknown agent type: {agent_type}")

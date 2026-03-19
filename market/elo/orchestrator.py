@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Any
 
 from market.common.orchestrator import BaseOrchestrator
-from market.common.agent import AgentSession
+from market.common.agent import CandidateAgent, TesterAgent, AgentState, InterruptType
 from market.common.native_tests import NativeTestIdentifier
 from market.common.oracle import CommonOracle, ResultType
 
@@ -128,10 +128,9 @@ class EloOrchestrator(BaseOrchestrator):
 
         if not is_baseline:
             logging.info(f"Creating candidate agent {agent_id} with model={self.model}, provider={self.provider}")
-            session = AgentSession(
+            session = CandidateAgent(
                 agent_id=agent_id, 
                 worktree_dir=worktree_dir, 
-                agent_type="candidate",
                 model=self.model,
                 provider=self.provider,
                 traces_dir=self.traces_dir,
@@ -151,10 +150,9 @@ class EloOrchestrator(BaseOrchestrator):
                 await self.workspace_mgr.clone_workspace(os.getcwd(), worktree_dir)
         
         logging.info(f"Creating testing agent {agent_id} with model={self.model}, provider={self.provider}")
-        session = AgentSession(
+        session = TesterAgent(
             agent_id=agent_id, 
             worktree_dir=worktree_dir, 
-            agent_type="testing",
             model=self.model,
             provider=self.provider,
             traces_dir=self.traces_dir,
@@ -376,7 +374,7 @@ class EloOrchestrator(BaseOrchestrator):
             if rid in self.agent_sessions:
                 await self.agent_sessions[rid].interrupt(
                     message=f"Rival {cid} has updated their code (now at Version {new_idx}). Diff:\n{current_diff}",
-                    data={"type": "rival_update", "cid": cid, "diff": current_diff, "version": new_idx}
+                    data={"type": InterruptType.RIVAL_UPDATE, "cid": cid, "diff": current_diff, "version": new_idx}
                 )
         
         # REACTIVE: Re-run all verifiers for THIS NEW VERSION
@@ -428,7 +426,7 @@ class EloOrchestrator(BaseOrchestrator):
                     msg += f"- {v.id} (Rating: {v.elo.rating_obj.rating:.1f})\n"
                 
                 await session.interrupt(message=msg, data={
-                    "type": "failure_notification", 
+                    "type": InterruptType.FAILURE_NOTIFICATION, 
                     "version": version.index,
                     "tests": [v.id for v in top_3]
                 })
