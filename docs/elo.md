@@ -25,7 +25,9 @@ Candidates and Verifiers are rated using the **Glicko-2** system. To maintain ac
 The tournament transitions from "rounds" to a continuous stream of events. 
 
 ### Reactive Test Execution:
-Whenever a candidate creates a new version (submits an update), the orchestrator automatically schedules matches against **every available verifier**. This ensures that the rating of the new version quickly converges based on the full existing test suite.
+The orchestrator automatically schedules matches in the following scenarios to ensure rapid rating convergence:
+- **Candidate Update:** Whenever a candidate creates a new version (submits an update), it is automatically scheduled for matches against **every available verifier**.
+- **Verifier Addition:** Whenever a new verifier is added to the tournament (e.g., by a testing agent), it is automatically scheduled for matches against the **latest version of every candidate**.
 
 ### Notification System:
 Agents are subscribed to an event bus and receive notifications that trigger new inference/action cycles:
@@ -53,9 +55,14 @@ Verifiers are defined as a combination of a git patch and an entrypoint command.
   - **Skip (currently just PATCH_ERROR):** If a verifier's patch fails to apply (PATCH_ERROR). **No rating update is performed.**
 
 ### Agent Interface & Types:
-The system executes two types of agents in parallel, borrowing the existing state machine and timeout/retry logic from the current orchestrator:
-- **Candidate Agents:** Primary goal is to improve their solution. Valid action: `update_candidate`.
-- **Testing Agents:** Primary goal is to find bugs in other solutions. Valid action: `propose_new_test`.
+The system executes two types of agents in parallel, borrowing the existing state machine and timeout/retry logic from the current orchestrator. Agents are restricted to a specific set of allowed actions:
+
+- **Candidate Agents:** Primary goal is to improve their solution. 
+    - **Allowed Action:** `update_candidate`.
+- **Testing Agents:** Primary goal is to find bugs in other solutions. 
+    - **Allowed Action:** `propose_test`.
+
+**Note:** `add_candidate` is an internal orchestrator method and is **not** an allowed action for agents.
 
 ### Agent State Machine & Lifecycle:
 Agents are managed via an explicit state machine to ensure robust behavior and clean termination:
@@ -83,8 +90,7 @@ Agents are managed via an explicit state machine to ensure robust behavior and c
 ### The Interrupt (Pivot) Mechanism:
 The Orchestrator uses interruptions to "pivot" agents when higher-priority events occur (e.g., a rival submission or a test failure). An interrupt aggressively **aborts** any ongoing LLM task and immediately restarts the loop with the new information. This ensures compute is always directed at the most relevant state of the tournament.
 
-## 4. Verifier and Agent Interfaces
-
+## 5. Orchestration
 
 The Orchestrator is responsible for:
 - Starting the tournament and sending initial problem prompts.
