@@ -47,8 +47,10 @@ class SharkTest(unittest.IsolatedAsyncioTestCase):
         client_inst.event.list = AsyncMock(return_value=mock_stream)
         client_inst.close = AsyncMock()
         
-        # 2. Mock session.chat()
-        client_inst.session.chat = AsyncMock()
+        # 2. Mock session.chat() to return a mock with parts
+        mock_chat_response = MagicMock()
+        mock_chat_response.parts = [mock_part]
+        client_inst.session.chat = AsyncMock(return_value=mock_chat_response)
         
         # 3. Mock session.messages() for content retrieval
         mock_msg_item = MagicMock()
@@ -60,7 +62,7 @@ class SharkTest(unittest.IsolatedAsyncioTestCase):
     @patch('market.agents.shark.asyncio.create_subprocess_exec')
     @patch('market.agents.shark.os.path.isdir') # Changed from exists to isdir
     @patch('market.agents.shark.os.listdir')
-    @patch('market.agents.shark.open', new_callable=mock_open)
+    @patch('market.common.agent.open', new_callable=mock_open)
     async def test_format_state_prompt_content(self, mock_file, mock_listdir, mock_isdir, mock_exec, mock_shell, mock_run):
         # Setup State
         state = MarketState(round_num=1, liquidity_b=10.0, prompt="Solve X")
@@ -208,15 +210,17 @@ class TestSharkActionParsing(unittest.IsolatedAsyncioTestCase):
         client_inst.event.list = AsyncMock(return_value=mock_stream)
         client_inst.close = AsyncMock()
         
-        # 2. Mock session.chat()
-        client_inst.session.chat = AsyncMock()
+        # 2. Mock session.chat() to return a mock with parts
+        mock_chat_response = MagicMock()
+        mock_chat_response.parts = [mock_part]
+        client_inst.session.chat = AsyncMock(return_value=mock_chat_response)
         
         # 3. Mock session.messages() for content retrieval
         mock_msg_item = MagicMock()
         mock_msg_item.parts = [mock_part]
         client_inst.session.messages = AsyncMock(return_value=[mock_msg_item])
 
-    @patch('market.agents.shark.AsyncOpencode')
+    @patch('market.common.agent.AsyncOpencode')
     async def test_parsing_success_markdown(self, MockClient):
         # Mock successful JSON in markdown
         self.setup_mock_stream(MockClient, 'Some reasoning... ```json\n{"beliefs": {"cand_0": 0.9}, "proposals": []}\n```')
@@ -231,7 +235,7 @@ class TestSharkActionParsing(unittest.IsolatedAsyncioTestCase):
         action = await shark.get_action(state)
         self.assertEqual(action.beliefs["cand_0"], 0.9)
 
-    @patch('market.agents.shark.AsyncOpencode')
+    @patch('market.common.agent.AsyncOpencode')
     async def test_parsing_success_raw(self, MockClient):
         # Mock successful raw JSON
         self.setup_mock_stream(MockClient, '{"beliefs": {"cand_0": 0.8}, "proposals": []}')
@@ -246,7 +250,7 @@ class TestSharkActionParsing(unittest.IsolatedAsyncioTestCase):
         action = await shark.get_action(state)
         self.assertEqual(action.beliefs["cand_0"], 0.8)
 
-    @patch('market.agents.shark.AsyncOpencode')
+    @patch('market.common.agent.AsyncOpencode')
     async def test_parsing_failure_no_json(self, MockClient):
         # Mock blabber with no JSON
         self.setup_mock_stream(MockClient, 'I am thinking about Fibonacci but I will not give you JSON today.')
@@ -263,7 +267,7 @@ class TestSharkActionParsing(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(action.agent_id, "agent_0")
         self.assertEqual(action.beliefs, {})
 
-    @patch('market.agents.shark.AsyncOpencode')
+    @patch('market.common.agent.AsyncOpencode')
     async def test_parsing_malformed_json_recovery(self, MockClient):
         # Mock malformed JSON that has a valid block inside
         self.setup_mock_stream(MockClient, 'Here is a list: { "item": 1 } and here is the real answer: {"beliefs": {"cand_0": 0.5}}')
@@ -278,7 +282,7 @@ class TestSharkActionParsing(unittest.IsolatedAsyncioTestCase):
         action = await shark.get_action(state)
         self.assertEqual(action.beliefs["cand_0"], 0.5)
 
-    @patch('market.agents.shark.AsyncOpencode')
+    @patch('market.common.agent.AsyncOpencode')
     async def test_get_action_fallback_on_exception(self, MockClient):
         # Mock successful session creation but chat raises an Exception
         mock_session = MagicMock()
@@ -301,8 +305,8 @@ class TestSharkActionParsing(unittest.IsolatedAsyncioTestCase):
 
 class TestSharkTraceLogging(unittest.IsolatedAsyncioTestCase):
 
-    @patch('market.agents.shark.AsyncOpencode')
-    @patch('market.agents.shark.open', new_callable=mock_open)
+    @patch('market.common.agent.AsyncOpencode')
+    @patch('market.common.agent.open', new_callable=mock_open)
     async def test_chat_logs_prompt(self, mock_file, MockClient):
         shark = Shark("agent_0", trace_path="/tmp/trace.txt")
         shark.session = MagicMock()
@@ -328,15 +332,17 @@ class TestSharkTraceLogging(unittest.IsolatedAsyncioTestCase):
         client_inst.event.list = AsyncMock(return_value=mock_stream)
         client_inst.close = AsyncMock()
         
-        # 2. Mock session.chat()
-        client_inst.session.chat = AsyncMock()
+        # 2. Mock session.chat() to return a mock with parts
+        mock_chat_response = MagicMock()
+        mock_chat_response.parts = [mock_part]
+        client_inst.session.chat = AsyncMock(return_value=mock_chat_response)
         
         # 3. Mock session.messages()
         mock_msg_item = MagicMock()
         mock_msg_item.parts = [mock_part]
         client_inst.session.messages = AsyncMock(return_value=[mock_msg_item])
 
-        await shark._chat_with_network_retry("Hello")
+        await shark.chat_robust("Hello", system_prompt="test system")
 
         # Verify prompt was written to trace
         found_prompt = False
@@ -348,8 +354,8 @@ class TestSharkTraceLogging(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(found_prompt)
 
-    @patch('market.agents.shark.AsyncOpencode')
-    @patch('market.agents.shark.open', new_callable=mock_open)
+    @patch('market.common.agent.AsyncOpencode')
+    @patch('market.common.agent.open', new_callable=mock_open)
     async def test_capture_sse_events_tool_calls(self, mock_file, MockClient):
         shark = Shark("agent_0", trace_path="/tmp/trace.txt")
         shark.session = MagicMock()
@@ -398,8 +404,10 @@ class TestSharkTraceLogging(unittest.IsolatedAsyncioTestCase):
         client_inst.event.list = AsyncMock(return_value=mock_stream)
         client_inst.close = AsyncMock()
         
-        # 2. Mock session.chat()
-        client_inst.session.chat = AsyncMock()
+        # 2. Mock session.chat() to return a mock with parts
+        mock_chat_response = MagicMock()
+        mock_chat_response.parts = [mock_part_text]
+        client_inst.session.chat = AsyncMock(return_value=mock_chat_response)
         
         # 3. Mock session.messages()
         mock_msg_item = MagicMock()
@@ -407,7 +415,7 @@ class TestSharkTraceLogging(unittest.IsolatedAsyncioTestCase):
         client_inst.session.messages = AsyncMock(return_value=[mock_msg_item])
 
         # Run the chat logic (which now captures events in-line)
-        await shark._chat_with_network_retry("test prompt")
+        await shark.chat_robust("test prompt", system_prompt="test system")
 
         # Verify all events were written
         written_content = ""
@@ -416,10 +424,10 @@ class TestSharkTraceLogging(unittest.IsolatedAsyncioTestCase):
             written_content += call[0][0]
 
         self.assertIn("[TOOL CALL: run_bash(ls)]", written_content)
-        self.assertIn("[TOOL RESULT: file.txt]", written_content)
+        self.assertIn("[TOOL RESULT: file.txt...]", written_content)
 
 class TestSharkRetryLogic(unittest.IsolatedAsyncioTestCase):
-    @patch('market.agents.shark.AsyncOpencode')
+    @patch('market.common.agent.AsyncOpencode')
     @patch('market.agents.shark.asyncio.sleep')
     async def test_get_action_retry_on_timeout(self, mock_sleep, MockClient):
         # 1. Setup Shark with short base timeout for testing
@@ -430,7 +438,7 @@ class TestSharkRetryLogic(unittest.IsolatedAsyncioTestCase):
         shark.interrupt = AsyncMock()
         
         # 2. Mock _chat_with_network_retry to fail twice with timeout, then succeed
-        with patch.object(Shark, '_chat_with_network_retry') as mock_chat:
+        with patch.object(Shark, 'chat_robust') as mock_chat:
             mock_chat.side_effect = [
                 APITimeoutError("Timeout!"),
                 APITimeoutError("Timeout again!"),
@@ -457,11 +465,11 @@ class TestSharkRetryLogic(unittest.IsolatedAsyncioTestCase):
             # Verify prompt updates
             self.assertIn("You are Agent: agent_0", calls[0][0][0]) # First call has full state
             self.assertIn("TIMEOUT: Your previous response took more than 1.0s", calls[1][0][0])
-            self.assertIn("You have 2.0s for this attempt", calls[1][0][0])
+            self.assertIn("You have 2.0s now to provide your JSON format action.", calls[1][0][0])
             self.assertIn("TIMEOUT: Your previous response took more than 2.0s", calls[2][0][0])
-            self.assertIn("You have 4.0s for this attempt", calls[2][0][0])
+            self.assertIn("You have 4.0s now to provide your JSON format action.", calls[2][0][0])
 
-    @patch('market.agents.shark.AsyncOpencode')
+    @patch('market.common.agent.AsyncOpencode')
     @patch('market.agents.shark.asyncio.sleep')
     async def test_get_action_retry_on_parsing_error(self, mock_sleep, MockClient):
         shark = Shark("agent_0", max_retries=2)
@@ -469,7 +477,7 @@ class TestSharkRetryLogic(unittest.IsolatedAsyncioTestCase):
         shark.session = MagicMock()
         shark.session.id = "ses_123"
         
-        with patch.object(Shark, '_chat_with_network_retry') as mock_chat:
+        with patch.object(Shark, 'chat_robust') as mock_chat:
             mock_chat.side_effect = [
                 "Not JSON",
                 '{"beliefs": {"cand_0": 0.7}}'
@@ -486,7 +494,7 @@ class TestSharkRetryLogic(unittest.IsolatedAsyncioTestCase):
             calls = mock_chat.call_args_list
             self.assertIn("ERROR: Your previous response was invalid", calls[1][0][0])
 
-    @patch('market.agents.shark.AsyncOpencode')
+    @patch('market.common.agent.AsyncOpencode')
     @patch('market.agents.shark.asyncio.sleep')
     async def test_get_action_max_retries_exceeded(self, mock_sleep, MockClient):
         shark = Shark("agent_0", max_retries=1)
@@ -495,7 +503,7 @@ class TestSharkRetryLogic(unittest.IsolatedAsyncioTestCase):
         shark.session.id = "ses_123"
         shark.interrupt = AsyncMock()
         
-        with patch.object(Shark, '_chat_with_network_retry') as mock_chat:
+        with patch.object(Shark, 'chat_robust') as mock_chat:
             mock_chat.side_effect = [
                 APITimeoutError("Timeout 1"),
                 APITimeoutError("Timeout 2")
@@ -509,9 +517,9 @@ class TestSharkRetryLogic(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(mock_chat.call_count, 2)
             self.assertEqual(shark.interrupt.call_count, 2)
 
-    @patch('market.agents.shark.AsyncOpencode')
-    async def test_chat_with_network_retry_propagates_timeout(self, MockClient):
-        # Verify APITimeoutError is not swallowed by _chat_with_network_retry
+    @patch('market.common.agent.AsyncOpencode')
+    async def test_chat_robust_propagates_timeout(self, MockClient):
+        # Verify APITimeoutError is not swallowed by chat_robust
         client_inst = AsyncMock() 
         MockClient.return_value = client_inst
         client_inst.session = AsyncMock()
@@ -527,37 +535,38 @@ class TestSharkRetryLogic(unittest.IsolatedAsyncioTestCase):
         client_inst.event.list = AsyncMock(return_value=mock_stream)
         
         with self.assertRaises(APITimeoutError):
-            await shark._chat_with_network_retry("test prompt")
+            await shark.chat_robust("test prompt", system_prompt="test system")
 
-    @patch('market.agents.shark.AsyncOpencode')
-    async def test_chat_with_network_retry_respects_timeout_config(self, MockClient):
+    @patch('market.common.agent.AsyncOpencode')
+    async def test_chat_robust_respects_timeout_config(self, MockClient):
         # Verify both capture_client and main_client use call-specific timeout
         base_timeout = 300.0
         call_timeout = 120.0
         client_inst = AsyncMock()
         MockClient.return_value = client_inst
         client_inst.session = AsyncMock()
-        client_inst.session.chat = AsyncMock()
-
-        shark = Shark("agent_0", timeout=base_timeout)
-        shark.session = MagicMock()
-        shark.session.id = "ses_123"
 
         from opencode_ai.types import TextPart
         dummy_part = TextPart(id="p1", messageID="m1", sessionID="s1", type="text", text='{"beliefs": {}}')
+
+        mock_chat_response = MagicMock()
+        mock_chat_response.parts = [dummy_part]
+        client_inst.session.chat = AsyncMock(return_value=mock_chat_response)
+
+        shark = Shark("agent_0", timeout=base_timeout)
         client_inst.session.messages = AsyncMock(return_value=[MagicMock(parts=[dummy_part])])
 
         mock_stream = AsyncMock()
         mock_stream.__aiter__.side_effect = lambda: (i for i in [])
         client_inst.event.list = AsyncMock(return_value=mock_stream)
 
-        await shark._chat_with_network_retry("test prompt", timeout=call_timeout)
+        await shark.chat_robust("test prompt", system_prompt="test system", timeout=call_timeout)
 
         # Verify that session.chat was called with the overridden timeout
         # rather than the base timeout from Shark constructor
         client_inst.session.chat.assert_called()
         self.assertEqual(client_inst.session.chat.call_args.kwargs.get("timeout"), call_timeout)
-    @patch('market.agents.shark.AsyncOpencode')
+    @patch('market.common.agent.AsyncOpencode')
     @patch('market.agents.shark.asyncio.sleep')
     async def test_get_action_fatal_failure_on_short_timeout(self, mock_sleep, MockClient):
         # Verify that repeated timeouts lead to fallback AgentAction
@@ -567,8 +576,8 @@ class TestSharkRetryLogic(unittest.IsolatedAsyncioTestCase):
         shark.session.id = "ses_123"
         shark.interrupt = AsyncMock()
         
-        # Mock _chat_with_network_retry to always timeout
-        with patch.object(Shark, '_chat_with_network_retry', side_effect=APITimeoutError("Timeout")):
+        # Mock chat_robust to always timeout
+        with patch.object(Shark, 'chat_robust', side_effect=APITimeoutError("Timeout")):
             state = MarketState(round_num=1, liquidity_b=100.0)
             action = await shark.get_action(state)
             self.assertEqual(action.agent_id, "agent_0")

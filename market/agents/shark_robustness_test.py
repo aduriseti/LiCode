@@ -21,8 +21,8 @@ class SharkRobustnessTest(unittest.IsolatedAsyncioTestCase):
         shark.session.id = "ses_123"
         shark.interrupt = AsyncMock()
         
-        # Mock _chat_with_network_retry to always timeout
-        with patch.object(Shark, '_chat_with_network_retry') as mock_chat:
+        # Mock chat_robust to always timeout
+        with patch.object(Shark, 'chat_robust') as mock_chat:
             mock_chat.side_effect = APITimeoutError("Timeout")
             
             state = MarketState(round_num=1, liquidity_b=100.0)
@@ -44,7 +44,7 @@ class SharkRobustnessTest(unittest.IsolatedAsyncioTestCase):
         shark.session = MagicMock()
         shark.session.id = "ses_123"
         
-        with patch.object(Shark, '_chat_with_network_retry') as mock_chat:
+        with patch.object(Shark, 'chat_robust') as mock_chat:
             # Provide consistently bad responses that trigger LLMResponseError
             mock_chat.return_value = "I am not a JSON object, I am a teapot."
             
@@ -68,7 +68,7 @@ class SharkRobustnessTest(unittest.IsolatedAsyncioTestCase):
         shark.session.id = "ses_123"
         shark.interrupt = AsyncMock()
         
-        with patch.object(Shark, '_chat_with_network_retry') as mock_chat:
+        with patch.object(Shark, 'chat_robust') as mock_chat:
             mock_chat.side_effect = [
                 APITimeoutError("Timeout 1"),
                 APITimeoutError("Timeout 2"),

@@ -22,11 +22,16 @@ class TestPromptRetention(unittest.IsolatedAsyncioTestCase):
         client_inst = MockClient.return_value
         shark.client = client_inst # Ensure shark uses the same mock client
         
-        def create_mock_stream(content_text):
+        contents = ["I am not JSON", '{"beliefs": {"cand_0": 0.5}, "proposals": []}']
+        msg_contents = deque(contents)
+
+        def create_mock_stream():
+            current_content = msg_contents.popleft() if msg_contents else contents[-1]
+            
             mock_event = mock.MagicMock(spec=EventMessagePartUpdated)
             mock_event.properties = mock.MagicMock()
             mock_part = mock.MagicMock(spec=TextPart)
-            mock_part.text = content_text
+            mock_part.text = current_content
             mock_part.session_id = "ses_123"
             mock_part.id = "p1"
             mock_event.properties.part = mock_part
@@ -39,21 +44,17 @@ class TestPromptRetention(unittest.IsolatedAsyncioTestCase):
             mock_stream.__aiter__.side_effect = lambda: mock_iter()
             return mock_stream
 
-        client_inst.event.list = mock.AsyncMock(return_value=create_mock_stream(""))
+        # chat_robust calls event.list() before session.chat()
+        client_inst.event.list = mock.AsyncMock(side_effect=create_mock_stream)
         client_inst.close = mock.AsyncMock()
-        client_inst.session.chat = mock.AsyncMock()
         
-        contents = ["I am not JSON", '{"beliefs": {"cand_0": 0.5}, "proposals": []}']
-        msg_contents = deque(contents)
-        async def messages_side_effect(*args, **kwargs):
-            c = msg_contents.popleft() if msg_contents else contents[-1]
-            mock_part = mock.MagicMock(spec=TextPart)
-            mock_part.text = c
-            mock_msg = mock.MagicMock()
-            mock_msg.parts = [mock_part]
-            return [mock_msg]
-            
-        client_inst.session.messages = mock.AsyncMock(side_effect=messages_side_effect)
+        async def mock_chat(*args, **kwargs):
+            # We don't strictly need to return parts since chat_robust prefers stream
+            mock_resp = mock.MagicMock()
+            mock_resp.parts = []
+            return mock_resp
+
+        client_inst.session.chat = mock.AsyncMock(side_effect=mock_chat)
         
         action = await shark.get_action(state)
         

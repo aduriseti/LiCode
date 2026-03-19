@@ -1,65 +1,62 @@
 import pytest
 import asyncio
+import json
 from unittest.mock import patch, MagicMock, AsyncMock
-from evaluate_swe_bench import run_market_on_instance
+from evaluate_swe_bench import run_market_tournament
 
 @pytest.mark.asyncio
-@patch('evaluate_swe_bench.docker')
+@patch('evaluate_swe_bench.status_mgr')
+@patch('evaluate_swe_bench.MarketState')
+@patch('evaluate_swe_bench.Orchestrator')
 @patch('evaluate_swe_bench.asyncio.create_subprocess_exec')
-@patch('evaluate_swe_bench.asyncio.create_subprocess_shell')
-async def test_run_market_on_instance_container_lifecycle(mock_shell, mock_exec, mock_docker):
+async def test_run_market_tournament_container_lifecycle(mock_exec, mock_orch, mock_state_cls, mock_status_mgr):
     # Setup mocks
-    mock_docker.get_image_name.return_value = "test_image"
-    mock_docker.start_container = AsyncMock(return_value="test_container_id")
-    mock_docker.stop_container = AsyncMock()
-    mock_docker.pull_image = AsyncMock()
-    
     mock_proc = MagicMock()
     mock_proc.wait = AsyncMock(return_value=0)
-    mock_proc.communicate = AsyncMock(return_value=(b"{}", b""))
-    mock_proc.stdout.readline = AsyncMock(side_effect=[b'{"type": "log", "message": "done"}\n', b''])
+    # Return a final_result JSON to satisfy the state reconstruction logic
+    final_result = json.dumps({"type": "final_result", "state": {"some": "state"}})
+    mock_proc.stdout.readline = AsyncMock(side_effect=[
+        f'{final_result}\n'.encode(),
+        b''
+    ])
     mock_proc.returncode = 0
-    
     mock_exec.return_value = mock_proc
-    mock_shell.return_value = mock_proc
-    
-    instance = {
-        'instance_id': 'test__test-1',
-        'repo': 'test/repo',
-        'base_commit': 'abcdef',
-        'problem_statement': 'Fix it'
-    }
-    
+
+    mock_state = MagicMock()
+    mock_state_cls.from_json.return_value = mock_state
+
     class Args:
-        output = "test_output.jsonl"
+        output = "test_results/predictions.jsonl"
         agents = 2
         rounds = 2
-        run_id = "run_123"
-        dummy = False
-        max_retries = 1
-        initial_backoff = 1
-        max_backoff = 1
         provider = "test"
         model = "test"
         dashboard = False
-        
-    semaphore = asyncio.Semaphore(1)
-    
+        skip_validation = True
+        max_retries = 1
+        initial_backoff = 10.0
+        max_backoff = 100.0
+
     # Run the function
-    await run_market_on_instance(instance, Args(), semaphore)
-    
-    # Verify Docker lifecycle
-    mock_docker.get_image_name.assert_called_with('test__test-1')
-    mock_docker.pull_image.assert_called_with("test_image")
-    mock_docker.start_container.assert_called_once()
-    mock_docker.stop_container.assert_called_with("test_container_id")
+    # def run_market_tournament(instance_id, work_dir, container_id, args):
+    result = await run_market_tournament("test__test-1", "/tmp/workdir", "test_container_id", Args())
+
+    # Verify status updates
+    mock_status_mgr.update_status.assert_any_call("test__test-1", "Setting Up Market")
     
     # Verify the market command was wrapped in docker exec
-    # It might not be the absolute last call if other commands run, but it should be among them
-    market_call = [call[0] for call in mock_exec.call_args_list if "market.cli" in call[0]][0]
+    args, kwargs = mock_exec.call_args
+    market_call = args
     assert "docker" in market_call
     assert "exec" in market_call
     assert "test_container_id" in market_call
-    assert any("python3" in arg for arg in market_call)
-    assert "-m" in market_call
     assert "market.cli" in market_call
+    assert "--agents" in market_call
+    assert "2" in market_call
+    assert "--rounds" in market_call
+    assert "2" in market_call
+
+    # Verify Orchestrator reconstruction
+    mock_state_cls.from_json.assert_called_once()
+    mock_orch.assert_called_once_with(prompt="", n_agents=0, budget=0, state=mock_state)
+    assert result == mock_orch.return_value
