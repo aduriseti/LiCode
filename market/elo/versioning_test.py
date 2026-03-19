@@ -106,3 +106,35 @@ async def test_version_rating_isolation(base_dir):
     assert cand.versions[1].elo.rating_obj.rating < v0_rating
     # v0 rating should be UNCHANGED
     assert cand.versions[0].elo.rating_obj.rating == v0_rating
+
+@pytest.mark.asyncio
+async def test_episode_reset_rd_behavior(base_dir):
+    """Verifies that when a candidate updates code, the new version inherits the rating but resets RD to 350.0."""
+    orch = EloOrchestrator(prompt="test", base_dir=base_dir)
+    await orch.add_candidate("agent_0")
+    
+    cand = orch.candidates["agent_0"]
+    v0 = cand.versions[0]
+    
+    # Artificially set v0 rating to something non-default to prove it inherits
+    v0.elo.rating_obj.setRating(1600.0)
+    v0.elo.rating_obj.setRd(40.0) # Very low uncertainty
+    
+    # Create an update to trigger a new version
+    with open(os.path.join(cand.worktree_dir, "v1.py"), "w") as f:
+        f.write("v1")
+    await orch.submit_update("agent_0", "Create v1")
+    
+    # Verify version 1 was created
+    assert len(cand.versions) == 2
+    v1 = cand.versions[1]
+    
+    # 1. Rating should be exactly inherited
+    assert v1.elo.rating_obj.rating == 1600.0
+    
+    # 2. RD should be reset to the unrated maximum (350.0)
+    assert v1.elo.rating_obj.rd == 350.0
+    
+    # 3. Old version should remain untouched
+    assert v0.elo.rating_obj.rating == 1600.0
+    assert v0.elo.rating_obj.rd == 40.0

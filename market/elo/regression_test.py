@@ -29,19 +29,17 @@ async def test_elo_candidate_update_detection(base_dir):
     await orch.add_candidate("agent_0")
     
     agent_0_dir = orch.candidates["agent_0"].worktree_dir
-    # Ensure initial state is set
-    orch.candidates["agent_0"].last_diff = orch.workspace_mgr.get_diff(agent_0_dir)
     
     # Simulate an update
     with open(os.path.join(agent_0_dir, "README.md"), "a") as f:
         f.write("\n\nUpdate detected")
     
     # Run a tick of update check
-    await orch.check_for_updates()
+    await orch.submit_update("agent_0", "Test update")
     
-    # Check if last_diff was updated to the new diff
+    # Check if latest_version diff was updated to the new diff
     current_diff = orch.workspace_mgr.get_diff(agent_0_dir)
-    assert orch.candidates["agent_0"].last_diff == current_diff
+    assert orch.candidates["agent_0"].latest_version.diff == current_diff
     assert "Update detected" in current_diff
 
 @pytest.mark.asyncio
@@ -87,12 +85,12 @@ async def test_elo_rating_update(base_dir):
     # Simulate a match
     await orch.run_match("agent_0", "v1")
     
-    initial_rating = orch.candidates["agent_0"].elo.rating_obj.rating
+    initial_rating = orch.candidates["agent_0"].latest_version.elo.rating_obj.rating
     
     # Update ratings
     await orch.update_all_ratings()
     
-    new_rating = orch.candidates["agent_0"].elo.rating_obj.rating
+    new_rating = orch.candidates["agent_0"].latest_version.elo.rating_obj.rating
     assert new_rating != initial_rating
 
 @pytest.mark.asyncio
@@ -105,9 +103,9 @@ async def test_elo_timeout_is_loss(base_dir):
     with patch('market.common.oracle.CommonOracle.run_test', return_value=("TIMEOUT", "", "")):
         await orch.run_match("agent_0", "v1")
     
-    initial_rating = orch.candidates["agent_0"].elo.rating_obj.rating
+    initial_rating = orch.candidates["agent_0"].latest_version.elo.rating_obj.rating
     await orch.update_all_ratings()
     
-    new_rating = orch.candidates["agent_0"].elo.rating_obj.rating
+    new_rating = orch.candidates["agent_0"].latest_version.elo.rating_obj.rating
     # Rating should decrease (loss)
     assert new_rating < initial_rating

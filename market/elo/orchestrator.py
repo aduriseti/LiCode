@@ -349,12 +349,11 @@ class EloOrchestrator(BaseOrchestrator):
             failing_tests=list(old_version.failing_tests)
         )
         
-        # Inherit Rating but increase RD (+50 uncertainty)
+        # Inherit Rating but reset RD to default (Episode Reset / Bayesian Prior)
         new_rating = self.glicko.create_rating()
         new_rating.setRating(old_version.elo.rating_obj.rating)
-        new_rating.setRd(old_version.elo.rating_obj.rd + 50.0)
-        new_version.elo.rating_obj = new_rating
-        
+        new_rating.setRd(350.0) # 350 is standard unrated Glicko-2 RD
+        new_version.elo.rating_obj = new_rating        
         cand.versions.append(new_version)
         
         self._log_event("update_submitted", {

@@ -12,10 +12,12 @@ The **ELO-based Asynchronous Competition** treats candidates as players in a con
 
 Candidates and Verifiers are rated using the **Glicko-2** system. To maintain accuracy as candidates iterate, the system employs **Candidate Versioning**.
 
-### Versioning and Pinning:
+### Versioning and "Episode" Resets:
 - **Immutable Versions:** Every time a candidate submits a code update, a new **Version** is created.
 - **Match Pinning:** A match (test execution) is pinned to a specific version of a candidate. The result of that match (Win/Loss) only impacts the rating of that specific version.
-- **Rating Inheritance:** A new version inherits the $R$ (rating) from its predecessor, but its $RD$ (rating deviation) is increased to reflect the uncertainty introduced by the new code changes.
+- **Rating Inheritance (The "Bayesian Prior"):** A new version inherits the rating ($R$) from its predecessor, but its Rating Deviation ($RD$) is reset to the maximum (350).
+    - **Formal Justification:** This treats the code update as a **non-stationary skill shift**. The old rating serves as the **Maximum A Posteriori (MAP)** estimate—the best available guess for the new code's quality.
+    - **Learning Rate Recovery:** Resetting $RD$ to 350 "unlocks" the rating, allowing it to move rapidly if the new code's performance differs from the old, while starting from a statistically informed "prior" location.
 - **Leaderboard:** The tournament leaderboard displays the rating of the **most recent version** for each candidate.
 
 ## 3. Asynchronous Execution & Notifications

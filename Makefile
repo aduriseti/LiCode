@@ -38,7 +38,8 @@ test-logic:
 	pytest market/ tests/ --ignore=market/dashboard_startup_test.py --ignore=market/integration_dashboard_test.py --ignore=market/elo/regression_test.py
 
 test-elo:
-	pytest market/elo/regression_test.py
+	pytest market/elo/
+	pytest tests/test_evaluate_elo_e2e.py
 
 test-elo-fib:
 	python3 -m market.elo.cli run --prompt "compute fibonacci #s" --agents 3 --max-duration 20
