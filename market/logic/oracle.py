@@ -7,10 +7,17 @@ from typing import Literal, Optional
 
 ResultType = Literal["PASS", "FAIL", "TIMEOUT", "ERROR"]
 
+from market.common.oracle import CommonOracle, ResultType
+
 class Oracle:
     """
     Executes Verifiers (packages) against Candidates (solutions) in isolation.
     """
+    @staticmethod
+    async def run_test(candidate_dir: str, verifier_dir: str, timeout: int = 15) -> ResultType:
+        """Wrapper for backward compatibility."""
+        res, _, _ = await CommonOracle.run_test(candidate_dir, verifier_dir=verifier_dir, timeout=timeout)
+        return res
     
     @staticmethod
     def _setup_sandbox(candidate_dir: str, verifier_dir: str) -> Optional[str]:

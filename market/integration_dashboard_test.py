@@ -30,9 +30,10 @@ class IntegrationDashboardTest(unittest.IsolatedAsyncioTestCase):
     @patch('market.runner.socket.create_connection')
     @patch('market.runner.asyncio.open_connection')
     @patch('market.runner.asyncio.create_subprocess_exec')
-    @patch('market.orchestrator.Orchestrator._clone_workspace')
+    @patch('market.orchestrator.Orchestrator._clone_workspace', new_callable=AsyncMock)
     @patch('market.logic.oracle.Oracle.run_test', return_value="PASS")
     async def test_integration_flow_with_json_logs(self, MockOracle, MockClone, MockExec, MockAsyncSocket, MockSocket, MockShark):
+
         """
         Tests the integration between MarketRunner and the Dashboard's expected input (JSON logs).
         Mocks LLM (Shark) and OpenCode server.
@@ -139,7 +140,7 @@ class IntegrationDashboardTest(unittest.IsolatedAsyncioTestCase):
             # Verify the verifier was created in the orchestrator
             self.assertEqual(len(runner.orchestrator.state.assets), 3)
 
-    @patch('market.orchestrator.Orchestrator._clone_workspace')
+    @patch('market.common.workspace.WorkspaceManager.clone_workspace', new_callable=AsyncMock)
     @patch('market.agents.shark.AsyncOpencode')
     @patch('market.runner.MarketRunner._start_agent_server')
     @patch('market.runner.MarketRunner._find_free_port')

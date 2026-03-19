@@ -67,7 +67,7 @@ class WorkspaceTest(unittest.IsolatedAsyncioTestCase):
         orch = Orchestrator("test", 1, base_dir=self.test_dir)
         dest_dir = os.path.join(self.test_dir, "agent_workspace_clean")
         
-        await orch._clone_workspace(dest_dir)
+        await orch.workspace_mgr.clone_workspace(self.project_root, dest_dir)
         
         # 3. Verify Origin Removal
         remotes = subprocess.run(["git", "remote"], cwd=dest_dir, capture_output=True, text=True).stdout.strip()
@@ -120,7 +120,7 @@ class WorkspaceTest(unittest.IsolatedAsyncioTestCase):
         orch = Orchestrator("test", 1, base_dir=self.test_dir)
         dest_dir = os.path.join(self.test_dir, "agent_workspace_overlay")
         
-        await orch._clone_workspace(dest_dir)
+        await orch.workspace_mgr.clone_workspace(self.project_root, dest_dir)
         
         # 3. Verify Content
         with open(os.path.join(dest_dir, "committed.py"), "r") as f:
@@ -139,7 +139,7 @@ class WorkspaceTest(unittest.IsolatedAsyncioTestCase):
         # 1. Setup
         orch = Orchestrator("test", 1, base_dir=self.test_dir)
         dest_dir = os.path.join(self.test_dir, "agent_workspace_truncation")
-        await orch._clone_workspace(dest_dir)
+        await orch.workspace_mgr.clone_workspace(self.project_root, dest_dir)
         
         # 2. Create Large Change
         large_file = os.path.join(dest_dir, "large.py")

@@ -8,6 +8,17 @@ from market.orchestrator import Orchestrator, AgentAction
 from market.core.state import MarketState, AgentPortfolio, MarketAsset, MarketBond
 from market.core.strategy import Strategy
 
+def force_rmtree(path):
+    import stat
+    def remove_readonly(func, path, _):
+        try:
+            os.chmod(path, stat.S_IWRITE)
+            func(path)
+        except Exception:
+            pass
+    if os.path.exists(path):
+        shutil.rmtree(path, onerror=remove_readonly)
+
 class TestOrchestrator(unittest.IsolatedAsyncioTestCase):
     
     async def test_basic_loop(self):
@@ -193,7 +204,7 @@ class TestBondLogic(unittest.IsolatedAsyncioTestCase):
         self.state.agents["agent_0"].wealth = 1000.0
 
     async def asyncTearDown(self):
-        shutil.rmtree(self.test_dir)
+        force_rmtree(self.test_dir)
 
     def test_bond_lifecycle(self):
         # 1. Create Verifier Files in Worktree
@@ -305,7 +316,7 @@ class TestOrchestratorVerifier(unittest.IsolatedAsyncioTestCase):
         # agent_0 created by initialize
 
     async def asyncTearDown(self):
-        shutil.rmtree(self.test_dir)
+        force_rmtree(self.test_dir)
 
     def test_create_verifier_from_path(self):
         """Test creating a verifier from an existing directory."""
@@ -329,7 +340,7 @@ class TestOrchestratorVerifier(unittest.IsolatedAsyncioTestCase):
         
         # Check permissions
         st = os.stat(os.path.join(v_path, "run.sh"))
-        self.assertTrue(st.st_mode & stat.S_IXUSR)
+        self.assertEqual(st.st_mode & 0o777, 0o755)
 
     def test_create_verifier_missing_run_sh(self):
         """Test failure when run.sh is missing."""
@@ -359,7 +370,7 @@ class TestOrchestratorVerifier(unittest.IsolatedAsyncioTestCase):
         original_cwd = os.getcwd()
         os.chdir(src_repo)
         try:
-            await self.orchestrator._clone_workspace(dest_dir)
+            await self.orchestrator.workspace_mgr.clone_workspace(src_repo, dest_dir)
         finally:
             os.chdir(original_cwd)
         
@@ -379,7 +390,7 @@ class PermissionsTest(unittest.IsolatedAsyncioTestCase):
         await self.orch.initialize()
 
     async def asyncTearDown(self):
-        shutil.rmtree(self.test_dir)
+        force_rmtree(self.test_dir)
 
     def test_candidate_dir_permissions(self):
         # Check cand_0 directory
@@ -425,7 +436,7 @@ class TestNewFeatures(unittest.IsolatedAsyncioTestCase):
         await self.orch.initialize()
 
     async def asyncTearDown(self):
-        shutil.rmtree(self.test_dir)
+        force_rmtree(self.test_dir)
 
     async def test_instant_settlement_preserves_price(self):
         """Verifies that settlement moves shares to Whale and preserves the market price."""

@@ -34,12 +34,19 @@ node-setup:
 test-python:
 	pytest market/ tests/
 
+test-logic:
+	pytest market/ tests/ --ignore=market/dashboard_startup_test.py --ignore=market/integration_dashboard_test.py
+
+test-ui:
+	pytest market/dashboard_startup_test.py market/integration_dashboard_test.py
+	cd .opencode && npx vitest run
+
 test-js:
 	cd .opencode && npx vitest run
 
 test-all: test-python test-js
 
-test: test-all
+test: test-logic
 
 test-fib:
 	npx opencode run "run a tournament with 3 agents for 1 round to compute fibonacci #s"

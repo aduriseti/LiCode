@@ -9,11 +9,12 @@ import asyncio
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
+from market.common.workspace import WorkspaceManager, DEFAULT_EXCLUDE_LIST
+from market.common.oracle import CommonOracle
 from market.core.state import MarketState, AgentPortfolio, MarketAsset, MarketBond
 from market.core.lmsr import LMSRMarket
 from market.core.strategy import Strategy
 from market.logic.whale import Whale
-from market.logic.oracle import Oracle
 
 @dataclass
 class AgentAction:
@@ -22,17 +23,6 @@ class AgentAction:
     proposals: List[Dict] = field(default_factory=list) # e.g. {"type": "VERIFIER", "path": "..."}
     error: Optional[str] = None
     retry_count: int = 0
-
-DEFAULT_EXCLUDE_LIST = [
-    ".arenas", 
-    ".home", 
-    "bun.lock", 
-    "package.json", 
-    "package-lock.json",
-    "baseline.diff",
-    "opencode.db*",
-    "*.log"
-]
 
 class Orchestrator:
     def __init__(self, prompt: str, n_agents: int, budget: float = 1000.0, state: Optional[MarketState] = None, base_dir: str = "/tmp/market"):
@@ -54,7 +44,7 @@ class Orchestrator:
         self.budget = budget
         self.prompt = prompt
         self.exclude_list = DEFAULT_EXCLUDE_LIST
-        self._clone_lock = asyncio.Lock()
+        self.workspace_mgr = WorkspaceManager(exclude_list=DEFAULT_EXCLUDE_LIST)
 
         if state:
             self.state = state
@@ -114,144 +104,12 @@ class Orchestrator:
             await asyncio.gather(*tasks)
 
     async def _clone_workspace(self, dest_dir: str):
-        """High-level orchestration for workspace cloning with serialization and error handling."""
-        src = os.getcwd()
-        await asyncio.to_thread(os.makedirs, os.path.dirname(dest_dir), exist_ok=True)
-        
-        def force_rmtree(path):
-            import stat
-            def remove_readonly(func, path, _):
-                try:
-                    os.chmod(path, stat.S_IWRITE)
-                    func(path)
-                except Exception:
-                    pass
-            if os.path.exists(path):
-                shutil.rmtree(path, onerror=remove_readonly)
-                
-        await asyncio.to_thread(force_rmtree, dest_dir)
-            
-        try:
-            # Serialize the actual creation of the snapshot from the host repository
-            async with self._clone_lock:
-                await self._create_worktree_snapshot(src, dest_dir)
-            logging.info(f"Workspace setup complete for {dest_dir}")
-        except Exception as e:
-            logging.error(f"Workspace initialization failed for {dest_dir}: {e}")
-            raise
+        """Internal wrapper for backward compatibility."""
+        await self.workspace_mgr.clone_workspace(os.getcwd(), dest_dir)
 
     async def _create_worktree_snapshot(self, src: str, dest_dir: str):
-        """
-        Performs the actual file-system sensitive operations to clone and overlay the workspace.
-        This method MUST be called under self._clone_lock.
-        """
-        # 1. Clean Baseline from Git (Only committed files)
-        logging.info(f"Cloning workspace baseline from {src} to {dest_dir}")
-        proc = await asyncio.create_subprocess_exec(
-            "git", "clone", "--depth", "1", "--single-branch", "--no-hardlinks", f"file://{src}", dest_dir,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(f"Git clone failed (code {proc.returncode}): {stderr.decode()}")
-        
-        # 2. Safety: Remove origin to prevent accidental pushes/leaks
-        proc = await asyncio.create_subprocess_exec(
-            "git", "remote", "remove", "origin",
-            cwd=dest_dir,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-             logging.warning(f"Failed to remove origin (code {proc.returncode}): {stderr.decode()}")
-        
-        # 2.5 Ensure exclude_list directories do not pollute agent diffs
-        def update_git_exclude():
-            exclude_path = os.path.join(dest_dir, ".git", "info", "exclude")
-            if os.path.exists(exclude_path):
-                with open(exclude_path, "a") as f:
-                    for item in self.exclude_list:
-                        # FIX: Use actual newlines
-                        f.write(f"\n{item}\n")
-        await asyncio.to_thread(update_git_exclude)
-        
-        # 3. Overlay Current Work (Modified + Untracked non-ignored files)
-        logging.info(f"Overlaying uncommitted changes to {dest_dir}")
-        
-        # Use more robust exclusion patterns for both git and tar
-        exclude_args_git = " ".join([f'--exclude="{ex}"' for ex in self.exclude_list])
-        exclude_args_tar = " ".join([f'--exclude="{ex}"' for ex in self.exclude_list])
-        
-        # Build the hybrid snapshot pipe
-        tar_cmd = f"git ls-files -co --exclude-standard {exclude_args_git} -z | tar -c --null {exclude_args_tar} -T - | tar -x -C \"{dest_dir}\""
-        proc = await asyncio.create_subprocess_shell(
-            tar_cmd,
-            cwd=src,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(f"Tar pipeline failed (code {proc.returncode}): {stderr.decode()}")
-
-        # 4. Finalize Worktree (Baseline Diff & Shadow Config)
-        if await asyncio.to_thread(os.path.exists, dest_dir):
-            # Stage changes to include new files in the diff
-            proc = await asyncio.create_subprocess_exec(
-                "git", "add", "-N", ".",
-                cwd=dest_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            await proc.communicate()
-            if proc.returncode != 0:
-                raise RuntimeError(f"Git add baseline failed (code {proc.returncode})")
-            
-            with open(os.path.join(dest_dir, "baseline.diff"), "w") as f:
-                proc = await asyncio.create_subprocess_exec(
-                    "git", "diff", "HEAD",
-                    cwd=dest_dir,
-                    stdout=f,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                await proc.communicate()
-                if proc.returncode != 0:
-                    raise RuntimeError(f"Git diff baseline failed (code {proc.returncode})")
-
-            # Fix permissions (restrict to 0o700 for isolation)
-            def fix_permissions():
-                for root, dirs, files in os.walk(dest_dir):
-                    if ".git" in dirs:
-                        dirs.remove(".git")
-                    os.chmod(root, 0o700)
-                    for f_name in files:
-                        if ".git/" in os.path.join(root, f_name): continue
-                        os.chmod(os.path.join(root, f_name), 0o600)
-            await asyncio.to_thread(fix_permissions)
-
-            # Initialize Shadow Git Config
-            for key, val in [("user.email", "market@local"), ("user.name", "Market Oracle")]:
-                proc = await asyncio.create_subprocess_exec(
-                    "git", "config", key, val,
-                    cwd=dest_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                )
-                await proc.communicate()
-                if proc.returncode != 0:
-                    raise RuntimeError(f"Git config {key} failed")
-            
-            # Commit Baseline (Captures uncommitted work as starting point)
-            for cmd_args in [["add", "."], ["commit", "--allow-empty", "-m", "Initial Baseline"]]:
-                proc = await asyncio.create_subprocess_exec(
-                    "git", *cmd_args,
-                    cwd=dest_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                )
-                await proc.communicate()
-                if proc.returncode != 0:
-                    raise RuntimeError(f"Git {' '.join(cmd_args)} failed")
-        else:
-            raise RuntimeError(f"Snapshot directory {dest_dir} disappeared unexpectedly")
+        """Internal wrapper for backward compatibility."""
+        await self.workspace_mgr._create_worktree_snapshot(src, dest_dir)
 
     async def process_round(self, actions: List[AgentAction]):
         """
@@ -693,8 +551,7 @@ class Orchestrator:
         return vid
 
     async def _run_oracle(self):
-        """Executes all verifiers against all candidates in parallel."""
-        import asyncio
+        """Executes all verifiers against all candidates in parallel using CommonOracle."""
         candidates = [a for a in self.state.assets.values() if a.type == "CANDIDATE"]
         verifiers = [a for a in self.state.assets.values() if a.type == "VERIFIER"]
         
@@ -705,9 +562,11 @@ class Orchestrator:
             for c in candidates:
                 if not v.test_path or not c.code_path: continue
                 
-                # Pass the worktree root directly to the Oracle
-                # The Oracle will handle copying the full tree and running the verifier
-                tasks.append(Oracle.run_test(c.code_path, v.test_path))
+                # Use CommonOracle for parallel execution
+                tasks.append(CommonOracle.run_test(
+                    candidate_dir=c.code_path,
+                    verifier_dir=v.test_path
+                ))
                 task_info.append((v, c))
 
         if not tasks:
@@ -715,7 +574,7 @@ class Orchestrator:
 
         results = await asyncio.gather(*tasks)
 
-        for (v, c), result in zip(task_info, results):
+        for (v, c), (result, stdout, stderr) in zip(task_info, results):
             fail_key = f"{v.id}:{c.id}"
             if result == "FAIL":
                 logging.info(f"Oracle: {c.id} FAILED {v.id}")
@@ -729,7 +588,7 @@ class Orchestrator:
             elif result == "TIMEOUT":
                 logging.info(f"Oracle: {c.id} TIMEOUT on {v.id}")
             elif result == "ERROR":
-                logging.info(f"Oracle: {c.id} ERROR on {v.id} (Check if solution.py exists)")
+                logging.info(f"Oracle: {c.id} ERROR on {v.id}")
 
     def _mature_bonds(self):
         """Liquidates bonds that have reached their unlock round."""

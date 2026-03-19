@@ -203,6 +203,9 @@ async def validate_config_with_api(args, parser):
 
 async def async_main():
     parser = MarketArgumentParser(description="Logical Induction Market CLI")
+    parser.add_argument("--log-level", type=lambda x: x.upper(), 
+                        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                        help="Set logging level")
     
     # 1. Immediate Logging Configuration
     # We do this FIRST so that even validation errors can be logged if needed,

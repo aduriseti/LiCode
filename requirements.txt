@@ -13,3 +13,4 @@ playwright
 pytest-playwright
 datasets
 swebench
+glicko2

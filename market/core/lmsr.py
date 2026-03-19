@@ -1,4 +1,5 @@
 import math
+from typing import Tuple
 
 class LMSRMarket:
     """
@@ -141,3 +142,42 @@ class LMSRMarket:
             reduced_cost = LMSRMarket.cost_function(q_yes_pool, q_no_pool + q_agent, b)
             
         return current_cost - reduced_cost
+
+    @staticmethod
+    def execute_simultaneous_wagers(
+        w_yes: float, 
+        w_no: float, 
+        q_yes: float, 
+        q_no: float, 
+        b: float
+    ) -> Tuple[float, float]:
+        """
+        Calculates the clearing price and share distribution for a BATCH of wagers.
+        This is NOT a sequential execution. It finds the delta_q_yes and delta_q_no
+        that satisfy the price-clearing condition for both sides simultaneously.
+        
+        Design 2.C.2: Simultaneous Batching (S-Batch)
+        
+        Formula:
+        W_yes = C(q_yes + dq_yes, q_no + dq_no) - C(q_yes, q_no + dq_no)
+        W_no = C(q_yes + dq_yes, q_no + dq_no) - C(q_yes + dq_yes, q_no)
+        
+        We solve for (dq_yes, dq_no) using an iterative numerical approach.
+        """
+        if w_yes == 0 and w_no == 0:
+            return 0.0, 0.0
+            
+        # Initial guess: assume they clear at current prices
+        p = LMSRMarket.current_price(q_yes, q_no, b)
+        dq_yes = w_yes / max(p, 0.01)
+        dq_no = w_no / max(1.0 - p, 0.01)
+        
+        # Newton-Raphson or Fixed Point Iteration
+        # For a binary market, we can use a simpler fixed-point approach
+        for _ in range(15):
+            # Target cost for YES: C(new_y, new_n) - C(old_y, new_n) = W_yes
+            dq_yes = LMSRMarket.calculate_delta_q(q_yes, q_no + dq_no, b, w_yes, is_yes_share=True)
+            # Target cost for NO:  C(new_y, new_n) - C(new_y, old_n) = W_no
+            dq_no = LMSRMarket.calculate_delta_q(q_yes + dq_yes, q_no, b, w_no, is_yes_share=False)
+            
+        return dq_yes, dq_no
