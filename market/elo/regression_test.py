@@ -6,6 +6,7 @@ import json
 import time
 from unittest.mock import MagicMock, AsyncMock, patch
 from market.elo.orchestrator import EloOrchestrator
+from market.common.oracle import ResultType
 from market.common.workspace import WorkspaceManager
 
 @pytest.fixture
@@ -94,18 +95,55 @@ async def test_elo_rating_update(base_dir):
     assert new_rating != initial_rating
 
 @pytest.mark.asyncio
-async def test_elo_timeout_is_loss(base_dir):
+async def test_elo_timeout_skips_rating(base_dir):
     orch = EloOrchestrator(prompt="test prompt", base_dir=base_dir, max_duration=10)
     await orch.add_candidate("agent_0")
     await orch.add_verifier("v1", None, "sleep 100") # Will timeout
     
+    initial_rating = orch.candidates["agent_0"].latest_version.elo.rating_obj.rating
+    
     # Mock CommonOracle.run_test to return TIMEOUT
-    with patch('market.common.oracle.CommonOracle.run_test', return_value=("TIMEOUT", "", "")):
+    with patch('market.common.oracle.CommonOracle.run_test', return_value=(ResultType.TIMEOUT, "", "")):
         await orch.run_match("agent_0", "v1")
     
+    await orch.update_all_ratings()
+    
+    new_rating = orch.candidates["agent_0"].latest_version.elo.rating_obj.rating
+    # Rating should NOT change (skipped)
+    assert new_rating == initial_rating
+
+@pytest.mark.asyncio
+async def test_elo_fail_is_loss(base_dir):
+    orch = EloOrchestrator(prompt="test prompt", base_dir=base_dir, max_duration=10)
+    await orch.add_candidate("agent_0")
+    await orch.add_verifier("v1", None, "exit 1")
+    
     initial_rating = orch.candidates["agent_0"].latest_version.elo.rating_obj.rating
+    
+    # Mock CommonOracle.run_test to return FAIL
+    with patch('market.common.oracle.CommonOracle.run_test', return_value=(ResultType.FAIL, "", "")):
+        await orch.run_match("agent_0", "v1")
+    
     await orch.update_all_ratings()
     
     new_rating = orch.candidates["agent_0"].latest_version.elo.rating_obj.rating
     # Rating should decrease (loss)
     assert new_rating < initial_rating
+
+@pytest.mark.asyncio
+async def test_elo_patch_error_skips_rating(base_dir):
+    orch = EloOrchestrator(prompt="test prompt", base_dir=base_dir, max_duration=10)
+    await orch.add_candidate("agent_0")
+    await orch.add_verifier("v1", None, "exit 0")
+    
+    initial_rating = orch.candidates["agent_0"].latest_version.elo.rating_obj.rating
+    
+    # Mock CommonOracle.run_test to return PATCH_ERROR
+    with patch('market.common.oracle.CommonOracle.run_test', return_value=(ResultType.PATCH_ERROR, "", "")):
+        await orch.run_match("agent_0", "v1")
+    
+    await orch.update_all_ratings()
+    
+    new_rating = orch.candidates["agent_0"].latest_version.elo.rating_obj.rating
+    # Rating should NOT change (skipped)
+    assert new_rating == initial_rating

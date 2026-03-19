@@ -47,7 +47,10 @@ Verifiers are defined as a combination of a git patch and an entrypoint command.
   3. Apply the verifier's git patch.
   4. Run the entrypoint command.
   5. Delete the temporary folder.
-- **Result:** Exit code 0 indicates a **Win** for the candidate (Pass); non-zero exit codes or timeouts indicate a **Loss** (Fail). If the verifier's patch fails to apply, **no rating update is performed** for that match.
+- **Result:**
+  - **Win (PASS):** Exit code 0. Candidate rating increases.
+  - **Loss (FAIL):** Non-zero exit code. This includes cases where the test command itself implements an internal timeout and exits with an error. Candidate rating decreases.
+  - **Skip (currently just PATCH_ERROR):** If a verifier's patch fails to apply (PATCH_ERROR). **No rating update is performed.**
 
 ### Agent Interface & Types:
 The system executes two types of agents in parallel, borrowing the existing state machine and timeout/retry logic from the current orchestrator:

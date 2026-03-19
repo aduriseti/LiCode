@@ -5,9 +5,19 @@ import logging
 import tempfile
 import uuid
 import signal
-from typing import Literal, Optional, Tuple
+from enum import StrEnum
+from typing import Optional, Tuple
 
-ResultType = Literal["PASS", "FAIL", "TIMEOUT", "ERROR"]
+class ResultType(StrEnum):
+    PASS = "PASS"
+    FAIL = "FAIL"
+    TIMEOUT = "TIMEOUT"
+    PATCH_ERROR = "PATCH_ERROR"
+    ERROR = "ERROR"
+
+class PatchApplyError(Exception):
+    """Raised when a git patch fails to apply."""
+    pass
 
 class CommonOracle:
     """
@@ -61,8 +71,9 @@ class CommonOracle:
             )
             stdout, stderr = await proc.communicate(input=patch_content.encode())
             if proc.returncode != 0:
-                logging.error(f"Failed to apply verifier patch: {stderr.decode()}")
-                # We still continue, as the test run itself will fail
+                msg = f"Failed to apply verifier patch: {stderr.decode()}"
+                logging.error(msg)
+                raise PatchApplyError(msg)
         
         return temp_dir
 
@@ -85,7 +96,7 @@ class CommonOracle:
                 temp_dir = await CommonOracle._setup_sandbox_patch(candidate_dir, patch_content)
                 cmd = ["bash", "-c", entrypoint]
             else:
-                return "ERROR", "", "No verifier_dir or entrypoint provided"
+                return ResultType.ERROR, "", "No verifier_dir or entrypoint provided"
 
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -100,13 +111,16 @@ class CommonOracle:
             res_stderr = stderr.decode(errors='replace')
             
             if process.returncode == 0:
-                return "PASS", res_stdout, res_stderr
+                return ResultType.PASS, res_stdout, res_stderr
             else:
-                return "FAIL", res_stdout, res_stderr
+                return ResultType.FAIL, res_stdout, res_stderr
                 
+        except PatchApplyError as e:
+            logging.error(f"Patch Error: {e}")
+            return ResultType.PATCH_ERROR, "", str(e)
         except Exception as e:
             logging.error(f"Oracle Error: {e}")
-            return "ERROR", "", str(e)
+            return ResultType.ERROR, "", str(e)
         finally:
             if temp_dir and os.path.exists(temp_dir):
                 await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)

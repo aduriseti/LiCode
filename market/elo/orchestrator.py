@@ -11,7 +11,7 @@ from typing import Dict, List, Optional, Tuple, Any
 from market.common.orchestrator import BaseOrchestrator
 from market.common.agent import AgentSession
 from market.common.native_tests import NativeTestIdentifier
-from market.common.oracle import CommonOracle
+from market.common.oracle import CommonOracle, ResultType
 
 @dataclass
 class EloState:
@@ -243,16 +243,16 @@ class EloOrchestrator(BaseOrchestrator):
         except Exception as e:
             logging.warning(f"Failed to write match log to {match_log_file}: {e}")
 
-        if res == "ERROR":
-            logging.warning(f"Match {cid} (v{version_idx}) vs {vid} resulted in ERROR. Skipping rating update.")
+        if res in [ResultType.ERROR, ResultType.TIMEOUT, ResultType.PATCH_ERROR]:
+            logging.warning(f"Match {cid} (v{version_idx}) vs {vid} resulted in {res}. Skipping rating update.")
             return
 
-        score = 0.0 # Default for TIMEOUT or FAIL
-        if res == "PASS":
+        score = 0.0 # Default for FAIL
+        if res == ResultType.PASS:
             score = 1.0
             if vid in version.failing_tests:
                 version.failing_tests.remove(vid)
-        elif res == "FAIL" or res == "TIMEOUT":
+        elif res == ResultType.FAIL:
             if vid not in version.failing_tests:
                 version.failing_tests.append(vid)
         
