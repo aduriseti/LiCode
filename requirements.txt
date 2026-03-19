@@ -14,3 +14,4 @@ pytest-playwright
 datasets
 swebench
 glicko2
+psutil

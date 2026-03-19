@@ -58,7 +58,11 @@ export class TerminalManager {
         if (attempt === 1 && this.helpers.has(agentId)) {
             const existing = this.helpers.get(agentId);
             try { 
-                existing?.proc.kill(); 
+                if (existing?.proc.pid) {
+                    process.kill(-existing.proc.pid, "SIGKILL");
+                } else {
+                    existing?.proc.kill("SIGKILL");
+                }
             } catch (e) {
                 this.log("warn", `[TERMINAL] Failed to kill existing helper for ${agentId}: ${e}`);
             }
@@ -130,7 +134,13 @@ export class TerminalManager {
 
     public close() {
         this.helpers.forEach((helper) => {
-            try { helper.proc.kill(); } catch (e) {}
+            try { 
+                if (helper.proc.pid) {
+                    process.kill(-helper.proc.pid, "SIGKILL");
+                } else {
+                    helper.proc.kill("SIGKILL");
+                }
+            } catch (e) {}
         });
         this.helpers.clear();
     }

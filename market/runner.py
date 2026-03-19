@@ -16,6 +16,7 @@ from collections import deque
 from .core.state import MarketState
 from .orchestrator import Orchestrator, AgentAction
 from .agents.shark import Shark
+import market.common.process_registry  # Ensure global atexit sweeper is registered
 
 class BufferedLogHandler(logging.Handler):
     def __init__(self, buffer: deque, log_file: Optional[str] = None):

@@ -85,11 +85,26 @@ wss.on("connection", (ws) => {
 
 // Clean up if parent disconnects
 process.on("disconnect", () => {
-    if (terminal) try { terminal.kill(); } catch (e) {}
+    if (terminal) {
+        try { process.kill(terminal.pid, "SIGKILL"); } catch (e) {}
+    }
     process.exit(0);
 });
 
 process.on("SIGTERM", () => {
-    if (terminal) try { terminal.kill(); } catch (e) {}
+    if (terminal) {
+        try { process.kill(terminal.pid, "SIGKILL"); } catch (e) {}
+    }
     process.exit(0);
 });
+
+// Periodic heartbeat check: If parent dies abruptly (e.g., SIGKILL), ppid becomes 1
+const initialPpid = process.ppid;
+setInterval(() => {
+    if (process.ppid !== initialPpid || process.ppid === 1) {
+        if (terminal) {
+            try { process.kill(terminal.pid, "SIGKILL"); } catch (e) {}
+        }
+        process.exit(0);
+    }
+}, 2000).unref();
