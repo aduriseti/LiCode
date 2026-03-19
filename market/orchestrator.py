@@ -9,6 +9,7 @@ import asyncio
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field
 
+from market.common.orchestrator import BaseOrchestrator
 from market.common.workspace import WorkspaceManager, DEFAULT_EXCLUDE_LIST
 from market.common.oracle import CommonOracle
 from market.core.state import MarketState, AgentPortfolio, MarketAsset, MarketBond
@@ -24,27 +25,16 @@ class AgentAction:
     error: Optional[str] = None
     retry_count: int = 0
 
-class Orchestrator:
-    def __init__(self, prompt: str, n_agents: int, budget: float = 1000.0, state: Optional[MarketState] = None, base_dir: str = "/tmp/market"):
-        self.base_dir = base_dir
-        self.worktrees_dir = os.path.join(self.base_dir, "worktrees")
-        self.verifiers_dir = os.path.join(self.base_dir, "verifiers")
-        
-        # Ensure directories exist
-        os.makedirs(self.worktrees_dir, exist_ok=True)
-        os.makedirs(self.verifiers_dir, exist_ok=True)
-        
-        # Set worktrees_dir to 0o711 so that opencode serve (acting as the agent)
-        # can traverse to its assigned directory, while individual directories
-        # are locked down with 0o700.
-        os.chmod(self.worktrees_dir, 0o711)
-        os.chmod(self.verifiers_dir, 0o755)
+class Orchestrator(BaseOrchestrator):
+    def __init__(self, prompt: str, n_agents: int, budget: float = 1000.0, state: Optional[MarketState] = None, base_dir: Optional[str] = None):
+        if base_dir is None:
+            import tempfile
+            base_dir = tempfile.mkdtemp(prefix="licode_market_")
+        super().__init__(prompt, base_dir, exclude_list=DEFAULT_EXCLUDE_LIST)
 
         self.n_agents = n_agents
         self.budget = budget
-        self.prompt = prompt
         self.exclude_list = DEFAULT_EXCLUDE_LIST
-        self.workspace_mgr = WorkspaceManager(exclude_list=DEFAULT_EXCLUDE_LIST)
 
         if state:
             self.state = state
@@ -80,9 +70,10 @@ class Orchestrator:
             
             async def setup_cand(c_dir, c_id, a_id):
                 # Run async cloning
-                await self._clone_workspace(c_dir)
-                
+                await self.workspace_mgr.clone_workspace(os.getcwd(), c_dir)
+
                 # Initial Price: 1/N for candidates (Design 2.B.3)
+
                 import math
                 n = self.n_agents
                 b = self.state.liquidity_b
@@ -102,14 +93,6 @@ class Orchestrator:
         
         if tasks:
             await asyncio.gather(*tasks)
-
-    async def _clone_workspace(self, dest_dir: str):
-        """Internal wrapper for backward compatibility."""
-        await self.workspace_mgr.clone_workspace(os.getcwd(), dest_dir)
-
-    async def _create_worktree_snapshot(self, src: str, dest_dir: str):
-        """Internal wrapper for backward compatibility."""
-        await self.workspace_mgr._create_worktree_snapshot(src, dest_dir)
 
     async def process_round(self, actions: List[AgentAction]):
         """
@@ -621,6 +604,39 @@ class Orchestrator:
         lines.append("-" * 30)
         return "\n".join(lines)
 
+    async def add_candidate(self, cid: str, agent_id: str):
+        """Initializes a candidate for an agent."""
+        # This is already handled in initialize() for now in a batch, 
+        # but we provide the implementation here.
+        cand_dir = os.path.join(self.worktrees_dir, cid)
+        await self.workspace_mgr.clone_workspace(os.getcwd(), cand_dir)
+        
+        # Initial Price: 1/N for candidates (Design 2.B.3)
+        import math
+        n = self.n_agents
+        b = self.state.liquidity_b
+        q_no = 0.0
+        if n > 1:
+            q_no = b * math.log(n - 1)
+
+        self.state.assets[cid] = MarketAsset(
+            id=cid, 
+            type="CANDIDATE", 
+            description=f"Solution by {agent_id}",
+            code_path=cand_dir, # Point to ROOT of worktree
+            q_no=q_no
+        )
+
+    async def add_verifier(self, vid: str, agent_id: str, source_path: str):
+        """Adds a new verifier from an agent's worktree."""
+        cid = f"cand_{agent_id.split('_')[-1]}"
+        if cid in self.state.assets:
+            candidate = self.state.assets[cid]
+            if candidate.code_path:
+                full_source = os.path.join(candidate.code_path, source_path)
+                return self._create_verifier_from_path(agent_id, full_source)
+        return None
+
     def get_winner_id(self) -> Optional[str]:
         """Identifies the winning candidate ID based on market price and test failure tiebreakers."""
         candidates = [a for a in self.state.assets.values() if a.type == "CANDIDATE"]
@@ -651,7 +667,7 @@ class Orchestrator:
             
             for cid in tied_candidates:
                 failures = 0
-                for vid in valid_vids if 'valid_vids' in locals() else valid_verifiers:
+                for vid in valid_verifiers:
                     if self.state.test_failures.get(f"{vid}:{cid}"):
                         failures += 1
                 
@@ -668,6 +684,42 @@ class Orchestrator:
             winner_id = best_cid
         
         return winner_id
+
+    def get_winner_diff(self) -> str:
+        """Returns the git diff of the winning candidate compared to Initial Baseline."""
+        wid = self.get_winner_id()
+        if not wid:
+            return ""
+        asset = self.state.assets.get(wid)
+        if not asset or not asset.code_path:
+            return ""
+        
+        code_path = asset.code_path
+        if not os.path.exists(code_path):
+            return ""
+
+        try:
+            # Find the "Initial Baseline" commit
+            import subprocess
+            res = subprocess.run(
+                ["git", "log", "--grep=Initial Baseline", "--format=%H", "-n", "1"],
+                cwd=code_path, capture_output=True, text=True
+            )
+            baseline_commit = res.stdout.strip()
+            if not baseline_commit:
+                # Fallback to standard diff if baseline commit not found
+                return self.workspace_mgr.get_diff(code_path)
+
+            # Get the patch
+            subprocess.run(["git", "add", "."], cwd=code_path, capture_output=True)
+            # Remove problem.md from staging so it's not in the diff
+            subprocess.run(["git", "reset", baseline_commit, "problem.md"], cwd=code_path, capture_output=True)
+            
+            diff_res = subprocess.run(["git", "diff", "--cached", baseline_commit], cwd=code_path, capture_output=True, text=True)
+            return diff_res.stdout
+        except Exception as e:
+            logging.error(f"Error generating winner diff: {e}")
+            return ""
 
     def get_final_report(self) -> str:
         """Generates a markdown report of the tournament results."""

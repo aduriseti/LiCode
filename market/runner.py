@@ -59,6 +59,8 @@ class DashboardLogHandler(logging.Handler):
         except Exception:
             pass
 
+from .common.server import start_opencode_server, stop_server, find_free_port
+
 class MarketRunner:
     """
     Manages the full lifecycle of a Logical Induction Tournament.
@@ -348,203 +350,24 @@ class MarketRunner:
                     return None
 
     def _find_free_port(self) -> int:
-        import socket
-        import random
-        # Try 100 times to find a random free port to prevent parallel collision
-        for _ in range(100):
-            port = random.randint(40000, 60000)
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                try:
-                    s.bind(('', port))
-                    return port
-                except OSError:
-                    continue
-        # Fallback to OS assigned
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.bind(('', 0))
-            return s.getsockname()[1]
+        return find_free_port()
 
     async def _start_agent_server(self, agent_id: str, port: int, model: str, provider: str) -> asyncio.subprocess.Process:
-        """Starts a dedicated OpenCode server for a specific agent."""
-        # Use the candidate worktree as the agent's workspace
         cand_id = agent_id.replace("agent", "cand")
         agent_dir = os.path.join(self.arena_dir, "worktrees", cand_id)
-
-        # Ensure the directory exists (should be created by Orchestrator)
-        if not os.path.exists(agent_dir):
-            os.makedirs(agent_dir, exist_ok=True)
-
-        # Sandbox HOME inside the candidate worktree
-        agent_home = os.path.join(agent_dir, ".home")
-        os.makedirs(agent_home, exist_ok=True)
-
-        # Fast Startup: Symlink host node_modules into the agent's workspace.
-        # This prevents 'opencode serve' from re-downloading 200MB+ of dependencies (like playwright)
-        # for every single agent, which takes 60s+ and causes test timeouts.
-        host_root = os.getcwd()
-
-        # 1. Symlink root node_modules
-        host_nm = os.path.join(host_root, "node_modules")
-        agent_nm = os.path.join(agent_dir, "node_modules")
-        if os.path.exists(host_nm) and not os.path.exists(agent_nm):
-            try:
-                os.symlink(host_nm, agent_nm)
-            except FileExistsError:
-                pass
-
-        # 2. Symlink .opencode/node_modules
-        host_opencode_nm = os.path.join(host_root, ".opencode", "node_modules")
-        agent_opencode_dir = os.path.join(agent_dir, ".opencode")
-        agent_opencode_nm = os.path.join(agent_opencode_dir, "node_modules")
-
-        if os.path.exists(host_opencode_nm):
-            os.makedirs(agent_opencode_dir, exist_ok=True)
-            if not os.path.exists(agent_opencode_nm):
-                try:
-                    os.symlink(host_opencode_nm, agent_opencode_nm)
-                except FileExistsError:
-                    pass
-
-        # Environment setup
-        env = os.environ.copy()
-
-        # Ensure API keys are correctly mapped for different providers
-        if "GEMINI_API_KEY" in env and "GOOGLE_GENERATIVE_AI_API_KEY" not in env:
-            env["GOOGLE_GENERATIVE_AI_API_KEY"] = env["GEMINI_API_KEY"]
-
-        # Ensure /.opencode/bin is in the PATH if we are in a container
-        if "/.opencode/bin" in env.get("PATH", "") or os.path.exists("/.opencode/bin"):
-            if "/.opencode/bin" not in env.get("PATH", ""):
-                env["PATH"] = f"/.opencode/bin:{env.get('PATH', '')}"
-
-        env["HOME"] = agent_home
-        env["PORT"] = str(port)
-
-        # Plumb OPENCODE_API_KEY from environment to auth.json inside the sandbox
-        raw_opencode_key = env.get("OPENCODE_API_KEY")
-        opencode_key = None
-        
-        if raw_opencode_key:
-            opencode_key = raw_opencode_key.strip("\"' \n\r\t")
-        else:
-            # Fallback: try to resolve from host's auth.json
-            auth_path = os.path.expanduser("~/.local/share/opencode/auth.json")
-            if os.path.exists(auth_path):
-                try:
-                    with open(auth_path, "r") as f:
-                        data = json.load(f)
-                        opencode_key = data.get("opencode", {}).get("key")
-                        if opencode_key:
-                            opencode_key = opencode_key.strip("\"' \n\r\t")
-                except Exception:
-                    pass
-
-        if opencode_key:
-            try:
-                # Standard location for root user inside container or local user
-                dest_auth_dir = os.path.join(agent_home, ".local", "share", "opencode")
-                os.makedirs(dest_auth_dir, exist_ok=True)
-                auth_data = {
-                    "opencode": {
-                        "type": "api",
-                        "key": opencode_key
-                    }
-                }
-                with open(os.path.join(dest_auth_dir, "auth.json"), "w") as f:
-                    json.dump(auth_data, f)
-
-                # Also map it to OPENCODE for potential plugin usage
-                env["OPENCODE"] = opencode_key
-                # Ensure it's in env for the subprocess as well
-                env["OPENCODE_API_KEY"] = opencode_key
-            except Exception as e:
-                logging.warning(f"Failed to plumb OPENCODE_API_KEY to agent sandbox: {e}")
-
-        # Security & Automation:
-        # - Auto-deny external directory access (fails immediately instead of hanging)
-        # - Auto-allow doom_loop and bash (prevents hanging on long tasks)
-        # - Disable snapshotting to prevent massive disk usage
-        # - Use library method to validate the config structure
-        #   "$schema": "https://opencode.ai/config.json",
-        from opencode_ai.types import Config
-        permission_data = {
-            "external_directory": "deny",
-            "doom_loop": "allow",
-            "*": "allow",
-        }
-        
-        # Consistent provider/model format for the OpenCode config
-        if model.startswith(f"{provider}/"):
-            full_model_name = model
-        else:
-            full_model_name = f"{provider}/{model}"
-        
-        config_data = {
-            "model": full_model_name,
-            "snapshot": False,
-            "agent": {
-                "general": {
-                    "description": "General settings",
-                    "permission": permission_data
-                },
-            }
-        }
-        # Validate and serialize configuration
-        config_obj = Config(**config_data)
-        # Use model_dump to avoid Pydantic v2 serialization issues with Mocks in tests
-        config_json = json.dumps(config_obj.model_dump(exclude_none=True, by_alias=True))
-
-        # Use OPENCODE_CONFIG_CONTENT as it has higher precedence in some opencode versions
-        # OPENCODE_PERMISSION should be the JSON string of the permission object
-        env["OPENCODE_PERMISSION"] = json.dumps(permission_data)
-        env["OPENCODE_CONFIG_CONTENT"] = config_json
-        
-        # Enable raw LLM interaction tracing (prompts and completions)
-        env["DEBUG"] = "opencode:provider:*"
-        env["OPENCODE_LOG"] = "debug"
-        env["PYTHONUNBUFFERED"] = "1"
-        
-        agent_log = os.path.join(self.traces_dir, f"{cand_id}_opencode_serve.log")
-        
-        with open(agent_log, "w") as f:
-            proc = await asyncio.create_subprocess_exec(
-                "opencode", "serve", "--port", str(port), "--hostname=127.0.0.1",
-                "--print-logs", "--log-level", "DEBUG",
-                stdout=f,
-                stderr=f,
-                cwd=agent_dir,
-                env=env,
-                start_new_session=True
-            )
-            
-            # Wait for port to open
-            start_time = time.time()
-            while time.time() - start_time < 30:
-                if getattr(proc, 'returncode', None) is not None:
-                    raise RuntimeError(f"Server for {agent_id} failed to start. See {agent_log}")
-                try:
-                    # Async check for connection
-                    _, writer = await asyncio.open_connection("127.0.0.1", port)
-                    writer.close()
-                    await writer.wait_closed()
-                    return proc
-                except (ConnectionRefusedError, OSError):
-                    await asyncio.sleep(0.5)
-            raise RuntimeError(f"Timed out waiting for server {agent_id} at port {port}")
+        return await start_opencode_server(
+            agent_id=cand_id, 
+            agent_dir=agent_dir, 
+            port=port, 
+            model=model, 
+            provider=provider, 
+            traces_dir=self.traces_dir
+        )
 
     def _stop_servers(self):
-        """Terminates all agent server processes."""
         for aid, proc in self.agent_servers.items():
             logging.info(f"Stopping server for {aid}...")
-            try:
-                pgid = os.getpgid(proc.pid)
-                os.killpg(pgid, signal.SIGKILL)
-                # No await in sync _stop_servers, but it's a kill -9 so it's immediate
-            except:
-                try:
-                    proc.terminate()
-                except:
-                    pass
+            stop_server(proc)
         self.agent_servers.clear()
 
     async def run_loop(self, max_rounds: int, stream_ui: bool = True, json_logs: bool = False):

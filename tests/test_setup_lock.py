@@ -1,18 +1,14 @@
-import os
-import sys
 import pytest
 import asyncio
 from unittest.mock import patch, MagicMock, AsyncMock
 from argparse import Namespace
-
-# Add project root to sys.path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import evaluate_swe_bench
+from market.common.evaluator import StatusManager, SWEBenchInstanceRunner
 
 @pytest.mark.asyncio
 async def test_setup_lock_concurrency(tmp_path):
     """
-    Test that run_market_on_instance respects the setup_lock.
+    Test that run_instance respects the setup_lock.
     We run two instances and verify that they don't enter the 'make setup' section concurrently.
     """
     instance1 = {
@@ -27,9 +23,9 @@ async def test_setup_lock_concurrency(tmp_path):
         'base_commit': 'def',
         'problem_statement': 'Fix.'
     }
-    
+
     args = Namespace(
-        dummy=True,
+        dummy=False,
         agents=1,
         rounds=1,
         output=str(tmp_path / "predictions.jsonl"),
@@ -37,10 +33,10 @@ async def test_setup_lock_concurrency(tmp_path):
         initial_backoff=1.0,
         max_backoff=1.0
     )
-    
+
     # We use a semaphore of 2 to allow both to run in parallel up to the lock
     semaphore = asyncio.Semaphore(2)
-    
+
     setup_call_count = 0
     max_concurrent_setups = 0
     lock_acquired_count = 0
@@ -51,7 +47,7 @@ async def test_setup_lock_concurrency(tmp_path):
         max_concurrent_setups = max(max_concurrent_setups, setup_call_count)
         await asyncio.sleep(0.1) # Simulate some work
         setup_call_count -= 1
-        
+
         mock_proc = MagicMock()
         mock_proc.communicate = AsyncMock(return_value=(b"", b""))
         mock_proc.returncode = 0
@@ -69,30 +65,35 @@ async def test_setup_lock_concurrency(tmp_path):
             return await mock_setup_exec(*cmd, **kwargs)
         return await mock_generic_exec(*cmd, **kwargs)
 
-    # Create a real lock but wrap its __aenter__ to track it
+    # Create a real lock but wrap its acquire/release to track it
     real_lock = asyncio.Lock()
-    
-    async def tracked_aenter(*args, **kwargs):
+    original_acquire = real_lock.acquire
+
+    async def tracked_acquire():
         nonlocal lock_acquired_count
         lock_acquired_count += 1
-        return await real_lock.__aenter__()
+        return await original_acquire()
 
-    async def tracked_aexit(*args, **kwargs):
-        return await real_lock.__aexit__(*args, **kwargs)
+    real_lock.acquire = tracked_acquire
 
-    mock_lock = MagicMock(spec=asyncio.Lock)
-    mock_lock.__aenter__ = AsyncMock(side_effect=tracked_aenter)
-    mock_lock.__aexit__ = AsyncMock(side_effect=tracked_aexit)
+    status_mgr = StatusManager()
+    runner = SWEBenchInstanceRunner(status_mgr, real_lock)
 
-    with patch('evaluate_swe_bench.asyncio.create_subprocess_exec', side_effect=mock_exec_side_effect) as mock_exec, \
-         patch('evaluate_swe_bench.docker') as mock_docker, \
-         patch('evaluate_swe_bench.setup_lock', mock_lock), \
-         patch('evaluate_swe_bench.os.makedirs'), \
-         patch('evaluate_swe_bench.open', MagicMock()), \
-         patch('evaluate_swe_bench.os.path.abspath', return_value=str(tmp_path)), \
-         patch('evaluate_swe_bench.os.path.exists', return_value=True), \
-         patch('shutil.rmtree'), \
-         patch('evaluate_swe_bench.logger'):
+    async def mock_run_tournament(instance_id, work_dir, container_id, args):
+        mock_orch = MagicMock()
+        mock_orch.get_winner_id.return_value = "winner"
+        mock_orch.get_winner_diff.return_value = "patch"
+        mock_orch.worktrees_dir = "/tmp"
+        return mock_orch
+
+    with patch('market.common.evaluator.asyncio.create_subprocess_exec', side_effect=mock_exec_side_effect) as mock_exec, \
+         patch('market.common.evaluator.docker') as mock_docker, \
+         patch('market.common.evaluator.os.makedirs'), \
+         patch('market.common.evaluator.open', MagicMock()), \
+         patch('market.common.evaluator.os.path.abspath', return_value=str(tmp_path)), \
+         patch('market.common.evaluator.os.path.exists', return_value=True), \
+         patch('market.common.evaluator.shutil.rmtree'), \
+         patch('market.common.evaluator.get_patch_from_winner', return_value="patch"):
 
         mock_docker.get_image_name.return_value = "img"
         mock_docker.pull_image = AsyncMock()
@@ -101,11 +102,10 @@ async def test_setup_lock_concurrency(tmp_path):
 
         # Run both concurrently
         await asyncio.gather(
-            evaluate_swe_bench.run_market_on_instance(instance1, args, semaphore),
-            evaluate_swe_bench.run_market_on_instance(instance2, args, semaphore)
+            runner.run_instance(instance1, args, semaphore, mock_run_tournament),
+            runner.run_instance(instance2, args, semaphore, mock_run_tournament)
         )
 
-        # Verify that setup was called twice
-        assert lock_acquired_count == 2
-        # Verify that they NEVER ran concurrently
-        assert max_concurrent_setups == 1
+    # Check assertions
+    assert lock_acquired_count == 2, f"Lock should have been acquired 2 times, but was {lock_acquired_count}"
+    assert max_concurrent_setups == 1, f"Max concurrent setups should be 1, but was {max_concurrent_setups}"

@@ -71,8 +71,7 @@ class CommonOracle:
         candidate_dir: str, 
         verifier_dir: Optional[str] = None, 
         patch_content: Optional[str] = None,
-        entrypoint: Optional[str] = None,
-        timeout: int = 15
+        entrypoint: Optional[str] = None
     ) -> Tuple[ResultType, str, str]:
         """
         Runs a test and returns (Result, stdout, stderr).
@@ -96,24 +95,14 @@ class CommonOracle:
                 start_new_session=True
             )
 
-            try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-                res_stdout = stdout.decode(errors='replace')
-                res_stderr = stderr.decode(errors='replace')
-                
-                if process.returncode == 0:
-                    return "PASS", res_stdout, res_stderr
-                else:
-                    return "FAIL", res_stdout, res_stderr
-            except asyncio.TimeoutError:
-                if process:
-                    try:
-                        pgid = os.getpgid(process.pid)
-                        os.killpg(pgid, signal.SIGKILL)
-                        await process.wait()
-                    except:
-                        pass
-                return "TIMEOUT", "", "Execution timed out"
+            stdout, stderr = await process.communicate()
+            res_stdout = stdout.decode(errors='replace')
+            res_stderr = stderr.decode(errors='replace')
+            
+            if process.returncode == 0:
+                return "PASS", res_stdout, res_stderr
+            else:
+                return "FAIL", res_stdout, res_stderr
                 
         except Exception as e:
             logging.error(f"Oracle Error: {e}")

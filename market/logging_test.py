@@ -3,7 +3,7 @@ import logging
 import io
 import sys
 from unittest.mock import MagicMock
-from market.cli import WrappingFormatter, UnbufferedStreamHandler
+from market.common.cli_utils import WrappingFormatter, UnbufferedStreamHandler
 
 class TestLogging(unittest.TestCase):
     

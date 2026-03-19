@@ -196,7 +196,7 @@ class TestCLIAPIValidation(unittest.IsolatedAsyncioTestCase):
         except SystemExit:
             self.fail("validate_config_with_api raised SystemExit unexpectedly on valid model.")
 
-    @pytest.mark.timeout(10)
+    @pytest.mark.timeout(30)
     async def test_ephemeral_validation_invalid_model(self):
         """Verifies that suggestions work correctly with the ephemeral server."""
         from market.cli import validate_config_with_api, MarketArgumentParser

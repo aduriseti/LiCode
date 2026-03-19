@@ -10,31 +10,30 @@ The **ELO-based Asynchronous Competition** treats candidates as players in a con
 
 ## 2. Rating Mechanism: Glicko-2
 
-Instead of market prices, we use the **Glicko-2** rating system to rank candidates. Glicko-2 improves upon ELO by tracking both a rating ($R$) and a rating deviation ($RD$), which represents the uncertainty in the rating.
+Candidates and Verifiers are rated using the **Glicko-2** system. To maintain accuracy as candidates iterate, the system employs **Candidate Versioning**.
 
-### How it Works:
-- **Initialization:** Every candidate starts with a default rating (e.g., $R=1500, RD=350, \text{volatility}=0.06$).
-- **Matches:** A "match" occurs whenever a verifier (test) is executed against a candidate.
-  - **Win:** Candidate passes the test.
-  - **Loss:** Candidate fails the test.
-- **Rating Updates:** Ratings are updated periodically or after a batch of test results. Pass/fail results against different tests are weighted by the "difficulty" (easiness determined by relative ELO rating) or "authority" of the test.
-- **Volatility:** Captures erratic changes in performance (e.g., a massive refactor that fixes many bugs or introduces new ones).
+### Versioning and Pinning:
+- **Immutable Versions:** Every time a candidate submits a code update, a new **Version** is created.
+- **Match Pinning:** A match (test execution) is pinned to a specific version of a candidate. The result of that match (Win/Loss) only impacts the rating of that specific version.
+- **Rating Inheritance:** A new version inherits the $R$ (rating) from its predecessor, but its $RD$ (rating deviation) is increased to reflect the uncertainty introduced by the new code changes.
+- **Leaderboard:** The tournament leaderboard displays the rating of the **most recent version** for each candidate.
 
 ## 3. Asynchronous Execution & Notifications
 
-The tournament transitions from "rounds" to a continuous stream of events. Agents operate independently and are notified of significant changes in the environment via an interruption mechanism (similar to pressing the ESC key in a terminal). The orchestrator interrupts the current process and then sends a message directly to the agent session.
+The tournament transitions from "rounds" to a continuous stream of events. 
+
+### Reactive Test Execution:
+Whenever a candidate creates a new version (submits an update), the orchestrator automatically schedules matches against **every available verifier**. This ensures that the rating of the new version quickly converges based on the full existing test suite.
 
 ### Notification System:
 Agents are subscribed to an event bus and receive notifications that trigger new inference/action cycles:
 
 1.  **Submission Notification:** 
     - *Trigger:* "Candidate X (a rival) has submitted a new version of their code."
-    - *Action:* The orchestrator calculates the diff using the existing diff logic and sends it to rival agents. Agents may choose to analyze the new code for vulnerabilities or inspiration.
-    - *Prompt Content:* The diff provided in the prompt is truncated to preserve context, but the full candidate diff is written to a specific location in the agent's worktree for comprehensive analysis.
+    - *Action:* The orchestrator calculates the diff and sends it to rival agents.
 2.  **Failure Notification (Self):**
-    - *Trigger:* "Your current submission failed Test Y."
-    - *Action:* To avoid over-interrupting agents, the orchestrator sends a batch of the $k=3$ easiest tests the agent is currently failing every minute.
-    - *Prompt Content:* The notification includes the verifier diff and the `stderr/stdout` from the test log. This information is truncated in the prompt but written in full to a specific location in the agent's worktree for detailed analysis.
+    - *Trigger:* "Your current submission (Version N) failed Test Y."
+    - *Action:* The orchestrator sends a batch of the $k=3$ easiest failing tests for the *latest* version every minute.
 
 ## 4. Verifier and Agent Interfaces
 
@@ -46,17 +45,41 @@ Verifiers are defined as a combination of a git patch and an entrypoint command.
   3. Apply the verifier's git patch.
   4. Run the entrypoint command.
   5. Delete the temporary folder.
-- **Result:** Exit code 0 indicates a **Win** for the candidate (Pass); non-zero indicates a **Loss** (Fail). If the verifier's patch fails to apply, **no rating update is performed** for that match.
+- **Result:** Exit code 0 indicates a **Win** for the candidate (Pass); non-zero exit codes or timeouts indicate a **Loss** (Fail). If the verifier's patch fails to apply, **no rating update is performed** for that match.
 
 ### Agent Interface & Types:
 The system executes two types of agents in parallel, borrowing the existing state machine and timeout/retry logic from the current orchestrator:
 - **Candidate Agents:** Primary goal is to improve their solution. Valid action: `update_candidate`.
 - **Testing Agents:** Primary goal is to find bugs in other solutions. Valid action: `propose_new_test`.
 
-### Permissions & Isolation:
-Agents are strictly restricted to their own workspace. They are not permitted to look outside their `.` folder. This isolation is enforced using OpenCode's internal permission system and OS-level user groups.
+### Agent State Machine & Lifecycle:
+Agents are managed via an explicit state machine to ensure robust behavior and clean termination:
 
-## 5. Orchestration
+- **`UNINITIALIZED`**: Initial state before the tournament boots.
+- **`INITIALIZING`**: Spawning the OpenCode server and creating the session.
+- **`THINKING`**: Actively engaged in an LLM `chat` cycle (including multi-turn tool-use loops).
+- **`WAITING`**: The agent has submitted its work (e.g., `update_candidate`) and is idle until a new event occurs.
+- **`ERROR`**: The agent encountered a fatal exception.
+- **`TERMINATED`**: Tournament complete; resources released.
+
+### State Transition Matrix:
+
+| Current State | Event / Trigger | End State | Description |
+| :--- | :--- | :--- | :--- |
+| `UNINITIALIZED` | `initialize()` | `INITIALIZING` | Booting server and creating session. |
+| `INITIALIZING` | `Success` | `THINKING` | Server ready; starting action loop. |
+| `THINKING` | `Action: update_candidate` | `WAITING` | Code committed; agent idle until next event. |
+| `THINKING` | `Action: propose_test` | `THINKING` | Test added; agent continues iteration. |
+| `THINKING` | `Error (e.g. Malformed JSON)` | `THINKING` | Feedback sent; agent retries in current turn. |
+| `THINKING` | **`INTERRUPT`** | `THINKING` | **The Pivot:** Ongoing task aborted; loop restarts with new data. |
+| `WAITING` | **`INTERRUPT`** | `THINKING` | **The Wakeup:** Idle agent receives new event (e.g., rival update). |
+| *Any* | `shutdown()` | `TERMINATED` | Tournament complete; loop broken and server killed. |
+
+### The Interrupt (Pivot) Mechanism:
+The Orchestrator uses interruptions to "pivot" agents when higher-priority events occur (e.g., a rival submission or a test failure). An interrupt aggressively **aborts** any ongoing LLM task and immediately restarts the loop with the new information. This ensures compute is always directed at the most relevant state of the tournament.
+
+## 4. Verifier and Agent Interfaces
+
 
 The Orchestrator is responsible for:
 - Starting the tournament and sending initial problem prompts.

@@ -30,7 +30,7 @@ class IntegrationDashboardTest(unittest.IsolatedAsyncioTestCase):
     @patch('market.runner.socket.create_connection')
     @patch('market.runner.asyncio.open_connection')
     @patch('market.runner.asyncio.create_subprocess_exec')
-    @patch('market.orchestrator.Orchestrator._clone_workspace', new_callable=AsyncMock)
+    @patch('market.common.workspace.WorkspaceManager.clone_workspace', new_callable=AsyncMock)
     @patch('market.logic.oracle.Oracle.run_test', return_value="PASS")
     async def test_integration_flow_with_json_logs(self, MockOracle, MockClone, MockExec, MockAsyncSocket, MockSocket, MockShark):
 
@@ -52,7 +52,7 @@ class IntegrationDashboardTest(unittest.IsolatedAsyncioTestCase):
         MockExec.return_value = mock_proc
         
         # Mock Clone to just create the dir so checks pass
-        async def side_effect_clone(dest):
+        async def side_effect_clone(src, dest):
             os.makedirs(dest, exist_ok=True)
         MockClone.side_effect = side_effect_clone
         
@@ -233,9 +233,12 @@ class TestDashboardFormatting(unittest.IsolatedAsyncioTestCase):
             "agent_0": AgentPortfolio(agent_id="agent_0", wealth=500.0)
         }
         
-        # Initialize Orchestrator with mocked state
-        self.orchestrator = Orchestrator("Test", 1, 1000.0, state=self.state)
-        await self.orchestrator.initialize()
+        # Initialize Orchestrator with mocked state and abstract method implementations
+        with patch('market.orchestrator.Orchestrator.add_candidate'), \
+             patch('market.orchestrator.Orchestrator.add_verifier'), \
+             patch('market.orchestrator.Orchestrator.get_winner_diff'):
+            self.orchestrator = Orchestrator("Test", 1, 1000.0, state=self.state)
+            await self.orchestrator.initialize()
 
     async def test_dashboard_content(self):
         """Render the text dashboard to check for key content."""

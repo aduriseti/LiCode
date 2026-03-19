@@ -4,12 +4,14 @@ import asyncio
 import logging
 import time
 import glicko2
+import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Any
 
-from market.common.workspace import WorkspaceManager
+from market.common.orchestrator import BaseOrchestrator
+from market.common.agent import AgentSession
+from market.common.native_tests import NativeTestIdentifier
 from market.common.oracle import CommonOracle
-from market.elo.native_tests import NativeTestIdentifier
 
 @dataclass
 class EloState:
@@ -17,12 +19,21 @@ class EloState:
     matches: List[Tuple[float, float, float]] = field(default_factory=list) # (opp_r, opp_rd, score)
 
 @dataclass
+class CandidateVersion:
+    index: int
+    diff: str
+    elo: EloState = field(default_factory=EloState)
+    failing_tests: List[str] = field(default_factory=list) # List of verifier IDs
+
+@dataclass
 class CandidateState:
     id: str
     worktree_dir: str
-    elo: EloState = field(default_factory=EloState)
-    last_diff: str = ""
-    failing_tests: List[str] = field(default_factory=list) # List of verifier IDs
+    versions: List[CandidateVersion] = field(default_factory=list)
+
+    @property
+    def latest_version(self) -> CandidateVersion:
+        return self.versions[-1]
 
 @dataclass
 class VerifierState:
@@ -30,43 +41,6 @@ class VerifierState:
     patch_content: Optional[str] = None
     entrypoint: Optional[str] = None
     elo: EloState = field(default_factory=EloState) # Verifiers also have ratings
-
-class AgentSession:
-    """
-    Handles a headless OpenCode session for an agent.
-    """
-    def __init__(self, agent_id: str, worktree_dir: str, agent_type: str = "candidate"):
-        self.agent_id = agent_id
-        self.worktree_dir = worktree_dir
-        self.agent_type = agent_type
-        self.process: Optional[asyncio.subprocess.Process] = None
-
-    async def start(self):
-        """Starts the headless session."""
-        logging.info(f"Starting session for {self.agent_type} agent {self.agent_id}")
-        # Placeholder for starting 'opencode serve'
-        pass
-
-    async def interrupt(self, message: str, data: Optional[Dict] = None):
-        """
-        Interrupts the agent and sends a new message.
-        """
-        trunc_msg = message[:200] + "..." if len(message) > 200 else message
-        logging.info(f"Interrupted agent {self.agent_id} with message: {trunc_msg}")
-        
-        # Write full data to a specific location for the agent
-        if data:
-            interrupts_dir = os.path.join(self.worktree_dir, ".interrupts")
-            os.makedirs(interrupts_dir, exist_ok=True)
-            timestamp = int(time.time() * 1000)
-            filename = f"interrupt_{timestamp}.json"
-            filepath = os.path.join(interrupts_dir, filename)
-            with open(filepath, "w") as f:
-                json.dump({"message": message, "data": data}, f, indent=2)
-            logging.info(f"Wrote full interrupt data to {filepath}")
-        
-        # Placeholder for signal-based interruption logic
-        pass
 
 class Glicko2Shim:
     def create_rating(self):
@@ -78,33 +52,44 @@ class Glicko2Shim:
         rating_obj.update_player(rating_list, rd_list, outcomes)
         return rating_obj
 
-class EloOrchestrator:
-    def __init__(self, prompt: str, base_dir: str = "/tmp/elo_market", max_duration: int = 180):
-        self.prompt = prompt
-        self.base_dir = base_dir
-        self.worktrees_dir = os.path.join(self.base_dir, "worktrees")
-        self.verifiers_dir = os.path.join(self.base_dir, "verifiers")
-        self.logs_dir = os.path.join(self.base_dir, "logs")
+class EloOrchestrator(BaseOrchestrator):
+    def __init__(self, prompt: str, base_dir: Optional[str] = None, max_duration: int = 180,
+                 model: str = "gemini-3-flash", provider: str = "opencode"):
+        if base_dir is None:
+            import tempfile
+            base_dir = tempfile.mkdtemp(prefix="licode_elo_")
+        from market.common.workspace import DEFAULT_EXCLUDE_LIST
+        super().__init__(prompt, base_dir, exclude_list=DEFAULT_EXCLUDE_LIST)
+        self.model = model
+        self.provider = provider
         
-        os.makedirs(self.worktrees_dir, exist_ok=True)
-        os.makedirs(self.verifiers_dir, exist_ok=True)
-        os.makedirs(self.logs_dir, exist_ok=True)
+        # Isolated match logging directory
+        self.match_logs_dir = os.path.join(self.base_dir, "logs", "matches")
+        os.makedirs(self.match_logs_dir, exist_ok=True)
         
-        self.workspace_mgr = WorkspaceManager()
         self.glicko = Glicko2Shim()
-        
         self.candidates: Dict[str, CandidateState] = {}
         self.verifiers: Dict[str, VerifierState] = {}
         self.agent_sessions: Dict[str, AgentSession] = {}
-        self.event_queue: asyncio.Queue = asyncio.Queue()
+        self.pending_matches: List[asyncio.Task] = []
         
         self.start_time = time.time()
         self.max_duration = max_duration
 
+    def _log_event(self, event_type: str, data: Dict[str, Any]):
+        """Logs a structured JSON event for automated verification."""
+        event = {
+            "timestamp": time.time(),
+            "type": event_type,
+            "data": data
+        }
+        # Use a distinctive prefix for easy extraction from logs
+        logging.info(f"EVENT_JSON: {json.dumps(event)}")
+
     async def initialize(self):
         """Initialize the tournament with baseline and native tests."""
         # 1. Add Empty Candidate (Baseline)
-        await self.add_candidate("baseline_empty", is_baseline=True)
+        await self.add_candidate(agent_id="baseline_empty", is_baseline=True)
         
         # 2. Identify and add Native Test Suite
         native_entrypoint = NativeTestIdentifier.identify(os.getcwd())
@@ -112,26 +97,78 @@ class EloOrchestrator:
             logging.info(f"Adding native test suite as verifier: {native_entrypoint}")
             await self.add_verifier("native_suite", None, native_entrypoint)
 
-    async def add_candidate(self, cid: str, is_baseline: bool = False, agent_id: Optional[str] = None, agent_type: str = "candidate"):
-        """Adds a new candidate and optionally starts an agent session."""
+    async def add_candidate(self, agent_id: str, is_baseline: bool = False):
+        """Adds a new candidate (code producer) and optionally starts an agent session."""
+        cid = agent_id
         worktree_dir = os.path.join(self.worktrees_dir, cid)
-        if not os.path.exists(worktree_dir):
-            await self.workspace_mgr.clone_workspace(os.getcwd(), worktree_dir)
+        
+        async with self.clone_lock:
+            if not os.path.exists(worktree_dir):
+                await self.workspace_mgr.clone_workspace(os.getcwd(), worktree_dir)
+        
+        initial_diff = self.workspace_mgr.get_diff(worktree_dir)
+        
+        # Initialize Version 0
+        v0 = CandidateVersion(index=0, diff=initial_diff)
+        v0.elo.rating_obj = self.glicko.create_rating()
         
         cand = CandidateState(
             id=cid,
             worktree_dir=worktree_dir,
-            last_diff=self.workspace_mgr.get_diff(worktree_dir)
+            versions=[v0]
         )
-        cand.elo.rating_obj = self.glicko.create_rating()
         self.candidates[cid] = cand
         
-        if agent_id:
-            session = AgentSession(agent_id, worktree_dir, agent_type=agent_type)
-            await session.start()
+        self._log_event("candidate_added", {
+            "id": cid, 
+            "is_baseline": is_baseline,
+            "model": self.model,
+            "provider": self.provider
+        })
+
+        if not is_baseline:
+            logging.info(f"Creating candidate agent {agent_id} with model={self.model}, provider={self.provider}")
+            session = AgentSession(
+                agent_id=agent_id, 
+                worktree_dir=worktree_dir, 
+                agent_type="candidate",
+                model=self.model,
+                provider=self.provider,
+                traces_dir=self.traces_dir,
+                orchestrator=self
+            )
+            await session.start(initial_prompt=self.prompt)
             self.agent_sessions[agent_id] = session
             
-        logging.info(f"Added {agent_type}: {cid} (Agent: {agent_id}, Baseline: {is_baseline})")
+        logging.info(f"Added candidate: {cid} (Baseline: {is_baseline})")
+
+    async def add_tester(self, agent_id: str):
+        """Adds a new tester agent (test producer). Testers are NOT candidates themselves."""
+        worktree_dir = os.path.join(self.worktrees_dir, agent_id)
+        
+        async with self.clone_lock:
+            if not os.path.exists(worktree_dir):
+                await self.workspace_mgr.clone_workspace(os.getcwd(), worktree_dir)
+        
+        logging.info(f"Creating testing agent {agent_id} with model={self.model}, provider={self.provider}")
+        session = AgentSession(
+            agent_id=agent_id, 
+            worktree_dir=worktree_dir, 
+            agent_type="testing",
+            model=self.model,
+            provider=self.provider,
+            traces_dir=self.traces_dir,
+            orchestrator=self
+        )
+        await session.start(initial_prompt=self.prompt)
+        self.agent_sessions[agent_id] = session
+        
+        self._log_event("tester_added", {
+            "id": agent_id,
+            "model": self.model,
+            "provider": self.provider
+        })
+        logging.info(f"Added tester: {agent_id}")
 
     async def add_verifier(self, vid: str, patch_content: Optional[str], entrypoint: str):
         """Adds a new verifier (test) to the tournament."""
@@ -143,13 +180,51 @@ class EloOrchestrator:
         ver.elo.rating_obj = self.glicko.create_rating()
         self.verifiers[vid] = ver
         logging.info(f"Added verifier: {vid}")
+        
+        self._log_event("verifier_added", {
+            "id": vid,
+            "entrypoint": entrypoint
+        })
+        
+        # Save verifier submission to disk
+        v_sub_dir = os.path.join(self.submissions_dir, "verifiers")
+        os.makedirs(v_sub_dir, exist_ok=True)
+        timestamp = int(time.time() * 1000)
+        v_file = os.path.join(v_sub_dir, f"{vid}_{timestamp}.json")
+        with open(v_file, "w") as f:
+            json.dump({
+                "id": vid,
+                "entrypoint": entrypoint,
+                "patch": patch_content,
+                "timestamp": timestamp
+            }, f, indent=2)
+            
+        # Schedule matches against all existing candidates for this new test
+        for cid, cand in self.candidates.items():
+            t = asyncio.create_task(self.run_match(cid, vid, version_idx=len(cand.versions)-1))
+            self.pending_matches.append(t)
 
-    async def run_match(self, cid: str, vid: str):
-        """Executes a single match between a candidate and a verifier."""
+    async def run_match(self, cid: str, vid: str, version_idx: Optional[int] = None):
+        """Executes a single match and logs stdout/stderr to an isolated file."""
         candidate = self.candidates.get(cid)
         verifier = self.verifiers.get(vid)
-        if not candidate or not verifier:
+        if not candidate:
+            logging.warning(f"Candidate {cid} not found for match")
             return
+        if not verifier:
+            logging.warning(f"Verifier {vid} not found for match")
+            return
+
+        # Default to latest version if not specified
+        if version_idx is None:
+            version_idx = len(candidate.versions) - 1
+            
+        if version_idx >= len(candidate.versions):
+            logging.error(f"Invalid version index {version_idx} for candidate {cid}")
+            return
+            
+        version = candidate.versions[version_idx]
+        logging.info(f"Running match: {cid} (v{version_idx}) vs {vid}")
 
         res, stdout, stderr = await CommonOracle.run_test(
             candidate_dir=candidate.worktree_dir,
@@ -157,146 +232,230 @@ class EloOrchestrator:
             entrypoint=verifier.entrypoint
         )
 
+        # Isolated match logging
+        match_log_file = os.path.join(self.match_logs_dir, f"{cid}_v{version_idx}_vs_{vid}.log")
+        try:
+            with open(match_log_file, "w") as f:
+                f.write(f"=== MATCH: {cid} (v{version_idx}) vs {vid} ===\n")
+                f.write(f"Result: {res}\n")
+                f.write(f"\n--- STDOUT ---\n{stdout}\n")
+                f.write(f"\n--- STDERR ---\n{stderr}\n")
+        except Exception as e:
+            logging.warning(f"Failed to write match log to {match_log_file}: {e}")
+
         if res == "ERROR":
-            logging.warning(f"Match {cid} vs {vid} resulted in ERROR. Skipping rating update.")
+            logging.warning(f"Match {cid} (v{version_idx}) vs {vid} resulted in ERROR. Skipping rating update.")
             return
 
-        score = 0.5 # Default for TIMEOUT
+        score = 0.0 # Default for TIMEOUT or FAIL
         if res == "PASS":
             score = 1.0
-            if vid in candidate.failing_tests:
-                candidate.failing_tests.remove(vid)
-        elif res == "FAIL":
-            score = 0.0
-            if vid not in candidate.failing_tests:
-                candidate.failing_tests.append(vid)
+            if vid in version.failing_tests:
+                version.failing_tests.remove(vid)
+        elif res == "FAIL" or res == "TIMEOUT":
+            if vid not in version.failing_tests:
+                version.failing_tests.append(vid)
         
         # Accumulate matches for batch update
-        candidate.elo.matches.append((verifier.elo.rating_obj.rating, verifier.elo.rating_obj.rd, score))
-        verifier.elo.matches.append((candidate.elo.rating_obj.rating, candidate.elo.rating_obj.rd, 1.0 - score))
+        version.elo.matches.append((verifier.elo.rating_obj.rating, verifier.elo.rating_obj.rd, score))
+        verifier.elo.matches.append((version.elo.rating_obj.rating, version.elo.rating_obj.rd, 1.0 - score))
         
-        logging.info(f"Match {cid} vs {vid}: {res} (Score: {score})")
+        self._log_event("match_completed", {
+            "candidate_id": cid,
+            "version_index": version_idx,
+            "verifier_id": vid,
+            "result": res,
+            "score": score
+        })
+        logging.info(f"Match {cid} (v{version_idx}) vs {vid}: {res} (Score: {score})")
+
+    def get_winner_id(self) -> Optional[str]:
+        """Returns the ID of the candidate with the highest ELO rating in their LATEST version."""
+        eligible = [c for cid, c in self.candidates.items() if cid != "baseline_empty"]
+        if not eligible:
+            return None
+        winner = max(eligible, key=lambda x: x.latest_version.elo.rating_obj.rating)
+        return winner.id
+
+    def get_winner_diff(self) -> str:
+        """Returns the git diff of the winning candidate's latest version."""
+        wid = self.get_winner_id()
+        if not wid:
+            return ""
+        return self.candidates[wid].latest_version.diff
+
+    def get_leaderboard(self) -> Dict[str, List[Dict]]:
+        """Returns the current leaderboard sorted by ELO rating for both candidates and verifiers."""
+        eligible_cands = [c for cid, c in self.candidates.items() if cid != "baseline_empty"]
+        sorted_cands = sorted(eligible_cands, key=lambda x: x.latest_version.elo.rating_obj.rating, reverse=True)
+        if "baseline_empty" in self.candidates:
+            sorted_cands.append(self.candidates["baseline_empty"])
+
+        sorted_vers = sorted(self.verifiers.values(), key=lambda x: x.elo.rating_obj.rating, reverse=True)
+
+        return {
+            "candidates": [
+                {
+                    "id": c.id,
+                    "version": len(c.versions) - 1,
+                    "rating": c.latest_version.elo.rating_obj.rating,
+                    "rd": c.latest_version.elo.rating_obj.rd,
+                    "failing": len(c.latest_version.failing_tests)
+                }
+                for c in sorted_cands
+            ],
+            "verifiers": [
+                {
+                    "id": v.id,
+                    "rating": v.elo.rating_obj.rating,
+                    "rd": v.elo.rating_obj.rd
+                }
+                for v in sorted_vers
+            ]
+        }
 
     async def update_all_ratings(self):
-        """Processes all pending matches and updates Glicko-2 ratings."""
+        """Processes all pending matches and updates Glicko-2 ratings for all versions."""
         for cid, cand in self.candidates.items():
-            if cand.elo.matches:
-                cand.elo.rating_obj = self.glicko.rate_1vsMany(cand.elo.rating_obj, cand.elo.matches)
-                cand.elo.matches = []
-        
+            for version in cand.versions:
+                if version.elo.matches:
+                    version.elo.rating_obj = self.glicko.rate_1vsMany(version.elo.rating_obj, version.elo.matches)
+                    version.elo.matches = []
+
         for vid, ver in self.verifiers.items():
             if ver.elo.matches:
                 ver.elo.rating_obj = self.glicko.rate_1vsMany(ver.elo.rating_obj, ver.elo.matches)
                 ver.elo.matches = []
 
-    async def check_for_updates(self):
-        """Polls for file changes in candidate worktrees to trigger updates."""
-        for cid, cand in self.candidates.items():
-            if cid == "baseline_empty":
-                continue
-            current_diff = self.workspace_mgr.get_diff(cand.worktree_dir)
-            if current_diff != cand.last_diff:
-                logging.info(f"Detected update for candidate {cid}")
-                diff_changes = current_diff
-                cand.last_diff = current_diff
-                await self.event_queue.put(('CandidateUpdated', cid, diff_changes))
-
-    async def failure_notification_loop(self):
-        """Periodically notifies agents of their easiest failing tests."""
-        while time.time() - self.start_time < self.max_duration:
-            await asyncio.sleep(60) # Run every 60 seconds
+    async def submit_update(self, cid: str, message: str) -> int:
+        """
+        Manually submits a code update for a candidate.
+        Captures the diff, creates a new version, and triggers all matches.
+        """
+        cand = self.candidates.get(cid)
+        if not cand:
+            logging.error(f"Cannot submit update: Candidate {cid} not found")
+            return -1
             
-            for cid, cand in self.candidates.items():
-                if not cand.failing_tests:
-                    continue
-                
-                # Sort failing tests by verifier's ELO rating (easiest/lowest rating first)
-                sorted_failing = sorted(
-                    cand.failing_tests,
-                    key=lambda vid: self.verifiers[vid].elo.rating_obj.rating if vid in self.verifiers else 1500
+        current_diff = self.workspace_mgr.get_diff(cand.worktree_dir)
+        new_idx = len(cand.versions)
+        logging.info(f"Candidate {cid} submitted update: {message}. Creating Version {new_idx}")
+        
+        # Create New Version
+        old_version = cand.latest_version
+        new_version = CandidateVersion(
+            index=new_idx,
+            diff=current_diff,
+            failing_tests=list(old_version.failing_tests)
+        )
+        
+        # Inherit Rating but increase RD (+50 uncertainty)
+        new_rating = self.glicko.create_rating()
+        new_rating.setRating(old_version.elo.rating_obj.rating)
+        new_rating.setRd(old_version.elo.rating_obj.rd + 50.0)
+        new_version.elo.rating_obj = new_rating
+        
+        cand.versions.append(new_version)
+        
+        self._log_event("update_submitted", {
+            "candidate_id": cid,
+            "version_index": new_idx,
+            "message": message
+        })
+
+        # Save candidate update to disk
+        c_sub_dir = os.path.join(self.submissions_dir, "candidates")
+        os.makedirs(c_sub_dir, exist_ok=True)
+        timestamp = int(time.time() * 1000)
+        c_file = os.path.join(c_sub_dir, f"{cid}_v{new_idx}_{timestamp}.diff")
+        with open(c_file, "w") as f:
+            f.write(current_diff)
+        
+        # Notify rivals
+        for rid, rcand in self.candidates.items():
+            if rid == cid: continue
+            if rid in self.agent_sessions:
+                await self.agent_sessions[rid].interrupt(
+                    message=f"Rival {cid} has updated their code (now at Version {new_idx}). Diff:\n{current_diff}",
+                    data={"type": "rival_update", "cid": cid, "diff": current_diff, "version": new_idx}
                 )
-                
-                # Take top k=3 easiest
-                k = 3
-                top_k = sorted_failing[:k]
-                
-                # Find the corresponding agent_id if exists
-                agent_session = None
-                for session in self.agent_sessions.values():
-                    if session.worktree_dir == cand.worktree_dir:
-                        agent_session = session
-                        break
-                
-                if agent_session:
-                    message = f"Your current submission failed tests: {', '.join(top_k)}"
-                    data = {"failing_tests": top_k, "logs": "Truncated logs..."}
-                    await agent_session.interrupt(message, data)
+        
+        # REACTIVE: Re-run all verifiers for THIS NEW VERSION
+        for vid in self.verifiers.keys():
+            t = asyncio.create_task(self.run_match(cid, vid, version_idx=new_idx))
+            self.pending_matches.append(t)
+            
+        return new_idx
 
-    async def process_event_queue(self):
-        """Processes asynchronous events."""
-        while time.time() - self.start_time < self.max_duration:
-            try:
-                event = await asyncio.wait_for(self.event_queue.get(), timeout=1.0)
-                event_type = event[0]
+    async def check_for_updates(self):
+        """Deprecated: Polling is disabled in favor of explicit submit_update."""
+        pass
+
+    async def wait_for_matches(self, timeout: float = 30):
+        """Waits for all pending matches to complete."""
+        if not self.pending_matches:
+            return
+        
+        pending = [t for t in self.pending_matches if not t.done()]
+        if pending:
+            await asyncio.wait(pending, timeout=timeout)
+        self.pending_matches = []
+
+    async def notify_failures(self):
+        """Notifies agents of their LATEST version's easiest failing tests."""
+        for aid, session in self.agent_sessions.items():
+            # Only notify/interrupt agents who are already WAITING. 
+            # If they are THINKING, don't disturb their multi-turn tool loop.
+            from market.common.agent import AgentState
+            if session.state != AgentState.WAITING:
+                continue
+
+            cid = None
+            for candidate_id, cand in self.candidates.items():
+                if cand.worktree_dir == session.worktree_dir:
+                    cid = candidate_id
+                    break
+            
+            if not cid: continue
+            cand = self.candidates[cid]
+            version = cand.latest_version
+            if version.failing_tests:
+                failing_vers = [self.verifiers[vid] for vid in version.failing_tests]
+                failing_vers.sort(key=lambda x: x.elo.rating_obj.rating)
                 
-                if event_type == 'CandidateUpdated':
-                    cid = event[1]
-                    diff_changes = event[2]
-                    
-                    # 1. Notify rival agents
-                    for session in self.agent_sessions.values():
-                        if session.worktree_dir != self.candidates[cid].worktree_dir and session.agent_type == "candidate":
-                            await session.interrupt(
-                                f"Candidate {cid} (a rival) has submitted a new version.",
-                                {"diff": diff_changes}
-                            )
-                    
-                    # 2. Schedule matches against all available verifiers
-                    for vid in self.verifiers.keys():
-                        asyncio.create_task(self.run_match(cid, vid))
-                        
-            except asyncio.TimeoutError:
-                pass
+                top_3 = failing_vers[:3]
+                msg = f"Your latest submission (Version {version.index}) is failing the following tests (easiest first):\n"
+                for v in top_3:
+                    msg += f"- {v.id} (Rating: {v.elo.rating_obj.rating:.1f})\n"
+                
+                await session.interrupt(message=msg, data={
+                    "type": "failure_notification", 
+                    "version": version.index,
+                    "tests": [v.id for v in top_3]
+                })
 
-    def get_leaderboard(self) -> List[Dict]:
-        """Returns the current leaderboard sorted by ELO rating."""
-        sorted_cands = sorted(self.candidates.values(), key=lambda x: x.elo.rating_obj.rating, reverse=True)
-        return [
-            {
-                "id": c.id,
-                "rating": c.elo.rating_obj.rating,
-                "rd": c.elo.rating_obj.rd,
-                "failing": len(c.failing_tests)
-            }
-            for c in sorted_cands
-        ]
-
-    async def run_tournament(self):
+    async def run_tournament(self) -> Dict[str, Any]:
         """Main tournament loop."""
-        logging.info("Starting ELO Tournament")
         await self.initialize()
+        logging.info(f"Tournament started. Max duration: {self.max_duration}s")
         
-        # Start background tasks
-        tasks = [
-            asyncio.create_task(self.failure_notification_loop()),
-            asyncio.create_task(self.process_event_queue())
-        ]
-        
-        while time.time() - self.start_time < self.max_duration:
-            # Check for updates (simulating file watcher)
-            await self.check_for_updates()
-            
-            # Update ratings from recent matches
-            await self.update_all_ratings()
-            
-            # Log status
-            logging.info(f"Leaderboard: {self.get_leaderboard()}")
-            
-            await asyncio.sleep(5) # Tick
-            
-        # Cancel background tasks
-        for task in tasks:
-            task.cancel()
-            
-        logging.info("Tournament Finished")
-        return self.get_leaderboard()
+        try:
+            while time.time() - self.start_time < self.max_duration:
+                await self.update_all_ratings()
+                await self.notify_failures()
+                lb = self.get_leaderboard()
+                logging.info(f"Leaderboard: {lb}")
+                await asyncio.sleep(20)
+                
+        except asyncio.CancelledError:
+            pass
+        finally:
+            logging.info("Shutting down agents...")
+            for session in self.agent_sessions.values():
+                await session.shutdown()
+                
+        return {
+            "winner_id": self.get_winner_id(),
+            "leaderboard": self.get_leaderboard(),
+            "duration": time.time() - self.start_time
+        }

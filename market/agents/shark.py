@@ -26,7 +26,9 @@ class FatalAgentError(Exception):
     """Raised for critical agent failures that should stop the tournament."""
     pass
 
-class Shark:
+from ..common.agent import BaseAgent, LLMResponseError, FatalAgentError
+
+class Shark(BaseAgent):
     """
     An Inductive Agent (Shark) powered by an LLM via OpenCode API.
     """
@@ -36,36 +38,15 @@ class Shark:
                  timeout: float = 300.0, trace_path: Optional[str] = None,
                  max_retries: int = 3, initial_backoff: float = 120.0, 
                  max_backoff: float = 1000.0):
-        self.agent_id = agent_id
-        self.model = model
-        self.provider = provider
-        self.log_path = log_path
-        self.trace_path = trace_path
-        self.timeout = timeout
-        self.max_retries = max_retries
-        self.initial_backoff = initial_backoff
-        self.max_backoff = max_backoff
-        # Initialize Async OpenCode client
-        self.client = AsyncOpencode(base_url=api_url, timeout=timeout, max_retries=0)
-        self.session = None
+        super().__init__(
+            agent_id=agent_id, model=model, provider=provider, api_url=api_url,
+            timeout=timeout, log_path=log_path, trace_path=trace_path,
+            max_retries=max_retries, max_backoff=max_backoff
+        )
         self.system_prompt = self._build_system_prompt()
 
-    async def initialize_session(self):
-        """Async initialization of the session."""
-        if not self.session:
-            self.session = await self.client.session.create(extra_body={})
-            if not hasattr(self.session, 'id'):
-                raise RuntimeError(f"Failed to create session for Shark {self.agent_id}. Got: {self.session}")
-            
-            if self.log_path:
-                with open(self.log_path, "a") as f:
-                    f.write(f"=== Session Created: {self.session.id} ===\n")
-                    f.write(f"=== SYSTEM PROMPT ===\n{self.system_prompt}\n=====================\n")
-
     def _log_interaction(self, prompt: str, response: Any, error: Optional[str] = None):
-        # Log to file
         if not self.log_path: return
-        
         try:
             with open(self.log_path, "a") as f:
                 f.write(f"\n--- Round Interaction ---\n")
@@ -73,7 +54,7 @@ class Shark:
                 if error:
                     f.write(f"ERROR: {error}\n")
                 else:
-                    f.write(f"RESPONSE OBJECT: {response}\n")
+                    f.write(f"RESPONSE CONTENT: {response}\n")
         except Exception as e:
             logging.error(f"Failed to write session log for {self.agent_id}: {e}")
 
@@ -133,77 +114,49 @@ You must output a single JSON object.
 }}
 """
 
-    def _append_to_trace(self, content: str):
-        """Helper for thread-safe file appending."""
-        if not self.trace_path:
-            return
-        try:
-            os.makedirs(os.path.dirname(self.trace_path), exist_ok=True)
-            with open(self.trace_path, "a") as f:
-                f.write(content)
-                f.flush()
-        except Exception:
-            pass
-
     async def get_action(self, state: MarketState) -> AgentAction:
         """
         Analyzes the market state and returns an action.
         Uses a self-correction and retry loop for timeouts and parsing errors.
         """
         try:
-            await self.initialize_session()
-            
-            # 1. Generate full state prompt ONCE
+            await self.initialize_session(self.system_prompt)
             current_prompt = await self._format_state_prompt(state)
             
-            # 2. Unified Retry and Correction loop
-            # max_total_attempts = 1 (initial) + max_retries
             max_total_attempts = self.max_retries + 1
             retry_count = 0
             
-            # We use a loop that can handle both network retries and parsing corrections
-            # Total loop iterations is slightly higher than max_retries to allow for a few JSON fixes
             for attempt in range(max_total_attempts + 3):
                 try:
-                    # Calculate timeout for this attempt: doubles every retry
                     current_timeout = min(self.timeout * (2 ** retry_count), self.max_backoff)
+                    content = await self.chat_robust(current_prompt, system_prompt=self.system_prompt, timeout=current_timeout)
                     
-                    # Call API
-                    content = await self._chat_with_network_retry(current_prompt, timeout=current_timeout)
+                    data = self.parse_json_action(content, ["beliefs", "proposals"])
+                    self._log_interaction(current_prompt, content)
                     
-                    # 3. Parse and return if successful
-                    return self._parse_action_response(content, retry_count=retry_count)
+                    return AgentAction(
+                        agent_id=self.agent_id,
+                        beliefs=data.get("beliefs", {}),
+                        proposals=data.get("proposals", []),
+                        retry_count=retry_count
+                    )
                     
                 except (APITimeoutError, APIConnectionError) as e:
                     retry_count += 1
-                    
-                    if isinstance(e, APITimeoutError):
-                        await self.interrupt()
-
+                    if isinstance(e, APITimeoutError): await self.interrupt()
                     if retry_count > self.max_retries:
-                        logging.error(f"Shark {self.agent_id} network/timeout failed after {self.max_retries} retries: {e}. Falling back to empty action.")
                         return AgentAction(agent_id=self.agent_id, error=str(e), retry_count=retry_count)
 
-                    # Calculate timeout for the NEXT attempt
                     next_timeout = min(self.timeout * (2 ** retry_count), self.max_backoff)
-                    
                     if isinstance(e, APITimeoutError):
-                        logging.warning(f"Shark {self.agent_id} timed out ({current_timeout}s). Interrupting and retrying immediately with {next_timeout}s limit (Retry {retry_count}/{self.max_retries})")
-                        current_prompt = f"TIMEOUT: Your previous response took more than {current_timeout}s and was interrupted to break an unproductive loop. You have {next_timeout}s for this attempt to provide your updated beliefs and proposals in the correct JSON format now."
+                        current_prompt = f"TIMEOUT: Your previous response took more than {current_timeout}s. You have {next_timeout}s now to provide your JSON format action."
                     else:
-                        logging.warning(f"Shark {self.agent_id} connection error: {e}. Retrying immediately (Retry {retry_count}/{self.max_retries})")
-                        current_prompt = "CONNECTION ERROR: There was a transient network issue. Please provide your updated beliefs and proposals in the correct JSON format now."
-                    
-                    # No sleep here - immediate retry as requested
+                        current_prompt = "CONNECTION ERROR: Transient issue. Please retry your JSON format action."
                     
                 except LLMResponseError as e:
-                    # Self-correction attempt (doesn't count towards network retries)
                     if attempt >= max_total_attempts + 2:
-                        logging.error(f"Shark {self.agent_id} failed parsing after multiple correction attempts: {e}. Falling back to empty action.")
                         return AgentAction(agent_id=self.agent_id, error=str(e), retry_count=retry_count)
-
-                    logging.warning(f"Shark {self.agent_id} parsing failed. Sending error back for correction (Attempt {attempt+1})")
-                    current_prompt = f"ERROR: Your previous response was invalid: {str(e)}\nPlease provide your updated beliefs and proposals in the correct JSON format."
+                    current_prompt = f"ERROR: Your previous response was invalid: {str(e)}\nPlease provide your updated JSON format action."
             
             return AgentAction(agent_id=self.agent_id, retry_count=retry_count)
             
@@ -212,189 +165,6 @@ You must output a single JSON object.
         except Exception as e:
             logging.error(f"Shark {self.agent_id} critical failure: {e}")
             raise FatalAgentError(f"Shark {self.agent_id} experienced a critical failure: {e}")
-
-    async def _chat_with_network_retry(self, prompt: str, timeout: Optional[float] = None) -> str:
-        """Sends a message to the OpenCode session with trace capture."""
-        logging.info(f"Shark {self.agent_id} calling API...")
-        if not self.session:
-            await self.initialize_session()
-            
-        # Use provided timeout or default
-        call_timeout = timeout or self.timeout
-        
-        # Log prompt to trace
-        if self.trace_path:
-            await asyncio.to_thread(self._append_to_trace, f"\n\n[PROMPT]\n{prompt}\n\n[ASSISTANT]\n")
-
-        # Track part states for trace logging
-        part_lengths = {}
-        seen_tool_parts = set()
-
-        try:
-            # 1. Start event stream for tracing
-            # We use the existing self.client for both to avoid extra overhead
-            # and potential connection pool issues.
-            stream = await self.client.event.list()
-            
-            # 2. Start chat in parallel
-            # We use self.client.session.chat directly
-            chat_task = asyncio.create_task(self.client.session.chat(
-                id=self.session.id,
-                model_id=self.model,
-                provider_id=self.provider,
-                system=self.system_prompt,
-                parts=[{"type": "text", "text": prompt}],
-                timeout=call_timeout
-            ))
-            
-            # 3. Consume stream for tracing in a separate task
-            async def consume_stream():
-                try:
-                    async for event in stream:
-                        if isinstance(event, EventMessagePartUpdated):
-                            part = event.properties.part
-                            if part.session_id == self.session.id:
-                                if isinstance(part, TextPart):
-                                    last_len = part_lengths.get(part.id, 0)
-                                    delta = part.text[last_len:]
-                                    if delta:
-                                        await asyncio.to_thread(self._append_to_trace, delta)
-                                        part_lengths[part.id] = len(part.text)
-                                
-                                elif isinstance(part, ToolPart):
-                                    state = part.state
-                                    status = state.status
-                                    key = f"{part.id}-{status}"
-                                    if key not in seen_tool_parts:
-                                        seen_tool_parts.add(key)
-                                        if isinstance(state, ToolStateRunning):
-                                            await asyncio.to_thread(self._append_to_trace, f"\n[TOOL CALL: {part.tool}({state.input})]\n")
-                                        elif isinstance(state, ToolStateCompleted):
-                                            await asyncio.to_thread(self._append_to_trace, f"\n[TOOL RESULT: {state.output}]\n")
-                except asyncio.CancelledError:
-                    pass
-                except Exception as e:
-                    logging.debug(f"Trace stream consumer error: {e}")
-
-            consumer_task = asyncio.create_task(consume_stream())
-            
-            try:
-                # 4. Wait for chat to finish
-                # If this fails with a JSON error, it means the server returned an empty or malformed body
-                chat_response = await chat_task
-                
-                # Give the stream consumer a moment to process any final events
-                await asyncio.sleep(0.5)
-            finally:
-                consumer_task.cancel()
-                try:
-                    await consumer_task
-                except asyncio.CancelledError:
-                    pass
-                await stream.close()
-
-            # 5. Extract text from the chat response
-            # Using the response object directly is more robust than re-fetching messages
-            extracted_text = []
-            if chat_response and hasattr(chat_response, "parts"):
-                for part in chat_response.parts:
-                    if isinstance(part, TextPart):
-                        extracted_text.append(part.text)
-            
-            content = "".join(extracted_text)
-            
-            # Fallback: if chat_response failed to provide text, try fetching messages as a last resort
-            if not content:
-                logging.warning(f"Shark {self.agent_id} chat response had no text. Attempting message list fallback...")
-                messages = await self.client.session.messages(id=self.session.id)
-                if messages:
-                    last_msg_item = messages[-1]
-                    for part in last_msg_item.parts:
-                        if isinstance(part, TextPart):
-                            extracted_text.append(part.text)
-                    content = "".join(extracted_text)
-            
-            self._log_interaction(prompt, content)
-            
-            if not content:
-                # If we still have no content, it might be that the model just returned an empty string 
-                # (e.g. if it only called tools and then stopped).
-                # We check for tool calls in the response.
-                has_tools = any(isinstance(part, ToolPart) for part in getattr(chat_response, "parts", []))
-                if has_tools:
-                    logging.warning(f"Shark {self.agent_id} returned tool calls but no final text. This might happen if the model is in a tool-use loop.")
-                    # Return a placeholder to allow the tournament to continue (it will likely retry or fix itself in next step)
-                    return "{}"
-                
-                raise FatalAgentError(f"Received empty response content from Shark {self.agent_id}.")
-
-            return content
-
-        except (FatalAgentError, APITimeoutError, APIConnectionError):
-            raise
-        except Exception as e:
-            # Check if this is an API/JSON error that should be retried (e.g. auth failure or 503 returning HTML)
-            err_str = str(e)
-            if "Expecting value" in err_str or "JSONDecodeError" in type(e).__name__:
-                logging.warning(f"Shark {self.agent_id} received malformed JSON (likely auth error or transient failure). Treating as connection error to trigger retry: {e}")
-                raise APIConnectionError(request=None)
-
-            # Log the full exception for diagnosis
-            logging.error(f"API call or processing failed for {self.agent_id}: {str(e)}")
-            raise FatalAgentError(f"API call or processing failed for {self.agent_id}: {e}")
-
-
-    def _parse_action_response(self, content: str, retry_count: int = 0) -> AgentAction:
-        """Helper to parse JSON from LLM content."""
-        logging.info(f"Shark {self.agent_id} received {len(content)} chars from API.")
-        
-        try:
-            from chompjs import parse_js_objects
-            from json_repair import loads as repair_loads
-            
-            candidates = list(parse_js_objects(content))
-            if not candidates:
-                repaired = repair_loads(content)
-                if isinstance(repaired, dict):
-                    candidates = [repaired]
-            
-            data = None
-            for cand in reversed(candidates):
-                if isinstance(cand, dict) and ("beliefs" in cand or "proposals" in cand):
-                    data = cand
-                    break
-            
-            if data is None:
-                raise LLMResponseError(f"Response missing 'beliefs' or 'proposals' keys. Content sample: {content[:100]}...")
-                
-            return AgentAction(
-                agent_id=self.agent_id,
-                beliefs=data.get("beliefs", {}),
-                proposals=data.get("proposals", []),
-                retry_count=retry_count
-            )
-        except Exception as e:
-            if isinstance(e, LLMResponseError):
-                raise e
-            raise LLMResponseError(f"Invalid JSON format: {str(e)}")
-
-    async def close(self):
-        """Gracefully close the API client."""
-        await self.client.close()
-
-    async def interrupt(self):
-        """Interrupts the current session (equivalent to pressing Escape twice)."""
-        try:
-            if self.session and hasattr(self.session, "id"):
-                await self.client.session.abort(id=self.session.id)
-                logging.info(f"Interrupted session for Shark {self.agent_id}")
-        except Exception as e:
-            logging.debug(f"Failed to interrupt session for {self.agent_id}: {e}")
-
-    async def shutdown(self):
-        """Cleanly closes the agent resources."""
-        await self.interrupt()
-        await self.close()
 
     async def _format_state_prompt(self, state: MarketState) -> str:
         # Create a concise summary of the market

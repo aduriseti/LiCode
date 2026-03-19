@@ -3,7 +3,9 @@ import subprocess
 import tempfile
 import json
 import unittest
-from evaluate_swe_bench import get_patch_from_winner
+from market.common.evaluator import get_patch_from_winner
+from market.orchestrator import Orchestrator
+from market.core.state import MarketState
 
 class TestPatchExtraction(unittest.TestCase):
     def test_agent_internal_commits_do_not_break_diff(self):
@@ -37,7 +39,7 @@ class TestPatchExtraction(unittest.TestCase):
             with open(agent_file_path, "w") as f:
                 f.write("print('agent test v2 - modified')\n")
             
-            # 6. Reconstruct state dict for get_patch_from_winner
+            # 6. Reconstruct state for get_patch_from_winner
             state_dict = {
                 "round_num": 1,
                 "liquidity_b": 100,
@@ -56,9 +58,11 @@ class TestPatchExtraction(unittest.TestCase):
                 "whale_wealth": 1000,
                 "whale_shares": {}
             }
+            state = MarketState.from_json(json.dumps(state_dict))
+            orch = Orchestrator(prompt="", n_agents=0, budget=0, state=state)
             
             # 7. Generate the patch
-            patch = get_patch_from_winner(temp_dir, "Tournament Report", state_dict)
+            patch = get_patch_from_winner(temp_dir, orch)
             
             # VERIFICATION:
             # The diff should show agent_test.py as a NEW FILE (--- /dev/null)
@@ -102,7 +106,7 @@ class TestPatchExtraction(unittest.TestCase):
             with open(os.path.join(temp_dir, "valid_code.py"), "w") as f:
                 f.write("print('valid')\n")
             
-            # 5. Reconstruct state dict for get_patch_from_winner
+            # 5. Reconstruct state for get_patch_from_winner
             state_dict = {
                 "round_num": 1,
                 "liquidity_b": 100,
@@ -121,9 +125,11 @@ class TestPatchExtraction(unittest.TestCase):
                 "whale_wealth": 1000,
                 "whale_shares": {}
             }
+            state = MarketState.from_json(json.dumps(state_dict))
+            orch = Orchestrator(prompt="", n_agents=0, budget=0, state=state)
             
             # 6. Generate the patch
-            patch = get_patch_from_winner(temp_dir, "Tournament Report", state_dict)
+            patch = get_patch_from_winner(temp_dir, orch)
             
             # VERIFICATION:
             self.assertIsNotNone(patch, "Patch should not be None")

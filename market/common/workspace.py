@@ -8,12 +8,19 @@ from typing import List
 DEFAULT_EXCLUDE_LIST = [
     ".arenas", 
     ".home", 
+    ".opencode",
+    ".interrupts",
     "bun.lock", 
+    "node_modules",
     "package.json", 
     "package-lock.json",
     "baseline.diff",
     "opencode.db*",
-    "*.log"
+    "*.log",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    "elo_swe_bench_results"
 ]
 
 class WorkspaceManager:
@@ -52,7 +59,17 @@ class WorkspaceManager:
 
     async def _create_worktree_snapshot(self, src: str, dest_dir: str):
         """Internal helper to create a git-based snapshot of the workspace."""
-        # 1. Clean Baseline from Git (Only committed files)
+        # 0. Ensure dest_dir is clean (with a simple lock if possible, or just be careful)
+        # Using a global-ish lock for the class to prevent collisions in tests
+        if not hasattr(WorkspaceManager, '_clone_lock'):
+            WorkspaceManager._clone_lock = asyncio.Lock()
+            
+        async with WorkspaceManager._clone_lock:
+            if os.path.exists(dest_dir):
+                await asyncio.to_thread(shutil.rmtree, dest_dir, ignore_errors=True)
+            os.makedirs(os.path.dirname(dest_dir), exist_ok=True)
+
+            # 1. Clean Baseline from Git (Only committed files)
         proc = await asyncio.create_subprocess_exec(
             "git", "clone", "--depth", "1", "--single-branch", "--no-hardlinks", f"file://{src}", dest_dir,
             stdout=asyncio.subprocess.PIPE,
@@ -81,9 +98,12 @@ class WorkspaceManager:
         await asyncio.to_thread(update_git_exclude)
         
         # 4. Overlay Current Work
-        exclude_args_git = " ".join([f'--exclude="{ex}"' for ex in self.exclude_list])
         exclude_args_tar = " ".join([f'--exclude="{ex}"' for ex in self.exclude_list])
-        tar_cmd = f"git ls-files -co --exclude-standard {exclude_args_git} -z | tar -c --null {exclude_args_tar} -T - | tar -x -C \"{dest_dir}\""
+        # Also rigorously exclude .arenas even if not in list
+        if ".arenas" not in self.exclude_list:
+            exclude_args_tar += ' --exclude=".arenas"'
+            
+        tar_cmd = f"git ls-files -co --exclude-standard -z | tar -c --null {exclude_args_tar} -T - | tar -x -C \"{dest_dir}\""
         proc = await asyncio.create_subprocess_shell(
             tar_cmd,
             cwd=src,
@@ -127,22 +147,26 @@ class WorkspaceManager:
 
         # Shadow Git Config
         for key, val in [("user.email", "market@local"), ("user.name", "Market Oracle")]:
-            await asyncio.create_subprocess_exec(
+            proc = await asyncio.create_subprocess_exec(
                 "git", "config", key, val,
                 cwd=dest_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
+            await proc.communicate()
         
         # Initial Commit
         for cmd_args in [["add", "."], ["commit", "--allow-empty", "-m", "Initial Baseline"]]:
-            await asyncio.create_subprocess_exec(
+            proc = await asyncio.create_subprocess_exec(
                 "git", *cmd_args,
                 cwd=dest_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
+            await proc.communicate()
 
     @staticmethod
     def get_diff(worktree_dir: str) -> str:
-        """Returns the current git diff of the worktree."""
+        """Returns the current git diff of the worktree, including untracked files."""
         try:
+            # Stage untracked files as 'intent-to-add' so they show up in diff HEAD
+            subprocess.run(["git", "add", "-N", "."], cwd=worktree_dir, capture_output=True)
             return subprocess.check_output(["git", "diff", "HEAD"], cwd=worktree_dir).decode()
         except Exception:
             return ""

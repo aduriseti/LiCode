@@ -12,6 +12,17 @@ def _bootstrap():
     if os.environ.get("_LICODE_BOOTSTRAPPED"):
         return
 
+    # Load environment variables globally
+    try:
+        from dotenv import load_dotenv
+        load_dotenv()
+    except ImportError:
+        pass
+
+    # Clean up API key from environment to prevent literal quotes or whitespace issues
+    if "OPENCODE_API_KEY" in os.environ:
+        os.environ["OPENCODE_API_KEY"] = os.environ["OPENCODE_API_KEY"].strip("\"' \n\r\t")
+
     # Resolve project root relative to this file
     # market/ is inside the root
     market_dir = Path(__file__).parent.resolve()
