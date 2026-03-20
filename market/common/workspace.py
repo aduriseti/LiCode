@@ -7,17 +7,18 @@ from typing import List
 from market.common.process_registry import registry
 
 DEFAULT_EXCLUDE_LIST = [
-    ".arenas", 
-    ".home", 
+    ".arenas",
+    ".home",
     ".opencode",
     ".interrupts",
-    "bun.lock", 
+    ".diffs",
+    ".test_logs",
+    "bun.lock",
     "node_modules",
-    "package.json", 
+    "package.json",
     "package-lock.json",
     "baseline.diff",
-    "opencode.db*",
-    "*.log",
+    "opencode.db*",    "*.log",
     "__pycache__",
     ".pytest_cache",
     ".ruff_cache",
@@ -121,7 +122,17 @@ class WorkspaceManager:
 
     async def _finalize_worktree(self, dest_dir: str):
         """Common finalization steps for a worktree."""
-        # Stage changes
+        # 1. LiCode ELO Tournament Ignores
+        gitignore_path = os.path.join(dest_dir, ".gitignore")
+        try:
+            with open(gitignore_path, "a") as f:
+                f.write("\n# LiCode ELO Tournament Ignores\n")
+                for item in DEFAULT_EXCLUDE_LIST:
+                    f.write(f"{item}\n")
+        except Exception as e:
+            logging.warning(f"Failed to update .gitignore in {dest_dir}: {e}")
+
+        # 2. Stage changes
         async with registry.spawn(
             "git", "add", "-N", ".",
             cwd=dest_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -156,7 +167,7 @@ class WorkspaceManager:
                 await proc.communicate()
         
         # Initial Commit
-        for cmd_args in [["add", "."], ["commit", "--allow-empty", "-m", "Initial Baseline"]]:
+        for cmd_args in [["add", "."], ["commit", "--allow-empty", "-m", "Initial Baseline"], ["tag", "baseline"]]:
             async with registry.spawn(
                 "git", *cmd_args,
                 cwd=dest_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -165,11 +176,11 @@ class WorkspaceManager:
 
     @staticmethod
     def get_diff(worktree_dir: str) -> str:
-        """Returns the current git diff of the worktree, including untracked files."""
+        """Returns the current git diff of the worktree against baseline, including untracked files."""
         try:
-            # Stage untracked files as 'intent-to-add' so they show up in diff HEAD
+            # Stage untracked files as 'intent-to-add' so they show up in diff
             subprocess.run(["git", "add", "-N", "."], cwd=worktree_dir, capture_output=True)
-            return subprocess.check_output(["git", "diff", "HEAD"], cwd=worktree_dir).decode()
+            return subprocess.check_output(["git", "diff", "baseline"], cwd=worktree_dir).decode()
         except Exception:
             return ""
 

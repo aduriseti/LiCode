@@ -5,6 +5,7 @@ import logging
 import time
 import glicko2
 import sys
+import collections
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Any
 
@@ -70,8 +71,12 @@ class EloOrchestrator(BaseOrchestrator):
         self.glicko = Glicko2Shim()
         self.candidates: Dict[str, CandidateState] = {}
         self.verifiers: Dict[str, VerifierState] = {}
-        self.agent_sessions: Dict[str, AgentSession] = {}
+        self.agent_sessions: Dict[str, Any] = {}
         self.pending_matches: List[asyncio.Task] = []
+        
+        # Notification batching & throttling
+        self.agent_notification_queues = collections.defaultdict(list)
+        self.last_interrupt_times = {} # aid -> timestamp
         
         self.start_time = time.time()
         self.max_duration = max_duration
@@ -230,18 +235,26 @@ class EloOrchestrator(BaseOrchestrator):
             entrypoint=verifier.entrypoint
         )
 
-        # Isolated match logging
+        # Isolated match logging (Central)
         match_log_file = os.path.join(self.match_logs_dir, f"{cid}_v{version_idx}_vs_{vid}.log")
-        try:
-            with open(match_log_file, "w") as f:
-                f.write(f"=== MATCH: {cid} (v{version_idx}) vs {vid} ===\n")
-                f.write(f"Result: {res}\n")
-                f.write(f"\n--- STDOUT ---\n{stdout}\n")
-                f.write(f"\n--- STDERR ---\n{stderr}\n")
-        except Exception as e:
-            logging.warning(f"Failed to write match log to {match_log_file}: {e}")
+        # Candidate Worktree logging (Agent visible)
+        agent_logs_dir = os.path.join(candidate.worktree_dir, ".test_logs")
+        os.makedirs(agent_logs_dir, exist_ok=True)
+        agent_log_file = os.path.join(agent_logs_dir, f"v{version_idx}_vs_{vid}.log")
+        
+        log_content = f"=== MATCH: {cid} (v{version_idx}) vs {vid} ===\n"
+        log_content += f"Result: {res}\n"
+        log_content += f"\n--- STDOUT ---\n{stdout}\n"
+        log_content += f"\n--- STDERR ---\n{stderr}\n"
 
-        if res in [ResultType.ERROR, ResultType.TIMEOUT, ResultType.PATCH_ERROR]:
+        for l_file in [match_log_file, agent_log_file]:
+            try:
+                with open(l_file, "w") as f:
+                    f.write(log_content)
+            except Exception as e:
+                logging.warning(f"Failed to write match log to {l_file}: {e}")
+
+        if res in [ResultType.ERROR, ResultType.PATCH_ERROR]:
             logging.warning(f"Match {cid} (v{version_idx}) vs {vid} resulted in {res}. Skipping rating update.")
             return
 
@@ -250,10 +263,27 @@ class EloOrchestrator(BaseOrchestrator):
             score = 1.0
             if vid in version.failing_tests:
                 version.failing_tests.remove(vid)
-        elif res == ResultType.FAIL:
+        elif res == ResultType.FAIL or res == ResultType.TIMEOUT:
             if vid not in version.failing_tests:
                 version.failing_tests.append(vid)
-        
+            
+            # Queue notification for candidate
+            if cid in self.agent_sessions:
+                # Truncate stderr/stdout for notification (last 50 lines)
+                combined = stderr + "\n" + stdout
+                truncated_log = "\n".join(combined.splitlines()[-50:])
+                self.agent_notification_queues[cid].append({
+                    "type": "failure",
+                    "vid": vid,
+                    "version": version_idx,
+                    "log_path": agent_log_file,
+                    "truncated_log": truncated_log
+                })
+
+        if res == ResultType.TIMEOUT:
+            logging.warning(f"Match {cid} (v{version_idx}) vs {vid} resulted in TIMEOUT. Skipping rating update.")
+            return
+
         # Accumulate matches for batch update
         version.elo.matches.append((verifier.elo.rating_obj.rating, verifier.elo.rating_obj.rd, score))
         verifier.elo.matches.append((version.elo.rating_obj.rating, version.elo.rating_obj.rd, 1.0 - score))
@@ -360,7 +390,7 @@ class EloOrchestrator(BaseOrchestrator):
             "message": message
         })
 
-        # Save candidate update to disk
+        # Save candidate update to disk (Central)
         c_sub_dir = os.path.join(self.submissions_dir, "candidates")
         os.makedirs(c_sub_dir, exist_ok=True)
         timestamp = int(time.time() * 1000)
@@ -368,14 +398,27 @@ class EloOrchestrator(BaseOrchestrator):
         with open(c_file, "w") as f:
             f.write(current_diff)
         
-        # Notify rivals
-        for rid, rcand in self.candidates.items():
+        # Save diff to Agent Worktree
+        agent_diffs_dir = os.path.join(cand.worktree_dir, ".diffs")
+        os.makedirs(agent_diffs_dir, exist_ok=True)
+        agent_diff_file = os.path.join(agent_diffs_dir, f"v{new_idx}.diff")
+        with open(agent_diff_file, "w") as f:
+            f.write(current_diff)
+            
+        # Notify rivals (Queue for batching)
+        # Truncate diff for notification
+        truncated_diff = "\n".join(current_diff.splitlines()[:50])
+        if len(current_diff.splitlines()) > 50:
+            truncated_diff += "\n... (truncated, view full diff in your workspace)"
+
+        for rid, session in self.agent_sessions.items():
             if rid == cid: continue
-            if rid in self.agent_sessions:
-                await self.agent_sessions[rid].interrupt(
-                    message=f"Rival {cid} has updated their code (now at Version {new_idx}). Diff:\n{current_diff}",
-                    data={"type": InterruptType.RIVAL_UPDATE, "cid": cid, "diff": current_diff, "version": new_idx}
-                )
+            self.agent_notification_queues[rid].append({
+                "type": "rival_update",
+                "cid": cid,
+                "version": new_idx,
+                "truncated_diff": truncated_diff
+            })
         
         # REACTIVE: Re-run all verifiers for THIS NEW VERSION
         for vid in self.verifiers.keys():
@@ -398,38 +441,55 @@ class EloOrchestrator(BaseOrchestrator):
             await asyncio.wait(pending, timeout=timeout)
         self.pending_matches = []
 
-    async def notify_failures(self):
-        """Notifies agents of their LATEST version's easiest failing tests."""
-        for aid, session in self.agent_sessions.items():
-            # Only notify/interrupt agents who are already WAITING. 
-            # If they are THINKING, don't disturb their multi-turn tool loop.
-            from market.common.agent import AgentState
-            if session.state != AgentState.WAITING:
+    async def process_notifications(self):
+        """Consolidates queued notifications and interrupts agents (with 30s throttle)."""
+        now = time.time()
+        for aid, queue in list(self.agent_notification_queues.items()):
+            if not queue:
+                continue
+                
+            # Throttle: Check if we interrupted this agent recently
+            last_time = self.last_interrupt_times.get(aid, 0)
+            if now - last_time < 30:
+                continue
+            
+            session = self.agent_sessions.get(aid)
+            if not session:
                 continue
 
-            cid = None
-            for candidate_id, cand in self.candidates.items():
-                if cand.worktree_dir == session.worktree_dir:
-                    cid = candidate_id
-                    break
+            # Consolidate messages
+            messages = []
+            failures = [ev for ev in queue if ev["type"] == "failure"]
+            rival_updates = [ev for ev in queue if ev["type"] == "rival_update"]
             
-            if not cid: continue
-            cand = self.candidates[cid]
-            version = cand.latest_version
-            if version.failing_tests:
-                failing_vers = [self.verifiers[vid] for vid in version.failing_tests]
-                failing_vers.sort(key=lambda x: x.elo.rating_obj.rating)
+            if failures:
+                # Group by version
+                f_by_v = collections.defaultdict(list)
+                for f in failures: f_by_v[f["version"]].append(f)
                 
-                top_3 = failing_vers[:3]
-                msg = f"Your latest submission (Version {version.index}) is failing the following tests (easiest first):\n"
-                for v in top_3:
-                    msg += f"- {v.id} (Rating: {v.elo.rating_obj.rating:.1f})\n"
-                
-                await session.interrupt(message=msg, data={
-                    "type": InterruptType.FAILURE_NOTIFICATION, 
-                    "version": version.index,
-                    "tests": [v.id for v in top_3]
-                })
+                for v_idx, v_failures in f_by_v.items():
+                    msg = f"Your submission (Version {v_idx}) is failing tests:\n"
+                    for f in v_failures[:3]: # Show top 3
+                        msg += f"- {f['vid']}\n  Log snippet: {f['truncated_log']}\n  Full log: {f['log_path']}\n"
+                    if len(v_failures) > 3:
+                        msg += f"... and {len(v_failures) - 3} more.\n"
+                    messages.append(msg)
+            
+            if rival_updates:
+                for ru in rival_updates:
+                    messages.append(f"Rival {ru['cid']} updated to Version {ru['version']}. Diff snippet:\n{ru['truncated_diff']}")
+            
+            composite_msg = "\n---\n".join(messages)
+            
+            # Record interruption BEFORE calling it to avoid re-entry issues if it takes time
+            self.last_interrupt_times[aid] = now
+            self.agent_notification_queues[aid] = [] # Clear queue
+            
+            logging.info(f"Interrupting agent {aid} with batched notifications (queue size: {len(queue)})")
+            await session.interrupt(
+                message=composite_msg,
+                data={"type": InterruptType.GENERIC, "events": queue}
+            )
 
     async def shutdown(self):
         """Shut down all agents and cleanup resources."""
@@ -449,10 +509,10 @@ class EloOrchestrator(BaseOrchestrator):
         try:
             while time.time() - self.start_time < self.max_duration:
                 await self.update_all_ratings()
-                await self.notify_failures()
+                await self.process_notifications()
                 lb = self.get_leaderboard()
                 logging.info(f"Leaderboard: {lb}")
-                await asyncio.sleep(20)
+                await asyncio.sleep(10) # More frequent checks for batched notifications
                 
         except asyncio.CancelledError:
             pass

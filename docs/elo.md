@@ -30,14 +30,14 @@ The orchestrator automatically schedules matches in the following scenarios to e
 - **Verifier Addition:** Whenever a new verifier is added to the tournament (e.g., by a testing agent), it is automatically scheduled for matches against the **latest version of every candidate**.
 
 ### Notification System:
-Agents are subscribed to an event bus and receive notifications that trigger new inference/action cycles:
+Agents are subscribed to an event bus and receive notifications that trigger new inference/action cycles. To prevent context flooding and excessive task switching, notifications are **batched and throttled** (minimum 30 seconds between interrupts).
 
 1.  **Submission Notification:** 
     - *Trigger:* "Candidate X (a rival) has submitted a new version of their code."
-    - *Action:* The orchestrator calculates the diff and sends it to rival agents.
+    - *Action:* The orchestrator calculates the diff. A **truncated** version (first 50 lines) is sent via notification, while the **full diff** is saved to the agent's worktree under `.diffs/vN.diff`.
 2.  **Failure Notification (Self):**
     - *Trigger:* "Your current submission (Version N) failed Test Y."
-    - *Action:* The orchestrator sends a batch of the $k=3$ easiest failing tests for the *latest* version every minute.
+    - *Action:* The orchestrator writes the **full execution log** (stdout/stderr) to the agent's worktree at `.test_logs/vN_vs_testY.log`. A notification is sent containing a **truncated error log** (last 50 lines) and the absolute path to the full log file. Notifications are batched to include the easiest failing tests for the *latest* version.
 
 ## 4. Verifier and Agent Interfaces
 
@@ -64,7 +64,7 @@ The system executes two types of agents in parallel, borrowing the existing stat
 Agents interact with the tournament by modifying their local directory (workspace) and then submitting a single JSON action in their final response.
 
 1.  **`update_candidate`**: Used by Candidate Agents to submit a new version of their solution.
-    - **Mechanism:** The system computes the diff between the agent's current workspace and the original codebase. This diff becomes the new "Version".
+    - **Mechanism:** The system computes the diff between the agent's current workspace and the **`baseline`** git tag (created during workspace initialization). This ensures that even if the agent makes local commits, the full delta from the original state is captured.
     - **Required JSON:** `{"action": "update_candidate", "message": "Summary of changes"}`
 2.  **`propose_test`**: Used by Testing Agents to submit a new verifier to the tournament.
     - **Mechanism (The Overlay):** 
@@ -102,7 +102,11 @@ Agents are managed via an explicit state machine to ensure robust behavior and c
 | *Any* | `shutdown()` | `TERMINATED` | Tournament complete; loop broken and server killed. |
 
 ### The Interrupt (Pivot) Mechanism:
-The Orchestrator uses interruptions to "pivot" agents when higher-priority events occur (e.g., a rival submission or a test failure). An interrupt aggressively **aborts** any ongoing LLM task and immediately restarts the loop with the new information. This ensures compute is always directed at the most relevant state of the tournament.
+The Orchestrator uses interruptions to "pivot" agents when higher-priority events occur (e.g., a rival submission or a test failure). 
+
+- **Aggressive Abort:** An interrupt aggressively **aborts** any ongoing LLM task (even if the agent is in the `THINKING` state) and immediately restarts the loop with the new information.
+- **Batching & Throttling:** Interrupts are sent at most once every 30 seconds per agent. If multiple events occur within this window, they are consolidated into a single batched interrupt message.
+- **Persistence:** All notification data (messages and metadata) are written to the agent's worktree under `.interrupts/` for auditability and recovery.
 
 ## 5. Orchestration
 
