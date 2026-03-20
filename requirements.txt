@@ -15,3 +15,8 @@ datasets
 swebench
 glicko2
 psutil
+pandas
+matplotlib
+nbconvert
+ipykernel
+ipywidgets

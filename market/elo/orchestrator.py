@@ -345,15 +345,28 @@ class EloOrchestrator(BaseOrchestrator):
     async def update_all_ratings(self):
         """Processes all pending matches and updates Glicko-2 ratings for all versions."""
         for cid, cand in self.candidates.items():
-            for version in cand.versions:
+            for i, version in enumerate(cand.versions):
                 if version.elo.matches:
                     version.elo.rating_obj = self.glicko.rate_1vsMany(version.elo.rating_obj, version.elo.matches)
                     version.elo.matches = []
+                    self._log_event("elo_updated", {
+                        "id": cid,
+                        "type": "candidate",
+                        "version": i,
+                        "rating": version.elo.rating_obj.rating,
+                        "rd": version.elo.rating_obj.rd
+                    })
 
         for vid, ver in self.verifiers.items():
             if ver.elo.matches:
                 ver.elo.rating_obj = self.glicko.rate_1vsMany(ver.elo.rating_obj, ver.elo.matches)
                 ver.elo.matches = []
+                self._log_event("elo_updated", {
+                    "id": vid,
+                    "type": "verifier",
+                    "rating": ver.elo.rating_obj.rating,
+                    "rd": ver.elo.rating_obj.rd
+                })
 
     async def submit_update(self, cid: str, message: str) -> int:
         """
