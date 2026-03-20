@@ -7,7 +7,7 @@ import glicko2
 import sys
 import collections
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple, Any, Union
 
 from market.common.orchestrator import BaseOrchestrator
 from market.common.agent import CandidateAgent, TesterAgent, AgentState, InterruptType
@@ -55,14 +55,21 @@ class Glicko2Shim:
 
 class EloOrchestrator(BaseOrchestrator):
     def __init__(self, prompt: str, base_dir: Optional[str] = None, max_duration: int = 180,
-                 model: str = "gemini-3-flash", provider: str = "opencode"):
+                 model: Union[str, List[str]] = "gemini-3-flash", 
+                 provider: Union[str, List[str]] = "opencode"):
         if base_dir is None:
             import tempfile
             base_dir = tempfile.mkdtemp(prefix="licode_elo_")
         from market.common.workspace import DEFAULT_EXCLUDE_LIST
         super().__init__(prompt, base_dir, exclude_list=DEFAULT_EXCLUDE_LIST)
-        self.model = model
-        self.provider = provider
+        
+        # Standardize models and providers as lists
+        self.models = [model] if isinstance(model, str) else list(model)
+        self.providers = [provider] if isinstance(provider, str) else list(provider)
+        
+        # Set primary model/provider for backward compatibility
+        self.model = self.models[0]
+        self.provider = self.providers[0]
         
         # Isolated match logging directory
         self.match_logs_dir = os.path.join(self.base_dir, "logs", "matches")
@@ -102,7 +109,7 @@ class EloOrchestrator(BaseOrchestrator):
             logging.info(f"Adding native test suite as verifier: {native_entrypoint}")
             await self.add_verifier("native_suite", None, native_entrypoint)
 
-    async def add_candidate(self, agent_id: str, is_baseline: bool = False):
+    async def add_candidate(self, agent_id: str, is_baseline: bool = False, model: Optional[str] = None, provider: Optional[str] = None):
         """Adds a new candidate (code producer) and optionally starts an agent session."""
         cid = agent_id
         worktree_dir = os.path.join(self.worktrees_dir, cid)
@@ -124,20 +131,24 @@ class EloOrchestrator(BaseOrchestrator):
         )
         self.candidates[cid] = cand
         
+        # Use provided overrides or defaults
+        agent_model = model or self.model
+        agent_provider = provider or self.provider
+
         self._log_event("candidate_added", {
             "id": cid, 
             "is_baseline": is_baseline,
-            "model": self.model,
-            "provider": self.provider
+            "model": agent_model,
+            "provider": agent_provider
         })
 
         if not is_baseline:
-            logging.info(f"Creating candidate agent {agent_id} with model={self.model}, provider={self.provider}")
+            logging.info(f"Creating candidate agent {agent_id} with model={agent_model}, provider={agent_provider}")
             session = CandidateAgent(
                 agent_id=agent_id, 
                 worktree_dir=worktree_dir, 
-                model=self.model,
-                provider=self.provider,
+                model=agent_model,
+                provider=agent_provider,
                 traces_dir=self.traces_dir,
                 orchestrator=self
             )
@@ -146,7 +157,7 @@ class EloOrchestrator(BaseOrchestrator):
             
         logging.info(f"Added candidate: {cid} (Baseline: {is_baseline})")
 
-    async def add_tester(self, agent_id: str):
+    async def add_tester(self, agent_id: str, model: Optional[str] = None, provider: Optional[str] = None):
         """Adds a new tester agent (test producer). Testers are NOT candidates themselves."""
         worktree_dir = os.path.join(self.worktrees_dir, agent_id)
         
@@ -154,12 +165,16 @@ class EloOrchestrator(BaseOrchestrator):
             if not os.path.exists(worktree_dir):
                 await self.workspace_mgr.clone_workspace(os.getcwd(), worktree_dir)
         
-        logging.info(f"Creating testing agent {agent_id} with model={self.model}, provider={self.provider}")
+        # Use provided overrides or defaults
+        agent_model = model or self.model
+        agent_provider = provider or self.provider
+
+        logging.info(f"Creating testing agent {agent_id} with model={agent_model}, provider={agent_provider}")
         session = TesterAgent(
             agent_id=agent_id, 
             worktree_dir=worktree_dir, 
-            model=self.model,
-            provider=self.provider,
+            model=agent_model,
+            provider=agent_provider,
             traces_dir=self.traces_dir,
             orchestrator=self
         )
@@ -168,8 +183,8 @@ class EloOrchestrator(BaseOrchestrator):
         
         self._log_event("tester_added", {
             "id": agent_id,
-            "model": self.model,
-            "provider": self.provider
+            "model": agent_model,
+            "provider": agent_provider
         })
         logging.info(f"Added tester: {agent_id}")
 

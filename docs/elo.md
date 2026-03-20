@@ -60,6 +60,11 @@ The system executes two types of agents in parallel, borrowing the existing stat
 - **Candidate Agents:** Primary goal is to improve their solution by modifying their own code and fixing reported bugs.
 - **Testing Agents:** Primary goal is to act as **Verifiers** by writing tests that can accurately distinguish between correct solutions and buggy ones. They are not direct rivals to the candidates; instead, they are rated on the authority and discriminative power of their tests.
 
+#### Multi-Model Support and Pairing Strategy:
+The tournament supports simultaneous execution of multiple different LLM models. To ensure balanced competition and comprehensive verification, the system employs a **Pairing Strategy**:
+- For each model type added to the tournament, the orchestrator creates a **paired set** consisting of at least one Candidate Agent and one Testing Agent using that same model.
+- This ensures that every model's capabilities are evaluated both as a code producer (Candidate) and as a bug finder (Tester), allowing the rating system to account for architectural biases or strengths in either role.
+
 ### Agent Action Interface:
 Agents interact with the tournament by modifying their local directory (workspace) and then submitting a single JSON action in their final response.
 

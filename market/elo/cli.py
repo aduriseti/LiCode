@@ -37,13 +37,26 @@ async def async_main():
     run_parser.add_argument("--agents", type=int, default=4)
     run_parser.add_argument("--max-duration", type=int, default=180, help="Tournament duration in seconds")
     run_parser.add_argument("--output-dir", type=str, default=".arenas", help="Base directory for tournament outputs")
-    run_parser.add_argument("--model", type=str, default="gemini-3-flash", help="Model to use")
-    run_parser.add_argument("--provider", type=str, default="opencode", help="Provider to use")
+    run_parser.add_argument("--model", type=str, nargs='+', default=["gemini-3-flash", "claude-sonnet-4-6", "glm-5"], help="Model(s) to use")
+    run_parser.add_argument("--provider", type=str, nargs='+', default=["opencode"], help="Provider(s) to use")
     run_parser.add_argument("--log-level", type=lambda x: x.upper(), 
                             choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                             help="Set logging level")
 
     args = parser.parse_args()
+
+    # Flatten potential comma-separated strings in model and provider lists
+    if hasattr(args, 'model') and args.model:
+        flattened_models = []
+        for m in args.model:
+            flattened_models.extend([item.strip() for item in m.split(',')])
+        args.model = flattened_models
+        
+    if hasattr(args, 'provider') and args.provider:
+        flattened_providers = []
+        for p in args.provider:
+            flattened_providers.extend([item.strip() for item in p.split(',')])
+        args.provider = flattened_providers
 
     if args.command == "run":
         timestamp = int(time.time())
@@ -68,13 +81,24 @@ async def async_main():
             model=args.model,
             provider=args.provider
         ) as orch:
-            # Add agents with round-robin roles (1:1 ratio)
-            for i in range(args.agents):
-                agent_id = f"agent_{i}"
-                if i % 2 == 1:
-                    await orch.add_tester(agent_id=agent_id)
-                else:
-                    await orch.add_candidate(agent_id=agent_id)
+            # Add agents in pairs (1 Candidate, 1 Tester per model assignment)
+            # This ensures each model is tested as both a producer and a verifier.
+            for i in range(args.agents // 2):
+                agent_model = args.model[i % len(args.model)]
+                agent_provider = args.provider[i % len(args.provider)]
+                
+                # Add Candidate
+                await orch.add_candidate(
+                    agent_id=f"agent_{i*2}_cand", 
+                    model=agent_model, 
+                    provider=agent_provider
+                )
+                # Add Tester
+                await orch.add_tester(
+                    agent_id=f"agent_{i*2+1}_test", 
+                    model=agent_model, 
+                    provider=agent_provider
+                )
                 
             # Run tournament
             results = await orch.run_tournament()

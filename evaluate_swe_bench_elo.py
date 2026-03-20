@@ -46,18 +46,34 @@ async def run_elo_tournament(instance_id, work_dir, container_id, args):
     # For now, let's keep the ELO orchestrator running on the host, 
     # but it will use the mounted worktrees.
     
+    models = getattr(args, 'model', ["gemini-3-flash"])
+    providers = getattr(args, 'provider', ["opencode"])
+
     orch = EloOrchestrator(
         prompt=f"Fix the bug described in problem.md.",
         base_dir=work_dir,
         max_duration=getattr(args, 'duration', 180),
-        model=getattr(args, 'model', ["gemini-3-flash"])[0],
-        provider=getattr(args, 'provider', ["opencode"])[0]
+        model=models,
+        provider=providers
     )
     
-    # Add candidates
+    # Add agents in pairs (Candidate, Tester per model)
     status_mgr.update_status(instance_id, "Adding Agents")
-    for i in range(getattr(args, 'agents', 3)):
-        await orch.add_candidate(f"agent_{i}", agent_id=f"agent_{i}_session")
+    n_agents = getattr(args, 'agents', 4) # Default to 4 to ensure at least 2 pairs
+    for i in range(n_agents // 2):
+        agent_model = models[i % len(models)]
+        agent_provider = providers[i % len(providers)]
+        
+        await orch.add_candidate(
+            agent_id=f"agent_{i*2}_cand", 
+            model=agent_model, 
+            provider=agent_provider
+        )
+        await orch.add_tester(
+            agent_id=f"agent_{i*2+1}_test", 
+            model=agent_model, 
+            provider=agent_provider
+        )
     
     # Run tournament
     # We should probably wrap orch.run_tournament to update status_mgr

@@ -91,8 +91,8 @@ def test_elo_tournament_e2e():
                     continue
 
     # 2. Strict Per-Agent Assertions
-    candidate_ids = ["agent_0", "agent_2"]
-    tester_ids = ["agent_1", "agent_3"]
+    candidate_ids = ["agent_0_cand", "agent_2_cand"]
+    tester_ids = ["agent_1_test", "agent_3_test"]
 
     updates_by_cid = {e["data"]["candidate_id"] for e in events if e["type"] == "update_submitted"}
     
@@ -100,19 +100,21 @@ def test_elo_tournament_e2e():
     proposals = {e["data"]["id"] for e in events if e["type"] == "verifier_added"}
     proposers = set()
     for vid in proposals:
+        # Expected format: test_agent_1_test_1712345678.diff
         if vid.startswith("test_agent_"):
             parts = vid.split("_")
-            agent_id = f"{parts[1]}_{parts[2]}"
+            # Reconstruct agent_1_test
+            agent_id = f"{parts[1]}_{parts[2]}_{parts[3]}"
             proposers.add(agent_id)
 
     print(f"Updates from: {updates_by_cid}")
     print(f"Tests from Agents: {proposers}")
 
     for cid in candidate_ids:
-        assert cid in updates_by_cid, f"Candidate {cid} failed to submit an update"
+        assert cid in updates_by_cid, f"Candidate {cid} failed to submit an update. Found: {updates_by_cid}"
 
     for tid in tester_ids:
-        assert tid in proposers, f"Tester {tid} failed to propose a test"
+        assert tid in proposers, f"Tester {tid} failed to propose a test. Found: {proposers}"
 
     # 3. Verify Isolated Match Logs
     match_logs_dir = os.path.join(latest_run_dir, "logs", "matches")
