@@ -87,53 +87,34 @@ class Oracle:
         if not temp_dir:
             return "ERROR"
         
-        process = None
         try:
             # 4. Run the verifier
             cmd = ["./run.sh"]
             
             import logging
-            import signal
+            from market.common.process_registry import registry
             logging.info(f"Oracle: Starting test {os.path.basename(verifier_dir)} on worktree {os.path.basename(candidate_dir)}")
             
-            process = await asyncio.create_subprocess_exec(
+            async with registry.spawn(
                 *cmd,
                 cwd=temp_dir,
                 stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-                start_new_session=True
-            )
-            
-            try:
-                await asyncio.wait_for(process.wait(), timeout=timeout)
-                logging.info(f"Oracle: Finished test {os.path.basename(verifier_dir)} on {os.path.basename(candidate_dir)}")
-                
-                if process.returncode == 0:
-                    return "PASS"
-                else:
-                    return "FAIL"
-            except asyncio.TimeoutError:
-                if process:
-                    try:
-                        pgid = os.getpgid(process.pid)
-                        os.killpg(pgid, signal.SIGKILL)
-                        await process.wait()
-                    except ProcessLookupError:
-                        pass
-                return "TIMEOUT"
+                stderr=asyncio.subprocess.DEVNULL
+            ) as process:
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=timeout)
+                    logging.info(f"Oracle: Finished test {os.path.basename(verifier_dir)} on {os.path.basename(candidate_dir)}")
+                    
+                    if process.returncode == 0:
+                        return "PASS"
+                    else:
+                        return "FAIL"
+                except asyncio.TimeoutError:
+                    return "TIMEOUT"
                 
         except Exception as e:
             import logging
-            import signal
             logging.error(f"Oracle Execution Error: {e}")
-            # Ensure process is reaped if it was created
-            if process:
-                try:
-                    pgid = os.getpgid(process.pid)
-                    os.killpg(pgid, signal.SIGKILL)
-                    await process.wait()
-                except:
-                    pass
             return "ERROR"
         finally:
             # Cleanup (also offloaded to thread to avoid blocking on large deletes)

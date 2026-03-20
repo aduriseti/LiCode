@@ -7,7 +7,7 @@ import sys
 import shutil
 import pytest
 
-@pytest.mark.timeout(400)
+@pytest.mark.timeout(300)
 def test_elo_tournament_e2e():
     """
     Runs an end-to-end test of the ELO tournament CLI with 4 agents.
@@ -16,6 +16,7 @@ def test_elo_tournament_e2e():
     # Setup test parameters
     max_duration = 180 
     num_agents = 4 # 2 candidates, 2 testers (1:1 ratio)
+    test_uuid = str(time.time())
     
     # Refined Prompt to reduce agent confusion
     prompt = "Implement a function fib(n: int) -> int in a file named solution.py that returns the nth Fibonacci number (fib(0)=0, fib(1)=1). Testing agents: Your tests MUST import fib from solution.py."
@@ -32,10 +33,30 @@ def test_elo_tournament_e2e():
     ]
     
     print(f"Running ELO tournament: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    env = os.environ.copy()
+    env["LICODE_TEST_UUID"] = test_uuid
+    result = subprocess.run(cmd, capture_output=True, text=True, env=env)
     
     print("STDOUT:", result.stdout)
     print("STDERR:", result.stderr)
+    
+    # Give OS time to process kills
+    time.sleep(5)
+    
+    # Check for process leaks using the UUID
+    import psutil
+    leaked_details = []
+    for proc in psutil.process_iter(['pid', 'name', 'environ', 'cmdline']):
+        try:
+            p_env = proc.info.get('environ') or {}
+            p_cmdline = proc.info.get('cmdline') or []
+            if p_env.get("LICODE_TEST_UUID") == test_uuid or any(test_uuid in arg for arg in p_cmdline):
+                details = f"PID {proc.info['pid']} ({proc.info['name']}): {' '.join(proc.info['cmdline'])}"
+                leaked_details.append(details)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    
+    assert len(leaked_details) == 0, f"Tournament leaked processes with UUID {test_uuid}:\n" + "\n".join(leaked_details)
     
     assert result.returncode == 0, f"ELO CLI failed with code {result.returncode}"
     

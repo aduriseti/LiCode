@@ -431,6 +431,16 @@ class EloOrchestrator(BaseOrchestrator):
                     "tests": [v.id for v in top_3]
                 })
 
+    async def shutdown(self):
+        """Shut down all agents and cleanup resources."""
+        logging.info("EloOrchestrator: Shutting down agents...")
+        for session in list(self.agent_sessions.values()):
+            try:
+                await session.shutdown()
+            except Exception as e:
+                logging.error(f"Error shutting down agent {session.agent_id}: {e}")
+        self.agent_sessions.clear()
+
     async def run_tournament(self) -> Dict[str, Any]:
         """Main tournament loop."""
         await self.initialize()
@@ -447,9 +457,7 @@ class EloOrchestrator(BaseOrchestrator):
         except asyncio.CancelledError:
             pass
         finally:
-            logging.info("Shutting down agents...")
-            for session in self.agent_sessions.values():
-                await session.shutdown()
+            await self.shutdown()
                 
         return {
             "winner_id": self.get_winner_id(),

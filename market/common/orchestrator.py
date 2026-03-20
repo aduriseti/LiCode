@@ -60,6 +60,12 @@ class BaseOrchestrator(ABC):
         pass
 
     @abstractmethod
-    def get_winner_diff(self) -> str:
-        """Returns the diff of the winning candidate."""
+    async def shutdown(self):
+        """Cleanly shuts down all runners, agents and subprocesses."""
         pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.shutdown()

@@ -61,38 +61,37 @@ async def async_main():
         
         logger.info(f"ELO Tournament Arena initialized at: {arena_dir}")
         
-        orch = EloOrchestrator(
+        async with EloOrchestrator(
             prompt=args.prompt, 
             base_dir=arena_dir, 
             max_duration=args.max_duration,
             model=args.model,
             provider=args.provider
-        )
-        
-        # Add agents with round-robin roles (1:1 ratio)
-        for i in range(args.agents):
-            agent_id = f"agent_{i}"
-            if i % 2 == 1:
-                await orch.add_tester(agent_id=agent_id)
-            else:
-                await orch.add_candidate(agent_id=agent_id)
+        ) as orch:
+            # Add agents with round-robin roles (1:1 ratio)
+            for i in range(args.agents):
+                agent_id = f"agent_{i}"
+                if i % 2 == 1:
+                    await orch.add_tester(agent_id=agent_id)
+                else:
+                    await orch.add_candidate(agent_id=agent_id)
+                
+            # Run tournament
+            results = await orch.run_tournament()
             
-        # Run tournament
-        results = await orch.run_tournament()
-        
-        logger.info(f"Tournament Finished. Leaderboard: {json.dumps(results, indent=2)}")
-        
-        # Save final results
-        with open(os.path.join(arena_dir, "elo_results.json"), "w") as f:
-            json.dump(results, f, indent=2)
+            logger.info(f"Tournament Finished. Leaderboard: {json.dumps(results, indent=2)}")
             
-        # Extract and save winning patch
-        winning_diff = orch.get_winner_diff()
-        if winning_diff:
-            patch_path = os.path.join(arena_dir, "submissions", "winning_patch.diff")
-            with open(patch_path, "w") as f:
-                f.write(winning_diff)
-            logger.info(f"Winning patch saved to {patch_path}")
+            # Save final results
+            with open(os.path.join(arena_dir, "elo_results.json"), "w") as f:
+                json.dump(results, f, indent=2)
+                
+            # Extract and save winning patch
+            winning_diff = orch.get_winner_diff()
+            if winning_diff:
+                patch_path = os.path.join(arena_dir, "submissions", "winning_patch.diff")
+                with open(patch_path, "w") as f:
+                    f.write(winning_diff)
+                logger.info(f"Winning patch saved to {patch_path}")
 
 def main():
     asyncio.run(async_main())

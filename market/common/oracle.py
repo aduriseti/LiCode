@@ -7,6 +7,7 @@ import uuid
 import signal
 from enum import StrEnum
 from typing import Optional, Tuple
+from contextlib import asynccontextmanager
 
 class ResultType(StrEnum):
     PASS = "PASS"
@@ -78,6 +79,21 @@ class CommonOracle:
         return temp_dir
 
     @staticmethod
+    @asynccontextmanager
+    async def sandbox(candidate_dir: str, verifier_dir: Optional[str] = None, patch_content: Optional[str] = None):
+        """RAII Sandbox: Creates a temporary directory and ensures it is wiped on exit."""
+        temp_dir = None
+        try:
+            if verifier_dir:
+                temp_dir = await asyncio.to_thread(CommonOracle._setup_sandbox_legacy, candidate_dir, verifier_dir)
+            else:
+                temp_dir = await CommonOracle._setup_sandbox_patch(candidate_dir, patch_content)
+            yield temp_dir
+        finally:
+            if temp_dir and os.path.exists(temp_dir):
+                await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
+
+    @staticmethod
     async def run_test(
         candidate_dir: str, 
         verifier_dir: Optional[str] = None, 
@@ -85,35 +101,36 @@ class CommonOracle:
         entrypoint: Optional[str] = None
     ) -> Tuple[ResultType, str, str]:
         """
-        Runs a test and returns (Result, stdout, stderr).
+        Runs a test using RAII for both the sandbox and the process.
         """
-        temp_dir = None
+        from market.common.process_registry import registry
+        
         try:
-            if verifier_dir:
-                temp_dir = await asyncio.to_thread(CommonOracle._setup_sandbox_legacy, candidate_dir, verifier_dir)
-                cmd = ["./run.sh"]
-            elif entrypoint:
-                temp_dir = await CommonOracle._setup_sandbox_patch(candidate_dir, patch_content)
-                cmd = ["bash", "-c", entrypoint]
-            else:
-                return ResultType.ERROR, "", "No verifier_dir or entrypoint provided"
+            async with CommonOracle.sandbox(candidate_dir, verifier_dir, patch_content) as temp_dir:
+                if verifier_dir:
+                    cmd = ["./run.sh"]
+                elif entrypoint:
+                    cmd = ["bash", "-c", entrypoint]
+                else:
+                    return ResultType.ERROR, "", "No verifier_dir or entrypoint provided"
 
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=temp_dir,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True
-            )
-
-            stdout, stderr = await process.communicate()
-            res_stdout = stdout.decode(errors='replace')
-            res_stderr = stderr.decode(errors='replace')
-            
-            if process.returncode == 0:
-                return ResultType.PASS, res_stdout, res_stderr
-            else:
-                return ResultType.FAIL, res_stdout, res_stderr
+                async with registry.spawn(
+                    *cmd, 
+                    cwd=temp_dir, 
+                    stdout=asyncio.subprocess.PIPE, 
+                    stderr=asyncio.subprocess.PIPE
+                ) as process:
+                    try:
+                        stdout_data, stderr_data = await asyncio.wait_for(process.communicate(), timeout=60.0)
+                        res_stdout = stdout_data.decode(errors='replace') if stdout_data else ""
+                        res_stderr = stderr_data.decode(errors='replace') if stderr_data else ""
+                        
+                        if process.returncode == 0:
+                            return ResultType.PASS, res_stdout, res_stderr
+                        else:
+                            return ResultType.FAIL, res_stdout, res_stderr
+                    except asyncio.TimeoutError:
+                        return ResultType.TIMEOUT, "", "Test execution timed out after 60 seconds"
                 
         except PatchApplyError as e:
             logging.error(f"Patch Error: {e}")
@@ -121,6 +138,3 @@ class CommonOracle:
         except Exception as e:
             logging.error(f"Oracle Error: {e}")
             return ResultType.ERROR, "", str(e)
-        finally:
-            if temp_dir and os.path.exists(temp_dir):
-                await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)

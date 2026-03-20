@@ -4,6 +4,7 @@ import asyncio
 import logging
 import subprocess
 from typing import List
+from market.common.process_registry import registry
 
 DEFAULT_EXCLUDE_LIST = [
     ".arenas", 
@@ -70,23 +71,23 @@ class WorkspaceManager:
             os.makedirs(os.path.dirname(dest_dir), exist_ok=True)
 
             # 1. Clean Baseline from Git (Only committed files)
-        proc = await asyncio.create_subprocess_exec(
+        async with registry.spawn(
             "git", "clone", "--depth", "1", "--single-branch", "--no-hardlinks", f"file://{src}", dest_dir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(f"Git clone failed (code {proc.returncode}): {stderr.decode()}")
+        ) as proc:
+            stdout, stderr = await proc.communicate()
+            if proc.returncode != 0:
+                raise RuntimeError(f"Git clone failed (code {proc.returncode}): {stderr.decode()}")
         
         # 2. Safety: Remove origin to prevent accidental pushes/leaks
-        proc = await asyncio.create_subprocess_exec(
+        async with registry.spawn(
             "git", "remote", "remove", "origin",
             cwd=dest_dir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
-        )
-        await proc.communicate()
+        ) as proc:
+            await proc.communicate()
         
         # 3. Add to git exclude
         def update_git_exclude():
@@ -104,15 +105,16 @@ class WorkspaceManager:
             exclude_args_tar += ' --exclude=".arenas"'
             
         tar_cmd = f"git ls-files -co --exclude-standard -z | tar -c --null {exclude_args_tar} -T - | tar -x -C \"{dest_dir}\""
-        proc = await asyncio.create_subprocess_shell(
+        async with registry.spawn(
             tar_cmd,
             cwd=src,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        await proc.communicate()
-        if proc.returncode != 0:
-            raise RuntimeError(f"Tar pipeline failed")
+            stderr=asyncio.subprocess.PIPE,
+            shell=True
+        ) as proc:
+            await proc.communicate()
+            if proc.returncode != 0:
+                raise RuntimeError(f"Tar pipeline failed")
 
         # 5. Finalize Worktree (Baseline Diff & Shadow Config)
         await self._finalize_worktree(dest_dir)
@@ -120,19 +122,19 @@ class WorkspaceManager:
     async def _finalize_worktree(self, dest_dir: str):
         """Common finalization steps for a worktree."""
         # Stage changes
-        proc = await asyncio.create_subprocess_exec(
+        async with registry.spawn(
             "git", "add", "-N", ".",
             cwd=dest_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-        )
-        await proc.communicate()
+        ) as proc:
+            await proc.communicate()
         
         # Create baseline.diff
         with open(os.path.join(dest_dir, "baseline.diff"), "w") as f:
-            proc = await asyncio.create_subprocess_exec(
+            async with registry.spawn(
                 "git", "diff", "HEAD",
                 cwd=dest_dir, stdout=f, stderr=asyncio.subprocess.PIPE
-            )
-            await proc.communicate()
+            ) as proc:
+                await proc.communicate()
 
         # Fix permissions
         def fix_permissions():
@@ -147,19 +149,19 @@ class WorkspaceManager:
 
         # Shadow Git Config
         for key, val in [("user.email", "market@local"), ("user.name", "Market Oracle")]:
-            proc = await asyncio.create_subprocess_exec(
+            async with registry.spawn(
                 "git", "config", key, val,
                 cwd=dest_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-            await proc.communicate()
+            ) as proc:
+                await proc.communicate()
         
         # Initial Commit
         for cmd_args in [["add", "."], ["commit", "--allow-empty", "-m", "Initial Baseline"]]:
-            proc = await asyncio.create_subprocess_exec(
+            async with registry.spawn(
                 "git", *cmd_args,
                 cwd=dest_dir, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-            )
-            await proc.communicate()
+            ) as proc:
+                await proc.communicate()
 
     @staticmethod
     def get_diff(worktree_dir: str) -> str:
@@ -174,12 +176,12 @@ class WorkspaceManager:
     @staticmethod
     async def apply_patch(worktree_dir: str, patch_content: str) -> bool:
         """Applies a git patch to the worktree."""
-        proc = await asyncio.create_subprocess_exec(
+        async with registry.spawn(
             "git", "apply", "-",
             cwd=worktree_dir,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await proc.communicate(input=patch_content.encode())
-        return proc.returncode == 0
+        ) as proc:
+            stdout, stderr = await proc.communicate(input=patch_content.encode())
+            return proc.returncode == 0

@@ -32,6 +32,7 @@ from rich.console import Console
 from market.orchestrator import Orchestrator
 from market.core.state import MarketState
 from market.common.evaluator import StatusManager, SWEBenchInstanceRunner, get_patch_from_winner
+from market.common.process_registry import registry
 from market.core import docker
 
 try:
@@ -94,45 +95,48 @@ async def run_market_tournament(instance_id, work_dir, container_id, args):
     try:
         status_mgr.update_status(instance_id, "Setting Up Market")
         with open(log_file_path, "w") as log_file:
-            process = await asyncio.create_subprocess_exec(
+            async with registry.spawn(
                 *market_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 limit=1024 * 1024 * 32,
-            )
+            ) as process:
 
-            while True:
-                line_bytes = await process.stdout.readline()
-                if not line_bytes:
-                    break
-                line = line_bytes.decode('utf-8', errors='replace')
-                log_file.write(line)
-                log_file.flush()
-                
-                if not line.strip():
-                    continue
-                try:
-                    msg = json.loads(line)
-                    if msg.get("type") == "log":
-                        text = msg.get("message", "")
-                        if text.startswith("Dashboard active at "):
-                            url = text.replace("Dashboard active at ", "").strip()
-                            status_mgr.set_dashboard_url(instance_id, url)
-                            sys.stderr.write(f"\nDashboard active at {url}\n")
-                            sys.stderr.flush()
-                        elif "Starting Round" in text:
-                            status_mgr.update_status(instance_id, text)
-                        elif "Convergence reached" in text:
-                            status_mgr.update_status(instance_id, "Convergence Detected")
-                    elif msg.get("type") == "final_result" or ("state" in msg and "report" in msg):
-                        data = msg
-                except json.JSONDecodeError:
-                    continue
+                while True:
+                    line_bytes = await process.stdout.readline()
+                    if not line_bytes:
+                        break
+                    line = line_bytes.decode('utf-8', errors='replace')
+                    log_file.write(line)
+                    log_file.flush()
+                    
+                    if not line.strip():
+                        continue
+                    try:
+                        msg = json.loads(line)
+                        if msg.get("type") == "log":
+                            text = msg.get("message", "")
+                            if text.startswith("Dashboard active at "):
+                                url = text.replace("Dashboard active at ", "").strip()
+                                status_mgr.set_dashboard_url(instance_id, url)
+                                sys.stderr.write(f"\nDashboard active at {url}\n")
+                                sys.stderr.flush()
+                            elif "Starting Round" in text:
+                                status_mgr.update_status(instance_id, text)
+                            elif "Convergence reached" in text:
+                                status_mgr.update_status(instance_id, "Convergence Detected")
+                        elif msg.get("type") == "final_result" or ("state" in msg and "report" in msg):
+                            data = msg
+                    except json.JSONDecodeError:
+                        continue
 
-            await process.wait()
-            if process.returncode != 0:
-                status_mgr.update_status(instance_id, f"Market Failed (Code {process.returncode})")
-                return None
+                # The process will be automatically group-killed on exit from the 'async with' block.
+                if process.returncode is None:
+                    await process.wait()
+                    
+                if process.returncode != 0:
+                    status_mgr.update_status(instance_id, f"Market Failed (Code {process.returncode})")
+                    return None
     except Exception as e:
         status_mgr.update_status(instance_id, f"Error: {e}")
         return None
@@ -235,19 +239,19 @@ async def async_main():
             "--namespace", "ghcr.io/epoch-research"
         ]
         
-        eval_proc = await asyncio.create_subprocess_exec(
+        async with registry.spawn(
             *eval_cmd, cwd=output_dir, env={**os.environ, "FORCE_COLOR": "1", "TERM": "xterm-256color"},
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
-        )
-        
-        while True:
-            line_bytes = await eval_proc.stdout.readline()
-            if not line_bytes: break
-            line = line_bytes.decode('utf-8', errors='replace')
-            sys.stdout.write(line)
-            sys.stdout.flush()
+        ) as eval_proc:
+            while True:
+                line_bytes = await eval_proc.stdout.readline()
+                if not line_bytes: break
+                line = line_bytes.decode('utf-8', errors='replace')
+                sys.stdout.write(line)
+                sys.stdout.flush()
 
-        await eval_proc.wait()
+            if eval_proc.returncode is None:
+                await eval_proc.wait()
 
 if __name__ == "__main__":
     asyncio.run(async_main())

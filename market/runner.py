@@ -10,6 +10,7 @@ import asyncio
 import json
 import glob
 import signal
+import contextlib
 from typing import List, Dict, Optional, Union
 from collections import deque
 
@@ -60,7 +61,7 @@ class DashboardLogHandler(logging.Handler):
         except Exception:
             pass
 
-from .common.server import start_opencode_server, stop_server, find_free_port
+from .common.server import start_opencode_server, find_free_port
 
 class MarketRunner:
     """
@@ -74,6 +75,7 @@ class MarketRunner:
                  agent_timeout: float = 300.0, dashboard: bool = False,
                  max_retries: int = 3, initial_backoff: float = 120.0, 
                  max_backoff: float = 1000.0):
+        self._exit_stack = contextlib.AsyncExitStack()
         self.run_id = f"run_{int(time.time())}"
         self.orchestrator = Orchestrator(prompt, n_agents, budget, base_dir=os.path.abspath(os.path.join("./.arenas", self.run_id)))
         self.arena_dir = self.orchestrator.base_dir
@@ -341,9 +343,11 @@ class MarketRunner:
                 if aid in self.agent_servers:
                     proc = self.agent_servers[aid]
                     try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                        import market.common.process_registry
+                        await market.common.process_registry.registry.kill_process_tree(proc)
                     except:
-                        proc.terminate()
+                        try: proc.terminate()
+                        except: pass
                     del self.agent_servers[aid]
                 
                 if attempt == 2:
@@ -356,7 +360,7 @@ class MarketRunner:
     async def _start_agent_server(self, agent_id: str, port: int, model: str, provider: str) -> asyncio.subprocess.Process:
         cand_id = agent_id.replace("agent", "cand")
         agent_dir = os.path.join(self.arena_dir, "worktrees", cand_id)
-        return await start_opencode_server(
+        ctx = start_opencode_server(
             agent_id=cand_id, 
             agent_dir=agent_dir, 
             port=port, 
@@ -364,12 +368,7 @@ class MarketRunner:
             provider=provider, 
             traces_dir=self.traces_dir
         )
-
-    def _stop_servers(self):
-        for aid, proc in self.agent_servers.items():
-            logging.info(f"Stopping server for {aid}...")
-            stop_server(proc)
-        self.agent_servers.clear()
+        return await self._exit_stack.enter_async_context(ctx)
 
     async def run_loop(self, max_rounds: int, stream_ui: bool = True, json_logs: bool = False):
         """
@@ -486,19 +485,14 @@ class MarketRunner:
 
     async def close(self):
         """Cleanly shutdown all remaining resources."""
-        self._stop_servers()
+        await self._exit_stack.aclose()
         
         if self.dashboard_proc:
             try:
-                pgid = os.getpgid(self.dashboard_proc.pid)
-                os.killpg(pgid, signal.SIGTERM)
-                await asyncio.wait_for(self.dashboard_proc.wait(), timeout=2.0)
+                import market.common.process_registry
+                await market.common.process_registry.registry.kill_process_tree(self.dashboard_proc)
             except:
-                if self.dashboard_proc:
-                    try: 
-                        pgid = os.getpgid(self.dashboard_proc.pid)
-                        os.killpg(pgid, signal.SIGKILL)
-                    except: pass
+                pass
             
             if hasattr(self, "dash_log_file") and self.dash_log_file:
                 try: self.dash_log_file.close()

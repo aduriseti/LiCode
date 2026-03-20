@@ -265,7 +265,8 @@ class EloAgent(BaseAgent):
         self.port = find_free_port()
         self.client = AsyncOpencode(base_url=f"http://127.0.0.1:{self.port}", timeout=self.timeout, max_retries=0)
         
-        self.process = await start_opencode_server(
+        # RAII: Use the server context manager
+        self._server_cm = start_opencode_server(
             agent_id=self.agent_id,
             agent_dir=self.worktree_dir,
             port=self.port,
@@ -273,6 +274,7 @@ class EloAgent(BaseAgent):
             provider=self.provider,
             traces_dir=os.path.dirname(self.trace_path) if self.trace_path else "/tmp"
         )
+        self.process = await self._server_cm.__aenter__()
         
         await self.initialize_session(self._get_system_prompt())
         self._loop_task = asyncio.create_task(self._run_loop(initial_prompt))
@@ -319,12 +321,13 @@ class EloAgent(BaseAgent):
 
     async def shutdown(self):
         """Stops the loop and server."""
-        from market.common.server import stop_server
         if self._loop_task and not self._loop_task.done():
             self._loop_task.cancel()
         await super().shutdown()
-        stop_server(self.process)
-        self.process = None
+        
+        if hasattr(self, "_server_cm"):
+            await self._server_cm.__aexit__(None, None, None)
+            self.process = None
 
 class CandidateAgent(EloAgent):
     def __init__(self, agent_id: str, worktree_dir: str, model: str = "gemini-3-flash", 

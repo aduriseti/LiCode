@@ -146,84 +146,72 @@ async def validate_config_with_api(args, parser):
     else:
         raise RuntimeError("Fatal: Neither 'opencode' nor 'npx' found in PATH. Ensure Node.js and the opencode package are installed.")
 
-    process = await asyncio.create_subprocess_exec(
+    from market.common.process_registry import registry
+    async with registry.spawn(
         *cmd_args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
-    )
-    
-    try:
-        # Wait for server to be ready (poll for up to 10s)
-        client = AsyncOpencode(base_url=api_url, timeout=2.0)
-        all_providers = {}
-        
-        start_wait = time.time()
-        while (time.time() - start_wait) < 10:
-            try:
-                res = await client.app.providers()
-                if res.providers:
-                    all_providers = {p.id: p for p in res.providers}
-                    break
-            except Exception:
-                await asyncio.sleep(0.2)
-        
-        if not all_providers:
-            stdout_text = (await process.stdout.read()).decode()
-            stderr_text = (await process.stderr.read()).decode()
-            error_msg = f"Failed to initialize ephemeral OpenCode API for validation on port {port}."
-            if stdout_text:
-                error_msg += f"\nStdout: {stdout_text}"
-            if stderr_text:
-                error_msg += f"\nStderr: {stderr_text}"
-            parser.error(error_msg)
-
-        hydrated_models = []
-        hydrated_providers = []
-
-        # 1. Hydrate Providers
-        if hasattr(args, 'provider') and args.provider:
-            for p_id in args.provider:
-                if p_id not in all_providers:
-                    close_matches = difflib.get_close_matches(p_id, list(all_providers.keys()))
-                    suggestion = f" Did you mean: {', '.join(close_matches)}?" if close_matches else ""
-                    parser.error(f"Provider '{p_id}' not found in OpenCode API.{suggestion} Available: {sorted(all_providers.keys())}")
-                
-                p_obj = all_providers[p_id]
-                hydrated_providers.append(p_obj)
-
-        # 2. Hydrate Models
-        if hasattr(args, 'model') and args.model:
-            for m_str in args.model:
-                parts = m_str.split('/')
-                target_p = parts[0] if len(parts) > 1 else (args.provider[0] if getattr(args, 'provider', None) else "opencode")
-                target_m = parts[1] if len(parts) > 1 else m_str
-
-                if target_p not in all_providers:
-                     close_matches = difflib.get_close_matches(target_p, list(all_providers.keys()))
-                     suggestion = f" Did you mean: {', '.join(close_matches)}?" if close_matches else ""
-                     parser.error(f"Model '{m_str}' references unknown provider '{target_p}'.{suggestion} Available: {sorted(all_providers.keys())}")
-                
-                provider_models = all_providers[target_p].models
-                if target_m not in provider_models:
-                    close_matches = difflib.get_close_matches(target_m, list(provider_models.keys()))
-                    suggestion = f" Did you mean: {', '.join(close_matches)}?" if close_matches else ""
-                    parser.error(f"Model '{target_m}' not found for provider '{target_p}'.{suggestion} Available: {sorted(provider_models.keys())}")
-                
-                m_obj = provider_models[target_m]
-                hydrated_models.append(m_obj)
-
-        # 3. Final Pydantic Structural Validation
+    ) as process:
         try:
-            TournamentConfig(models=hydrated_models, providers=hydrated_providers)
-        except Exception as e:
-            parser.error(f"Configuration structural mismatch with OpenCode schemas: {e}")
+            # Wait for server to be ready (poll for up to 10s)
+            client = AsyncOpencode(base_url=api_url, timeout=2.0)
+            all_providers = {}
+            
+            start_wait = time.time()
+            while (time.time() - start_wait) < 10:
+                try:
+                    res = await client.app.providers()
+                    if res.providers:
+                        all_providers = {p.id: p for p in res.providers}
+                        break
+                except Exception:
+                    await asyncio.sleep(0.2)
+            
+            if not all_providers:
+                # We can't easily read from process.stdout here without potential deadlock if it's still running,
+                # but registry.spawn context manager will handle killing it if we raise an error.
+                parser.error(f"Failed to initialize ephemeral OpenCode API for validation on port {port}.")
 
-    finally:
-        # 4. Guaranteed Cleanup of ephemeral server
-        if process.returncode is None:
+            hydrated_models = []
+            hydrated_providers = []
+
+            # 1. Hydrate Providers
+            if hasattr(args, 'provider') and args.provider:
+                for p_id in args.provider:
+                    if p_id not in all_providers:
+                        close_matches = difflib.get_close_matches(p_id, list(all_providers.keys()))
+                        suggestion = f" Did you mean: {', '.join(close_matches)}?" if close_matches else ""
+                        parser.error(f"Provider '{p_id}' not found in OpenCode API.{suggestion} Available: {sorted(all_providers.keys())}")
+                    
+                    p_obj = all_providers[p_id]
+                    hydrated_providers.append(p_obj)
+
+            # 2. Hydrate Models
+            if hasattr(args, 'model') and args.model:
+                for m_str in args.model:
+                    parts = m_str.split('/')
+                    target_p = parts[0] if len(parts) > 1 else (args.provider[0] if getattr(args, 'provider', None) else "opencode")
+                    target_m = parts[1] if len(parts) > 1 else m_str
+
+                    if target_p not in all_providers:
+                         close_matches = difflib.get_close_matches(target_p, list(all_providers.keys()))
+                         suggestion = f" Did you mean: {', '.join(close_matches)}?" if close_matches else ""
+                         parser.error(f"Model '{m_str}' references unknown provider '{target_p}'.{suggestion} Available: {sorted(all_providers.keys())}")
+                    
+                    provider_models = all_providers[target_p].models
+                    if target_m not in provider_models:
+                        close_matches = difflib.get_close_matches(target_m, list(provider_models.keys()))
+                        suggestion = f" Did you mean: {', '.join(close_matches)}?" if close_matches else ""
+                        parser.error(f"Model '{target_m}' not found for provider '{target_p}'.{suggestion} Available: {sorted(provider_models.keys())}")
+                    
+                    m_obj = provider_models[target_m]
+                    hydrated_models.append(m_obj)
+
+            # 3. Final Pydantic Structural Validation
             try:
-                process.terminate()
-                await asyncio.wait_for(process.wait(), timeout=5.0)
-            except Exception:
-                try: process.kill()
-                except: pass
+                TournamentConfig(models=hydrated_models, providers=hydrated_providers)
+            except Exception as e:
+                parser.error(f"Configuration structural mismatch with OpenCode schemas: {e}")
+
+        except Exception as e:
+            raise e

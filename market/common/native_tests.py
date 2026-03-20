@@ -3,6 +3,7 @@ import subprocess
 import logging
 import asyncio
 from typing import Optional, Tuple
+from market.common.process_registry import registry
 
 class NativeTestIdentifier:
     """
@@ -48,11 +49,12 @@ class NativeTestIdentifier:
         """
         Runs the native test suite.
         """
-        proc = await asyncio.create_subprocess_shell(
+        async with registry.spawn(
             entrypoint,
             cwd=worktree_dir,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await proc.communicate()
-        return proc.returncode == 0, stdout.decode(errors='replace'), stderr.decode(errors='replace')
+            stderr=asyncio.subprocess.PIPE,
+            shell=True
+        ) as proc:
+            stdout, stderr = await proc.communicate()
+            return proc.returncode == 0, stdout.decode(errors='replace'), stderr.decode(errors='replace')

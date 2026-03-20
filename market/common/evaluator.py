@@ -12,6 +12,7 @@ from rich import box
 
 from market.common.orchestrator import BaseOrchestrator
 from market.common.workspace import DEFAULT_EXCLUDE_LIST
+from market.common.process_registry import registry
 from market.core import docker
 
 logger = logging.getLogger(__name__)
@@ -183,15 +184,15 @@ class SWEBenchInstanceRunner:
                 os.makedirs(work_dir, exist_ok=True)
 
                 repo_url = f"https://github.com/{repo}.git"
-                clone_proc = await asyncio.create_subprocess_exec(
+                async with registry.spawn(
                     "git", "clone", repo_url, work_dir,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
-                )
-                await clone_proc.communicate()
-                if clone_proc.returncode != 0:
-                    self.status_mgr.update_status(instance_id, "Clone Failed")
-                    return None
+                ) as clone_proc:
+                    await clone_proc.communicate()
+                    if clone_proc.returncode != 0:
+                        self.status_mgr.update_status(instance_id, "Clone Failed")
+                        return None
 
                 # Git exclude
                 exclude_path = os.path.join(work_dir, ".git", "info", "exclude")
@@ -201,16 +202,16 @@ class SWEBenchInstanceRunner:
                             f.write(f"\n{ex}/\n")
 
                 self.status_mgr.update_status(instance_id, "Checking Out Commit")
-                checkout_proc = await asyncio.create_subprocess_exec(
+                async with registry.spawn(
                     "git", "checkout", base_commit,
                     cwd=work_dir,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
-                )
-                await checkout_proc.communicate()
-                if checkout_proc.returncode != 0:
-                    self.status_mgr.update_status(instance_id, "Checkout Failed")
-                    return None
+                ) as checkout_proc:
+                    await checkout_proc.communicate()
+                    if checkout_proc.returncode != 0:
+                        self.status_mgr.update_status(instance_id, "Checkout Failed")
+                        return None
 
                 problem_path = os.path.join(work_dir, "problem.md")
                 with open(problem_path, "w") as f:
@@ -231,23 +232,24 @@ class SWEBenchInstanceRunner:
                 container_id = await docker.start_container(image_name, work_dir, licode_host_path, opencode_host_path)
 
                 self.status_mgr.update_status(instance_id, "Bootstrapping Dependencies")
-                await asyncio.create_subprocess_exec(
+                async with registry.spawn(
                     "docker", "exec", container_id, "git", "config", "--global", "--add", "safe.directory", "*",
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                )
+                ) as bootstrap_git_proc:
+                    await bootstrap_git_proc.communicate()
 
                 async with self.setup_lock:
                     self.status_mgr.update_status(instance_id, "Running Container Setup")
                     setup_env = "PATH=/root/.bun/bin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-                    bootstrap_proc = await asyncio.create_subprocess_exec(
+                    async with registry.spawn(
                         "docker", "exec", "-w", "/licode", "-e", setup_env,
                         container_id, "make", "setup", "PIP=/opt/miniconda3/bin/pip", "PYTHON=/opt/miniconda3/bin/python3",
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                    )
-                    await bootstrap_proc.communicate()
-                    if bootstrap_proc.returncode != 0:
-                        self.status_mgr.update_status(instance_id, "Setup Failed")
-                        return None
+                    ) as bootstrap_proc:
+                        await bootstrap_proc.communicate()
+                        if bootstrap_proc.returncode != 0:
+                            self.status_mgr.update_status(instance_id, "Setup Failed")
+                            return None
 
                 # Tournament Run
                 orch = await run_tournament_func(instance_id, work_dir, container_id, args)
@@ -257,10 +259,11 @@ class SWEBenchInstanceRunner:
 
                 self.status_mgr.update_status(instance_id, "Fixing Permissions")
                 uid, gid = os.getuid(), os.getgid()
-                await asyncio.create_subprocess_exec(
+                async with registry.spawn(
                     "docker", "exec", container_id, "chown", "-R", f"{uid}:{gid}", "/testbed",
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                )
+                ) as chown_proc:
+                    await chown_proc.communicate()
 
                 self.status_mgr.update_status(instance_id, "Extracting Patch")
                 patch = await asyncio.to_thread(get_patch_from_winner, work_dir, orch)

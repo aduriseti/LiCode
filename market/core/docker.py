@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import uuid
+from market.common.process_registry import registry
 
 def get_image_name(instance_id: str) -> str:
     """
@@ -14,14 +15,14 @@ async def pull_image(image_name: str) -> None:
     Pulls a Docker image if it's not already present locally.
     """
     logging.info(f"Pulling Docker image {image_name}...")
-    proc = await asyncio.create_subprocess_exec(
+    async with registry.spawn(
         "docker", "pull", image_name,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
-    )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(f"Failed to pull image {image_name}:\n{stderr.decode()}")
+    ) as proc:
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(f"Failed to pull image {image_name}:\n{stderr.decode()}")
     logging.info(f"Successfully pulled {image_name}")
 
 async def start_container(image_name: str, workspace_host_path: str, licode_host_path: str = None, opencode_host_path: str = None) -> str:
@@ -46,26 +47,26 @@ async def start_container(image_name: str, workspace_host_path: str, licode_host
     # We want a sleep command to keep it alive indefinitely until we kill it
     args.extend([image_name, "tail", "-f", "/dev/null"])
     
-    proc = await asyncio.create_subprocess_exec(
+    async with registry.spawn(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
-    )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(f"Failed to start container:\n{stderr.decode()}")
+    ) as proc:
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            raise RuntimeError(f"Failed to start container:\n{stderr.decode()}")
         
-    return stdout.decode().strip()
+        return stdout.decode().strip()
 
 async def stop_container(container_id: str) -> None:
     """
     Stops and removes a running Docker container forcefully.
     """
-    proc = await asyncio.create_subprocess_exec(
+    async with registry.spawn(
         "docker", "rm", "-f", container_id,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
-    )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        logging.warning(f"Failed to cleanly stop container {container_id}: {stderr.decode()}")
+    ) as proc:
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            logging.warning(f"Failed to cleanly stop container {container_id}: {stderr.decode()}")

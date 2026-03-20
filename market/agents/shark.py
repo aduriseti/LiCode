@@ -17,6 +17,7 @@ from opencode_ai.types.event_list_response import EventMessagePartUpdated
 
 from ..core.state import MarketState
 from ..orchestrator import AgentAction
+from ..common.process_registry import registry
 
 class LLMResponseError(Exception):
     """Raised when the LLM returns an invalid or non-JSON response."""
@@ -228,24 +229,23 @@ You must output a single JSON object.
             
             try:
                 # Use Shadow Git: Stage changes -> Diff against Baseline
-                # We need to stage current changes first to capture them
                 # Note: We do NOT commit, just update the index for the diff
-                proc_add = await asyncio.create_subprocess_shell(
-                    "git add .", 
+                async with registry.spawn(
+                    "git", "add", ".", 
                     cwd=asset.code_path,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.DEVNULL
-                )
-                await proc_add.wait()
+                ) as proc_add:
+                    await proc_add.wait()
                 
                 # Run git diff --cached HEAD
-                proc_diff = await asyncio.create_subprocess_exec(
+                async with registry.spawn(
                     "git", "diff", "--cached", "HEAD",
                     cwd=asset.code_path,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await proc_diff.communicate()
+                ) as proc_diff:
+                    stdout, stderr = await proc_diff.communicate()
                 
                 if proc_diff.returncode != 0:
                     return f"--- {aid} Diff ---\n(Error generating diff: {stderr.decode()})"

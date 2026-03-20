@@ -6,6 +6,7 @@ import logging
 import asyncio
 import signal
 from typing import Optional
+from contextlib import asynccontextmanager
 
 def find_free_port() -> int:
     import random
@@ -21,6 +22,7 @@ def find_free_port() -> int:
         s.bind(('', 0))
         return s.getsockname()[1]
 
+@asynccontextmanager
 async def start_opencode_server(
     agent_id: str, 
     agent_dir: str, 
@@ -28,7 +30,8 @@ async def start_opencode_server(
     model: str, 
     provider: str, 
     traces_dir: str
-) -> asyncio.subprocess.Process:
+):
+    from market.common.process_registry import registry
     if not os.path.exists(agent_dir):
         os.makedirs(agent_dir, exist_ok=True)
 
@@ -109,29 +112,28 @@ async def start_opencode_server(
     agent_log = os.path.join(traces_dir, f"{agent_id}_opencode_serve.log")
     
     with open(agent_log, "w") as f:
-        proc = await asyncio.create_subprocess_exec(
+        # RAII Process for the server
+        async with registry.spawn(
             "opencode", "serve", "--port", str(port), "--hostname=127.0.0.1",
             "--print-logs", "--log-level", "DEBUG",
-            stdout=f, stderr=f, cwd=agent_dir, env=env, start_new_session=True
-        )
-        start_time = time.time()
-        while time.time() - start_time < 30:
-            if getattr(proc, 'returncode', None) is not None:
-                raise RuntimeError(f"Server for {agent_id} failed to start. See {agent_log}")
-            try:
-                _, writer = await asyncio.open_connection("127.0.0.1", port)
-                writer.close()
-                await writer.wait_closed()
-                return proc
-            except (ConnectionRefusedError, OSError):
-                await asyncio.sleep(0.5)
-        raise RuntimeError(f"Timed out waiting for server {agent_id} at port {port}")
-
-def stop_server(proc: asyncio.subprocess.Process):
-    if not proc: return
-    try:
-        pgid = os.getpgid(proc.pid)
-        os.killpg(pgid, signal.SIGKILL)
-    except Exception:
-        try: proc.terminate()
-        except Exception: pass
+            stdout=f, stderr=f, cwd=agent_dir, env=env
+        ) as proc:
+            # Wait for server to be healthy
+            start_time = time.time()
+            healthy = False
+            while time.time() - start_time < 30:
+                if proc.returncode is not None:
+                    raise RuntimeError(f"Server for {agent_id} failed to start. See {agent_log}")
+                try:
+                    _, writer = await asyncio.open_connection("127.0.0.1", port)
+                    writer.close()
+                    await writer.wait_closed()
+                    healthy = True
+                    break
+                except (ConnectionRefusedError, OSError):
+                    await asyncio.sleep(0.5)
+            
+            if not healthy:
+                raise RuntimeError(f"Timed out waiting for server {agent_id} at port {port}")
+            
+            yield proc
