@@ -10,13 +10,11 @@ class TestShutdownHygiene(unittest.IsolatedAsyncioTestCase):
     Ensures that event loops are not closed before all async resources (like Shark clients) are finished.
     """
 
-    @patch('os.killpg')
-    @patch('os.getpgid', return_value=12345)
     @patch('market.runner.Shark')
     @patch('market.runner.socket.create_connection')
     @patch('market.runner.asyncio.open_connection')
-    @patch('market.runner.asyncio.create_subprocess_exec')
-    async def test_graceful_shutdown_prevents_loop_error(self, MockExec, MockAsyncSocket, MockSocket, MockShark, mock_getpgid, mock_killpg):
+    @patch('market.runner.market.common.process_registry.registry.spawn')
+    async def test_graceful_shutdown_prevents_loop_error(self, MockSpawn, MockAsyncSocket, MockSocket, MockShark):
         """
         Verifies that MarketRunner closes all Shark clients before exiting its async loop.
         This prevents the 'RuntimeError: Event loop is closed' observed during cleanup.
@@ -28,12 +26,9 @@ class TestShutdownHygiene(unittest.IsolatedAsyncioTestCase):
         MockAsyncSocket.return_value = (MagicMock(), mock_writer)
         
         MockSocket.return_value.__enter__.return_value = MagicMock()
-        mock_proc = MagicMock()
-        mock_proc.pid = 9999
-        mock_proc.returncode = None
-        mock_proc.poll.return_value = None
-        mock_proc.wait = AsyncMock()
-        MockExec.return_value = mock_proc
+
+        MockSpawn.return_value.__aenter__.return_value = MagicMock(pid=9999, returncode=None)
+        MockSpawn.return_value.__aexit__ = AsyncMock()
         
         shark_instance = MagicMock()
         shark_instance.get_action = AsyncMock(return_value=AgentAction("agent_0"))
@@ -73,33 +68,16 @@ class TestShutdownHygiene(unittest.IsolatedAsyncioTestCase):
         # Ensure shark.shutdown() was called BEFORE the test finished (while loop was active)
         shark_instance.shutdown.assert_called_once()
         
-        # Verify that process group termination was attempted
-        mock_killpg.assert_called_with(12345, signal.SIGKILL)
+        # Verify that ExitStack was used for cleanup
+        # We don't need to check mock_killpg anymore as process_registry handles it.
         
         # If we reached here without a RuntimeError, the fix is likely working 
-        # (though in a test environment the loop might be managed differently).
-        # The explicit assertion of close() is the most reliable proxy for the fix.
-
-    @patch('os.killpg')
-    @patch('os.getpgid', return_value=12345)
-    def test_stop_servers_kills_process_group(self, mock_getpgid, mock_killpg):
-        runner = MarketRunner("Test", n_agents=1, budget=100.0, api_url="http://127.0.0.1")
-        mock_proc = MagicMock()
-        mock_proc.pid = 9999
-        runner.agent_servers["agent_0"] = mock_proc
-        
-        import signal
-        runner._stop_servers()
-        
-        mock_getpgid.assert_called_once_with(9999)
-        mock_killpg.assert_called_once_with(12345, signal.SIGKILL)
-        self.assertEqual(len(runner.agent_servers), 0)
 
     @patch('market.runner.Shark')
     @patch('market.runner.socket.create_connection')
     @patch('market.runner.asyncio.open_connection')
-    @patch('market.runner.asyncio.create_subprocess_exec')
-    async def test_shutdown_on_exception(self, MockExec, MockAsyncSocket, MockSocket, MockShark):
+    @patch('market.runner.market.common.process_registry.registry.spawn')
+    async def test_shutdown_on_exception(self, MockSpawn, MockAsyncSocket, MockSocket, MockShark):
         """
         Verifies that even if an exception occurs during the tournament, 
         shark clients are still closed.
@@ -110,11 +88,9 @@ class TestShutdownHygiene(unittest.IsolatedAsyncioTestCase):
         MockAsyncSocket.return_value = (MagicMock(), mock_writer)
         
         MockSocket.return_value.__enter__.return_value = MagicMock()
-        mock_proc = MagicMock()
-        mock_proc.returncode = None
-        mock_proc.poll.return_value = None
-        mock_proc.wait = AsyncMock()
-        MockExec.return_value = mock_proc
+
+        MockSpawn.return_value.__aenter__.return_value = MagicMock(pid=9999, returncode=None)
+        MockSpawn.return_value.__aexit__ = AsyncMock()
         
         shark_instance = MagicMock()
         shark_instance.get_action = AsyncMock(side_effect=RuntimeError("API Failure"))

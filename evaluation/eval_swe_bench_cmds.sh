@@ -1,14 +1,23 @@
  python evaluate_swe_bench.py \
    --dataset princeton-nlp/SWE-bench_Verified \
    --repo pallets/flask \
-   --limit 3 \
+   --limit 1 \
    --agents 3 \
    --rounds 3 \
    --parallel 3 \
    --run-eval \
-   --eval-workers 2 \
-   --provider opencode \
-   --model gemini-3-flash \
+   --eval-workers 3 \
+   --dashboard
+
+ python evaluate_swe_bench_elo.py \
+   --dataset princeton-nlp/SWE-bench_Verified \
+   --repo pallets/flask \
+   --limit 1 \
+   --agents 3 \
+   --rounds 3 \
+   --parallel 3 \
+   --run-eval \
+   --eval-workers 3 \
    --dashboard
 
 python evaluate_swe_bench.py \

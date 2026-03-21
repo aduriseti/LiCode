@@ -88,7 +88,7 @@ async def async_main():
         print(orch.state.to_json())
     
     elif args.command == "run":
-        runner = MarketRunner(
+        async with MarketRunner(
             args.prompt, 
             args.agents, 
             args.budget, 
@@ -100,20 +100,18 @@ async def async_main():
             max_retries=args.max_retries,
             initial_backoff=args.initial_backoff,
             max_backoff=args.max_backoff
-        )
-        
-        try:
-            await runner.initialize(json_logs=args.json_logs)
-            await runner.run_loop(args.rounds, stream_ui=not args.json_logs, json_logs=args.json_logs)
-        finally:
-            if not args.dashboard:
-                await runner.close()
-        
-        report = runner.orchestrator.get_final_report()
-        output = {
-            "state": json.loads(runner.orchestrator.state.to_json()),
-            "report": report
-        }
+        ) as runner:
+            try:
+                await runner.initialize(json_logs=args.json_logs)
+                await runner.run_loop(args.rounds, stream_ui=not args.json_logs, json_logs=args.json_logs)
+            finally:
+                pass # close is called by __aexit__
+            
+            report = runner.orchestrator.get_final_report()
+            output = {
+                "state": json.loads(runner.orchestrator.state.to_json()),
+                "report": report
+            }
 
         try:
             report_path = os.path.join(runner.arena_dir, "TOURNAMENT_REPORT.md")

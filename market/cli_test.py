@@ -23,9 +23,10 @@ class TestCLI(unittest.TestCase):
     def test_run_command(self, MockOrch, MockRunner):
         # Setup mocks
         mock_runner_instance = MockRunner.return_value
+        mock_runner_instance.__aenter__ = AsyncMock(return_value=mock_runner_instance)
+        mock_runner_instance.__aexit__ = AsyncMock()
         
         # Use AsyncMock for coroutines
-        from unittest.mock import AsyncMock
         mock_runner_instance.run_loop = AsyncMock()
         mock_runner_instance.initialize = AsyncMock()
         mock_runner_instance.close = AsyncMock()
@@ -95,8 +96,9 @@ class TestCLI(unittest.TestCase):
     @patch('market.cli.MarketRunner')
     def test_log_level_after_subcommand(self, MockRunner):
         """Verifies that --log-level works after the subcommand (regression case)."""
-        from unittest.mock import AsyncMock
         mock_runner_instance = MockRunner.return_value
+        mock_runner_instance.__aenter__ = AsyncMock(return_value=mock_runner_instance)
+        mock_runner_instance.__aexit__ = AsyncMock()
         mock_runner_instance.run_loop = AsyncMock()
         mock_runner_instance.initialize = AsyncMock()
         mock_runner_instance.close = AsyncMock()
@@ -115,8 +117,9 @@ class TestCLI(unittest.TestCase):
     @patch('market.cli.MarketRunner')
     def test_log_level_before_subcommand(self, MockRunner):
         """Verifies that --log-level works before the subcommand (global case)."""
-        from unittest.mock import AsyncMock
         mock_runner_instance = MockRunner.return_value
+        mock_runner_instance.__aenter__ = AsyncMock(return_value=mock_runner_instance)
+        mock_runner_instance.__aexit__ = AsyncMock()
         mock_runner_instance.run_loop = AsyncMock()
         mock_runner_instance.initialize = AsyncMock()
         mock_runner_instance.close = AsyncMock()
@@ -136,6 +139,8 @@ class TestCLI(unittest.TestCase):
     def test_dashboard_url_dual_output(self, MockRunner):
         """Verifies that Dashboard URL hits both stdout (JSON) and stderr (Text) when json_logs=True."""
         mock_runner_instance = MockRunner.return_value
+        mock_runner_instance.__aenter__ = AsyncMock(return_value=mock_runner_instance)
+        mock_runner_instance.__aexit__ = AsyncMock()
         mock_runner_instance.run_loop = AsyncMock()
         mock_runner_instance.close = AsyncMock()
         

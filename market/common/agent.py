@@ -169,7 +169,8 @@ class BaseAgent:
             
             try:
                 chat_response = await chat_task
-                await asyncio.sleep(0.8) 
+                # Give some time for the stream to catch up
+                await asyncio.sleep(2.0) 
             finally:
                 consumer_task.cancel()
                 try: await consumer_task
@@ -233,9 +234,15 @@ class BaseAgent:
         await self.interrupt()
         await self.client.close()
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.shutdown()
+
 class EloAgent(BaseAgent):
     """
-    Base class for ELO agents. Handles server management and common action loop logic.
+    Base class for ELO agents. Handles server management and common action loop logic using RAII.
     """
     def __init__(self, agent_id: str, worktree_dir: str, agent_type: AgentType,
                  model: str = "gemini-3-flash", provider: str = "opencode", traces_dir: str = "/tmp",
@@ -253,6 +260,7 @@ class EloAgent(BaseAgent):
         self.process: Optional[asyncio.subprocess.Process] = None
         self.port: Optional[int] = None
         self._loop_task: Optional[asyncio.Task] = None
+        self._server_cm = None
 
     def _get_system_prompt(self) -> str:
         """Leaf classes must implement this."""
@@ -278,6 +286,17 @@ class EloAgent(BaseAgent):
         
         await self.initialize_session(self._get_system_prompt())
         self._loop_task = asyncio.create_task(self._run_loop(initial_prompt))
+
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def started(self, initial_prompt: str):
+        """Context manager that starts the agent and ensures it shuts down."""
+        try:
+            await self.start(initial_prompt)
+            yield self
+        finally:
+            await self.shutdown()
 
     async def _handle_action(self, action: str, data: Dict[str, Any]) -> str:
         """Leaf classes must implement specific action handling."""
@@ -323,11 +342,15 @@ class EloAgent(BaseAgent):
         """Stops the loop and server."""
         if self._loop_task and not self._loop_task.done():
             self._loop_task.cancel()
+            try: await self._loop_task
+            except asyncio.CancelledError: pass
+            
         await super().shutdown()
         
-        if hasattr(self, "_server_cm"):
+        if self._server_cm:
             await self._server_cm.__aexit__(None, None, None)
             self.process = None
+            self._server_cm = None
 
 class CandidateAgent(EloAgent):
     def __init__(self, agent_id: str, worktree_dir: str, model: str = "gemini-3-flash", 

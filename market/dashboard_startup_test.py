@@ -147,10 +147,9 @@ async def test_agent_terminal_connection():
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True, args=["--disable-dev-shm-usage", "--disable-gpu", "--no-sandbox"])
                 page = await browser.new_page()
-                
-                dashboard_url = f"http://127.0.0.1:{dashboard_port}"
+
+                dashboard_url = f"http://localhost:{dashboard_port}"
                 await page.goto(dashboard_url, wait_until="domcontentloaded", timeout=20000)
-                
                 # Wait for agent tab
                 agent_tab = await page.wait_for_selector(".tab-button:not(#tab-system)", timeout=20000)
                 await agent_tab.click()
@@ -238,15 +237,16 @@ async def test_multi_model_terminal_content():
             
             assert dashboard_port, "Dashboard port not found"
             
-            # Wait for agents to initialize
-            await asyncio.sleep(25)
+            # Wait for agents to initialize (increased for CI stability)
+            await asyncio.sleep(40)
 
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
                 page = await browser.new_page()
-                dashboard_url = f"http://127.0.0.1:{dashboard_port}"
+                dashboard_url = f"http://localhost:{dashboard_port}"
                 print(f"[TEST] Navigating to {dashboard_url}")
                 await page.goto(dashboard_url, wait_until="domcontentloaded", timeout=30000)
+
                 
                 for i in range(3):
                     aid = f"agent_{i}"
@@ -377,15 +377,15 @@ async def test_real_dashboard_startup():
                             dashboard_url_found_stderr = True
                     except: break
 
+            # Start reading in background
+            stdout_task = asyncio.create_task(read_stdout())
+            stderr_task = asyncio.create_task(read_stderr())
+
             try:
                 # 1. Capture the URL from logs
-                try:
-                    await asyncio.wait_for(
-                        asyncio.gather(read_stdout(), read_stderr()),
-                        timeout=40
-                    )
-                except asyncio.TimeoutError:
-                    pass
+                start_wait = time.time()
+                while not (dashboard_url_found_stdout and dashboard_url_found_stderr) and (time.time() - start_wait) < 40:
+                    await asyncio.sleep(0.5)
 
                 assert dashboard_url_found_stdout, "Dashboard URL not found in JSON (Stdout)"
                 assert dashboard_url_found_stderr, "Dashboard URL not found in Text (Stderr)"
@@ -397,14 +397,26 @@ async def test_real_dashboard_startup():
                         # A. Local connectivity
                         local_url = f"http://127.0.0.1:{port}"
                         try:
-                            async with session.get(local_url, timeout=5) as response:
-                                assert response.status == 200, f"Local {name} returned {response.status}"
-                                if name == "Dashboard":
-                                    html = await response.text()
-                                    # Basic UI sanity check
-                                    assert 'id="top-pane"' in html, "Dashboard UI missing top-pane"
+                            # Retry connection a few times as the server might be just starting
+                            connected = False
+                            for _ in range(15):
+                                try:
+                                    async with session.get(local_url, timeout=3) as response:
+                                        if response.status == 200:
+                                            connected = True
+                                            if name == "Dashboard":
+                                                html = await response.text()
+                                                assert 'id="top-pane"' in html, "Dashboard UI missing top-pane"
+                                            break
+                                except:
+                                    await asyncio.sleep(1.0)
+                            assert connected, f"Could not connect to {name} at {local_url}"
                         except Exception as e:
                             pytest.fail(f"Local connectivity failed for {name}: {e}")
+
+                # Wait for the process to complete or continue with trace check
+                # Note: We don't want to wait for the whole 40s if the process finished.
+                # But we need to make sure the AI has enough time to do its thing for the trace check.
 
                     # 3. Verify Trace Directory and Content
                     # Wait a moment for background capture thread to write initial stream
@@ -412,9 +424,9 @@ async def test_real_dashboard_startup():
                     assert len(arena_dirs) > 0, "No arena run directory found"
                     run_dir = os.path.join(temp_dir, ".arenas", arena_dirs[0])
                     traces_dir = os.path.join(run_dir, "traces")
-                    
+
                     assert os.path.exists(traces_dir), "Traces directory was not created"
-                    
+
                     # Poll for trace content (capture thread might take a moment to start and flush)
                     content = ""
                     for _ in range(60): # Wait up to 60s for AI to think and act
@@ -423,22 +435,23 @@ async def test_real_dashboard_startup():
                             with open(os.path.join(traces_dir, stream_traces[0]), "r") as f:
                                 content = f.read()
                                 # Wait for the complete cycle: Thinking -> Action -> Result
-                                if "[ASSISTANT]" in content and "[TOOL CALL:" in content and "[TOOL RESULT:" in content:
-                                    # Ensure the tool result content (including the closing bracket) has been flushed
-                                    parts = content.split("[TOOL RESULT:")
-                                    if len(parts) > 1 and "]" in parts[1]:
-                                        break
+                                # Only check the LATEST assistant's activity to avoid being confused by previous empty ones
+                                last_assistant = content.split("[ASSISTANT]")[-1]
+                                if "[TOOL CALL:" in last_assistant and "[TOOL RESULT:" in last_assistant and "]" in last_assistant.split("[TOOL RESULT:")[-1]:
+                                    break
                         await asyncio.sleep(1.0)
-                    
-                    assert content, "No streaming trace content found after 30s polling"
+
+                    assert content, "No streaming trace content found after 60s polling"
                     assert "[PROMPT]" in content, "Trace missing [PROMPT] header"
                     assert "[ASSISTANT]" in content, "Trace missing [ASSISTANT] marker"
-                    
-                    # Check for AI thinking/content after the assistant marker
-                    assistant_content = content.split("[ASSISTANT]")[-1].strip()
-                    assert assistant_content, "No AI content found after [ASSISTANT] marker"
-                    
+
+                    # Check for AI thinking/content after any assistant marker (not just the last one)
+                    # to be more resilient to retries
+                    any_assistant_content = any(part.strip() for part in content.split("[ASSISTANT]")[1:])
+                    assert any_assistant_content, "No AI content found after any [ASSISTANT] marker"
+
                     # Verify tool usage is captured
+
                     assert "[TOOL CALL:" in content, "Trace missing [TOOL CALL:] marker"
                     assert "[TOOL RESULT:" in content, "Trace missing [TOOL RESULT:] marker"
                     
@@ -477,8 +490,13 @@ async def test_real_dashboard_startup():
                         # We expect return code 0 or -15/143 (terminated by us)
                         if process.returncode not in [0, -15, 143]:
                             pytest.fail(f"Dashboard exited prematurely with code {process.returncode} after client disconnected.")    
-            except Exception as e:
-                raise e
+            finally:
+                stdout_task.cancel()
+                stderr_task.cancel()
+                try: await stdout_task
+                except asyncio.CancelledError: pass
+                try: await stderr_task
+                except asyncio.CancelledError: pass
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(120)

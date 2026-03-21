@@ -6,13 +6,15 @@ import time
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Any
 
+from contextlib import AsyncExitStack
+
 from market.common.workspace import WorkspaceManager, DEFAULT_EXCLUDE_LIST
 from market.common.oracle import CommonOracle
 
 class BaseOrchestrator(ABC):
     """
     Base class for all tournament orchestrators.
-    Handles common directory setup, workspace management, and agent/verifier tracking.
+    Handles common directory setup, workspace management, and agent/verifier tracking using RAII.
     """
     def __init__(self, prompt: str, base_dir: str, exclude_list: List[str] = DEFAULT_EXCLUDE_LIST):
         self.prompt = prompt
@@ -38,6 +40,7 @@ class BaseOrchestrator(ABC):
 
         self.workspace_mgr = WorkspaceManager(exclude_list=exclude_list)
         self.clone_lock = asyncio.Lock()
+        self._exit_stack = AsyncExitStack()
 
     @abstractmethod
     async def initialize(self):
@@ -59,13 +62,8 @@ class BaseOrchestrator(ABC):
         """Returns the ID of the winning candidate."""
         pass
 
-    @abstractmethod
-    async def shutdown(self):
-        """Cleanly shuts down all runners, agents and subprocesses."""
-        pass
-
     async def __aenter__(self):
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.shutdown()
+        await self._exit_stack.aclose()

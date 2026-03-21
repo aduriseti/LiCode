@@ -152,7 +152,8 @@ class EloOrchestrator(BaseOrchestrator):
                 traces_dir=self.traces_dir,
                 orchestrator=self
             )
-            await session.start(initial_prompt=self.prompt)
+            # RAII: The exit stack handles cleanup via started() context manager
+            await self._exit_stack.enter_async_context(session.started(initial_prompt=self.prompt))
             self.agent_sessions[agent_id] = session
             
         logging.info(f"Added candidate: {cid} (Baseline: {is_baseline})")
@@ -178,7 +179,8 @@ class EloOrchestrator(BaseOrchestrator):
             traces_dir=self.traces_dir,
             orchestrator=self
         )
-        await session.start(initial_prompt=self.prompt)
+        # RAII: The exit stack handles cleanup via started() context manager
+        await self._exit_stack.enter_async_context(session.started(initial_prompt=self.prompt))
         self.agent_sessions[agent_id] = session
         
         self._log_event("tester_added", {
@@ -519,16 +521,6 @@ class EloOrchestrator(BaseOrchestrator):
                 data={"type": InterruptType.GENERIC, "events": queue}
             )
 
-    async def shutdown(self):
-        """Shut down all agents and cleanup resources."""
-        logging.info("EloOrchestrator: Shutting down agents...")
-        for session in list(self.agent_sessions.values()):
-            try:
-                await session.shutdown()
-            except Exception as e:
-                logging.error(f"Error shutting down agent {session.agent_id}: {e}")
-        self.agent_sessions.clear()
-
     async def run_tournament(self) -> Dict[str, Any]:
         """Main tournament loop."""
         await self.initialize()
@@ -544,8 +536,6 @@ class EloOrchestrator(BaseOrchestrator):
                 
         except asyncio.CancelledError:
             pass
-        finally:
-            await self.shutdown()
                 
         return {
             "winner_id": self.get_winner_id(),

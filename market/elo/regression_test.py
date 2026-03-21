@@ -9,6 +9,22 @@ from market.elo.orchestrator import EloOrchestrator
 from market.common.oracle import ResultType
 from market.common.workspace import WorkspaceManager
 
+@pytest.fixture(autouse=True)
+def mock_agent_server():
+    """Mock start_opencode_server globally for elo regression tests."""
+    with patch('market.common.server.start_opencode_server') as mock_start:
+        # Create a mock context manager
+        mock_cm = MagicMock()
+        mock_cm.__aenter__ = AsyncMock(return_value=MagicMock(pid=9999, returncode=None))
+        mock_cm.__aexit__ = AsyncMock()
+        mock_start.return_value = mock_cm
+        
+        with patch('market.common.agent.AsyncOpencode') as mock_client:
+            mock_client_inst = mock_client.return_value
+            mock_client_inst.session.create = AsyncMock(return_value=MagicMock(id="ses_123"))
+            mock_client_inst.close = AsyncMock()
+            yield mock_start
+
 @pytest.fixture
 def base_dir(tmp_path):
     d = tmp_path / "elo_test"

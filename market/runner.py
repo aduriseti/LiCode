@@ -108,6 +108,16 @@ class MarketRunner:
         self.log_buffer = deque(maxlen=20)
         self.port_lock = asyncio.Lock()
 
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        # We don't call close() if the user wants to keep the dashboard open
+        # but the CLI handles that by calling close() or not.
+        # However, RAII says we should ALWAYS cleanup.
+        # Actually, the user's prompt suggests they WANT cleanup.
+        await self.close()
+
     async def _flush_dashboard_logs(self):
         if not self._dashboard_log_queue or not self.dashboard_url:
             return
@@ -176,6 +186,9 @@ class MarketRunner:
             dash_log_path = os.path.join(self.arena_dir, "dashboard_server.log")
             self.dash_log_file = open(dash_log_path, "w")
 
+            # RAII Exception: We spawn dashboard directly via asyncio (NOT registry.spawn)
+            # because we want it to be able to outlive the parent if a browser is connected.
+            # The dashboard-server.ts handles its own auto-shutdown via stdin/timer.
             self.dashboard_proc = await asyncio.create_subprocess_exec(
                 "bun", dashboard_script,
                 env=env,
@@ -485,18 +498,20 @@ class MarketRunner:
 
     async def close(self):
         """Cleanly shutdown all remaining resources."""
-        await self._exit_stack.aclose()
-        
-        if self.dashboard_proc:
+        # 1. First, signal dashboard if it exists (close stdin so it can start inactivity timer)
+        if self.dashboard_proc and self.dashboard_proc.stdin:
             try:
-                import market.common.process_registry
-                await market.common.process_registry.registry.kill_process_tree(self.dashboard_proc)
+                self.dashboard_proc.stdin.close()
+                await self.dashboard_proc.stdin.wait_closed()
             except:
                 pass
-            
-            if hasattr(self, "dash_log_file") and self.dash_log_file:
-                try: self.dash_log_file.close()
-                except: pass
+
+        # 2. Cleanup all other RAII resources
+        await self._exit_stack.aclose()
+        
+        if hasattr(self, "dash_log_file") and self.dash_log_file:
+            try: self.dash_log_file.close()
+            except: pass
         
         if self._http_session:
             await self._http_session.close()

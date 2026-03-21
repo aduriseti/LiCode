@@ -95,53 +95,53 @@ class IntegrationDashboardTest(unittest.IsolatedAsyncioTestCase):
         # Intercept stdout to capture JSON logs
         with patch('sys.stdout', new_callable=io.StringIO) as mock_stdout:
             # 3. Run the Tournament
-            runner = MarketRunner(
+            async with MarketRunner(
                 prompt="Implement Fibonacci",
                 n_agents=2,
                 budget=100.0,
                 api_url="http://127.0.0.1"
-            )
-            
-            await runner.initialize(json_logs=True)
-            
-            # Setup verifier files in cand_0 worktree (since agent_0 proposes it)
-            # Orchestrator uses cand_{id} derived from agent_{id}
-            cand_0_dir = os.path.join(runner.orchestrator.worktrees_dir, "cand_0")
-            v1_dir = os.path.join(cand_0_dir, "tests", "v1")
-            os.makedirs(v1_dir, exist_ok=True)
-            run_sh = os.path.join(v1_dir, "run.sh")
-            with open(run_sh, "w") as f:
-                f.write("#!/bin/bash\nexit 1")
-            os.chmod(run_sh, 0o755)
-            
-            await runner.run_loop(max_rounds=1, stream_ui=False, json_logs=True)
-            output = mock_stdout.getvalue()
-            
-            # 4. Verify JSON Logs (This is what the Dashboard plugin reads)
-            json_events = []
-            for line in output.split('\n'):
-                if line.strip():
-                    try:
-                        json_events.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
+            ) as runner:
+                
+                await runner.initialize(json_logs=True)
+                
+                # Setup verifier files in cand_0 worktree (since agent_0 proposes it)
+                # Orchestrator uses cand_{id} derived from agent_{id}
+                cand_0_dir = os.path.join(runner.orchestrator.worktrees_dir, "cand_0")
+                v1_dir = os.path.join(cand_0_dir, "tests", "v1")
+                os.makedirs(v1_dir, exist_ok=True)
+                run_sh = os.path.join(v1_dir, "run.sh")
+                with open(run_sh, "w") as f:
+                    f.write("#!/bin/bash\nexit 1")
+                os.chmod(run_sh, 0o755)
+                
+                await runner.run_loop(max_rounds=1, stream_ui=False, json_logs=True)
+                output = mock_stdout.getvalue()
+                
+                # 4. Verify JSON Logs (This is what the Dashboard plugin reads)
+                json_events = []
+                for line in output.split('\n'):
+                    if line.strip():
+                        try:
+                            json_events.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            continue
 
-            # We expect state updates, logs, etc.
-            self.assertTrue(any(e.get('type') == 'state' for e in json_events))
-            self.assertTrue(any(e.get('type') == 'log' for e in json_events))
-            self.assertTrue(any(e.get('type') == 'agent_init' for e in json_events))
-            
-            # Find a state event and check its content
-            state_event = next(e for e in json_events if e.get('type') == 'state')
-            self.assertIn('round_num', state_event)
-            self.assertIn('whale_wealth', state_event)
-            self.assertIn('assets', state_event)
-            
-            # Verify the verifier was created in the orchestrator
-            self.assertEqual(len(runner.orchestrator.state.assets), 3)
+                # We expect state updates, logs, etc.
+                self.assertTrue(any(e.get('type') == 'state' for e in json_events))
+                self.assertTrue(any(e.get('type') == 'log' for e in json_events))
+                self.assertTrue(any(e.get('type') == 'agent_init' for e in json_events))
+                
+                # Find a state event and check its content
+                state_event = next(e for e in json_events if e.get('type') == 'state')
+                self.assertIn('round_num', state_event)
+                self.assertIn('whale_wealth', state_event)
+                self.assertIn('assets', state_event)
+                
+                # Verify the verifier was created in the orchestrator
+                self.assertEqual(len(runner.orchestrator.state.assets), 3)
 
     @patch('market.common.workspace.WorkspaceManager.clone_workspace', new_callable=AsyncMock)
-    @patch('market.agents.shark.AsyncOpencode')
+    @patch('market.common.agent.AsyncOpencode')
     @patch('market.runner.MarketRunner._start_agent_server')
     @patch('market.runner.MarketRunner._find_free_port')
     async def test_recovery_from_malformed_llm_json(self, MockPort, MockServer, MockClient, MockClone):
@@ -151,17 +151,18 @@ class IntegrationDashboardTest(unittest.IsolatedAsyncioTestCase):
         MockClone.return_value = None
         MockServer.return_value = MagicMock()
         MockPort.return_value = 1234
-        
+
         # 1. Setup Mock Client with recovery responses
         mock_client_inst = MockClient.return_value
         mock_client_inst.session.create = AsyncMock(return_value=MagicMock(id="ses_123"))
         mock_client_inst.close = AsyncMock()
-    
+
         # Responses content: 
         # Shark 0: bad, then good (retry)
         # Shark 1: good
         contents = ["This is not JSON", '{"beliefs": {"cand_0": 0.5}}', '{"beliefs": {"cand_0": 0.5}}']
-        
+        content_queue = deque(contents)
+
         def create_mock_cm(content_text):
             mock_event = MagicMock(spec=EventMessagePartUpdated)
             mock_event.properties = MagicMock()
@@ -170,51 +171,53 @@ class IntegrationDashboardTest(unittest.IsolatedAsyncioTestCase):
             mock_part.session_id = "ses_123"
             mock_part.id = "p1"
             mock_event.properties.part = mock_part
-            
+
             async def mock_iter():
                 yield mock_event
-                
+
             mock_stream = MagicMock()
             mock_stream.parse = AsyncMock(return_value=mock_iter())
             mock_stream.close = AsyncMock()
             # Handle AsyncStream iteration
             mock_stream.__aiter__.side_effect = lambda: mock_iter()
-            
+
             return mock_stream
 
-        # Mock event.list()
-        mock_stream = create_mock_cm("") # Generic stream for tracing
-        mock_client_inst.event.list = AsyncMock(return_value=mock_stream)
+        async def event_list_side_effect():
+            text = content_queue.popleft() if content_queue else contents[-1]
+            return create_mock_cm(text)
+
+        mock_client_inst.event.list = AsyncMock(side_effect=event_list_side_effect)
 
         # Mock session.messages() - needs to return different things for different calls
-        msg_contents = deque(contents)
+        # (Legacy fallback used if stream is empty, but we want the stream to work)
         async def messages_side_effect(*args, **kwargs):
-            c = msg_contents.popleft() if msg_contents else contents[-1]
+            # We don't pop here as event_list already did
+            c = contents[-1] 
             mock_part = MagicMock(spec=TextPart)
             mock_part.text = c
             mock_msg = MagicMock()
             mock_msg.parts = [mock_part]
             return [mock_msg]
-        
+
         mock_client_inst.session.messages = AsyncMock(side_effect=messages_side_effect)
-        
         mock_client_inst.session.chat = AsyncMock()
 
+
         # 2. Setup Runner
-        runner = MarketRunner(prompt="Test", n_agents=2, budget=100.0)
-        
         # 3. Run round with recovery
         # Patch tenacity wait and asyncio sleep
         with patch('tenacity.nap.time.sleep'):
             with patch('asyncio.sleep', new_callable=AsyncMock):
-                await runner.initialize(json_logs=True)
-                await runner.run_loop(max_rounds=1, stream_ui=False, json_logs=True)
-        
-        # Verify 
-        self.assertEqual(runner.orchestrator.state.round_num, 1)
-        # 3 calls: Shark 0 (bad + retry good), Shark 1 (good)
-        self.assertEqual(mock_client_inst.session.chat.call_count, 3)
-        self.assertIn("agent_0", runner.orchestrator.state.agents)
+                async with MarketRunner(prompt="Test", n_agents=2, budget=100.0) as runner:
+                    await runner.initialize(json_logs=True)
+                    await runner.run_loop(max_rounds=1, stream_ui=False, json_logs=True)
+                    
+                    # Verify 
+                    self.assertEqual(runner.orchestrator.state.round_num, 1)
+                    # 3 calls: Shark 0 (bad + retry good), Shark 1 (good)
+                    self.assertEqual(mock_client_inst.session.chat.call_count, 3)
+                    self.assertIn("agent_0", runner.orchestrator.state.agents)
 
 class TestDashboardFormatting(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

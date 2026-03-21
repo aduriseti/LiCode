@@ -15,7 +15,7 @@ def test_elo_tournament_e2e():
     Verifies per-agent actions via structured JSON logs.
     """
     # Setup test parameters
-    max_duration = 180
+    max_duration = 90
     num_agents = 4 # 2 candidates, 2 testers
     test_uuid = str(time.time())
 
@@ -36,9 +36,9 @@ def test_elo_tournament_e2e():
     env = os.environ.copy()
     env["LICODE_TEST_UUID"] = test_uuid
     
-    # 1. Run Tournament with explicit timeout to prevent 10m hangs
+    # 1. Run Tournament with explicit timeout to prevent hangs
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=max_duration + 60)
+        result = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=max_duration + 120)
     except subprocess.TimeoutExpired as e:
         print("Tournament TIMEOUT EXPIRED")
         print("STDOUT so far:", e.stdout if e.stdout else "")

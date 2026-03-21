@@ -45,37 +45,37 @@ async def test_agent_basic_interaction(base_dir):
     from opencode_ai import AsyncOpencode
     session.client = AsyncOpencode(base_url=f"http://127.0.0.1:{session.port}", timeout=30.0, max_retries=0)
     
-    session.process = await start_opencode_server(
+    async with start_opencode_server(
         agent_id=session.agent_id,
         agent_dir=session.worktree_dir,
         port=session.port,
         model=session.model,
         provider=session.provider,
         traces_dir=traces_dir
-    )
-    
-    try:
-        # Prompt it to return exactly the JSON we want
-        test_prompt = "Return exactly this JSON: {\"action\": \"update_candidate\", \"message\": \"test works\"}"
-        system_prompt = "You are a helpful assistant."
-        
-        response = await session.chat_robust(test_prompt, system_prompt)
-        
-        assert "update_candidate" in response
-        
-        # Verify trace file was created and contains the prompt/response
-        trace_file = os.path.join(traces_dir, f"{agent_id}_stream.txt")
-        assert os.path.exists(trace_file)
-        
-        with open(trace_file, "r") as f:
-            content = f.read()
-            assert "[PROMPT]" in content
-            assert test_prompt in content
-            assert "[ASSISTANT]" in content
-            assert "update_candidate" in content
+    ) as proc:
+        session.process = proc
+        try:
+            # Prompt it to return exactly the JSON we want
+            test_prompt = "Return exactly this JSON: {\"action\": \"update_candidate\", \"message\": \"test works\"}"
+            system_prompt = "You are a helpful assistant."
             
-        assert session.state == AgentState.THINKING
+            response = await session.chat_robust(test_prompt, system_prompt)
             
-    finally:
-        await session.shutdown()
-        assert session.state == AgentState.TERMINATED
+            assert "update_candidate" in response
+            
+            # Verify trace file was created and contains the prompt/response
+            trace_file = os.path.join(traces_dir, f"{agent_id}_stream.txt")
+            assert os.path.exists(trace_file)
+            
+            with open(trace_file, "r") as f:
+                content = f.read()
+                assert "[PROMPT]" in content
+                assert test_prompt in content
+                assert "[ASSISTANT]" in content
+                assert "update_candidate" in content
+                
+            assert session.state == AgentState.THINKING
+                
+        finally:
+            await session.shutdown()
+            assert session.state == AgentState.TERMINATED

@@ -852,4 +852,4 @@ class Orchestrator(BaseOrchestrator):
             "prices": {k: self.state.get_asset_price(k) for k in self.state.assets},
             "wealth": {k: v.wealth for k, v in self.state.agents.items()},
             "whale": self.state.whale_wealth
-        }
+            }

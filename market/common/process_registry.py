@@ -6,7 +6,7 @@ import signal
 import asyncio
 import sys
 from contextlib import asynccontextmanager
-from typing import Set, Any, Dict, List
+from typing import Set, Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +41,13 @@ class ProcessRegistry:
     async def spawn(self, *cmd, **kwargs):
         """
         Async context manager that spawns a managed process.
-        Automatically injects tagging and ensures PGID-level cleanup on exit.
+        Automatically isolated in a new PGID and cleaned up on exit.
         """
         env = kwargs.get("env", os.environ).copy()
         current_pid = os.getpid()
         env["LICODE_MANAGED_BY"] = str(current_pid)
         kwargs["env"] = env
+        # Create a new process group for the entire tree
         kwargs["start_new_session"] = True
         
         is_shell = kwargs.pop("shell", False)
@@ -56,6 +57,13 @@ class ProcessRegistry:
         else:
             proc = await asyncio.create_subprocess_exec(*cmd, **kwargs)
         
+        # Capture PGID immediately
+        pgid = None
+        try:
+            pgid = os.getpgid(proc.pid)
+        except:
+            pass
+
         try:
             yield proc
         finally:
@@ -67,46 +75,35 @@ class ProcessRegistry:
                         try: pipe.close()
                         except Exception: pass
                 
-                await self.kill_process_tree(proc)
+                await self.kill_process_tree(proc, pgid=pgid)
             except Exception as e:
                 logger.debug(f"ProcessRegistry: cleanup failed for PID {proc.pid}: {e}")
 
-    async def kill_process_tree(self, proc: asyncio.subprocess.Process, timeout: float = 2.0):
+    async def kill_process_tree(self, proc: asyncio.subprocess.Process, pgid: Optional[int] = None, timeout: float = 2.0):
         """
-        Idiomatically and safely terminates an asyncio process and all its descendants using psutil.
+        Idiomatically and safely terminates an asyncio process and all its descendants.
+        Uses PGID-level termination for maximum reliability.
         """
         pid = proc.pid
-        
-        # Try to get the process object. If it's already dead, we still want to 
-        # sweep for orphans that might have been left behind.
+        if pgid is None:
+            try: pgid = os.getpgid(pid)
+            except: pass
+
+        # 1. Collect all processes in the group
+        processes = []
         try:
             parent = psutil.Process(pid)
-            children = parent.children(recursive=True)
-            processes = children + [parent]
+            processes = parent.children(recursive=True) + [parent]
         except psutil.NoSuchProcess:
-            # Parent is already dead, but orphans might exist.
-            # We don't have an easy way to find them without a full sweep
-            # or knowing the PGID. Since we use start_new_session=True,
-            # the PGID was the same as the original PID.
-            processes = []
-            for p in psutil.process_iter(['pid', 'name', 'environ', 'cmdline']):
+            pass
+            
+        # 2. Add other processes sharing the same PGID (re-parented orphans)
+        if pgid and pgid != os.getpgid(0):
+            for p in psutil.process_iter(['pid']):
                 try:
-                    # Check if it's an orphan from this specific spawn
-                    # We look for the tag in cmdline or environment
-                    info = p.info
-                    env = info.get('environ') or {}
-                    cmdline = info.get('cmdline') or []
-                    current_pid = os.getpid()
-                    tag_str = f"--licode-managed-by={current_pid}"
-                    
-                    if env.get("LICODE_MANAGED_BY") == str(current_pid) or any(arg == tag_str for arg in cmdline):
-                        # This looks like it belonged to us.
-                        # However, we only want to kill it if it's related to THIS specific spawn?
-                        # Actually, kill_process_tree is called on context exit.
-                        # It's safer to just rely on cleanup_all for orphans if the parent is already gone,
-                        # UNLESS we can identify this specific child.
-                        pass
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    if os.getpgid(p.pid) == pgid and p not in processes:
+                        processes.append(p)
+                except (psutil.NoSuchProcess, psutil.AccessDenied, ProcessLookupError):
                     pass
 
         # If we found processes, kill them
@@ -122,7 +119,13 @@ class ProcessRegistry:
             # 2. Wait for graceful exit
             _, alive = psutil.wait_procs(processes, timeout=timeout)
 
-            # 3. Hard kill survivors
+            # 3. Hard kill survivors (and the whole group)
+            if pgid and pgid != os.getpgid(0):
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            
             for p in alive:
                 try:
                     if p.pid > 100:
@@ -130,7 +133,7 @@ class ProcessRegistry:
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
 
-        # 4. Final attempt to reap the asyncio process
+        # 4. Final attempt to reap the asyncio handle
         try:
             if hasattr(proc, 'wait'):
                 await asyncio.wait_for(proc.wait(), timeout=1.0)
